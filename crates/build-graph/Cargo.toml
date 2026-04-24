@@ -1,0 +1,15 @@
+[package]
+name = "build-graph"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+petgraph = "0.6"
+thiserror = "2"
+workspace-tools = { path = "../workspace-tools" }
