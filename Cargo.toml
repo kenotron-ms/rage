@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/workspace-tools",
     "crates/build-graph",
+    "crates/pipeline-config",
+    "crates/cli",
 ]
 
 [workspace.package]
