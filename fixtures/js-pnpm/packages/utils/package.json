@@ -1,0 +1,7 @@
+{
+  "name": "@fixture/utils",
+  "version": "1.0.0",
+  "dependencies": {
+    "@fixture/core": "workspace:*"
+  }
+}

@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/workspace-tools",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/microsoft/rage"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

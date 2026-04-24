@@ -1,0 +1,7 @@
+{
+  "name": "@npm-fixture/server",
+  "version": "1.0.0",
+  "dependencies": {
+    "@npm-fixture/shared": "1.0.0"
+  }
+}

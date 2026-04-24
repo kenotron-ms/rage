@@ -1,0 +1,7 @@
+{
+  "name": "@yarn-fixture/lib",
+  "version": "1.0.0",
+  "dependencies": {
+    "@yarn-fixture/core": "1.0.0"
+  }
+}
