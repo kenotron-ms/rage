@@ -80,4 +80,22 @@ mod tests {
         // Dependency resolution happens later in graph.rs
         assert!(pkg.dependencies.is_empty());
     }
+
+    #[test]
+    fn errors_on_missing_directory() {
+        let dir = fixtures_dir().join("js-pnpm/packages/nonexistent");
+        let err = Package::from_manifest_dir(dir).unwrap_err();
+        assert!(err.to_string().contains("reading"), "expected read error, got: {err}");
+    }
+
+    #[test]
+    fn errors_on_missing_name_field() {
+        // Write a temp package.json without a name field
+        let tmp = std::env::temp_dir().join("rage-test-pkg");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("package.json"), r#"{"version":"1.0.0"}"#).unwrap();
+        let err = Package::from_manifest_dir(tmp.clone()).unwrap_err();
+        assert!(err.to_string().contains("missing a `name` field"), "got: {err}");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }
