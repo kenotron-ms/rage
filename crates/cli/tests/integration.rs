@@ -100,3 +100,30 @@ fn graph_pnpm_dot_contains_expected_nodes() {
     assert!(stdout.contains("\"@fixture/app\""), "dot:\n{stdout}");
     assert!(stdout.contains("\"@fixture/core\""), "dot:\n{stdout}");
 }
+
+// ── --workspace flag tests ────────────────────────────────────────────────────
+
+#[test]
+fn graph_via_workspace_flag() {
+    let output = rage()
+        .args(["graph", "--workspace"])
+        .arg(fixtures_dir().join("js-yarn"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.trim(), "Found 3 packages (yarn workspace)");
+}
+
+#[test]
+fn positional_overrides_workspace_flag() {
+    let output = rage()
+        .args(["graph", "--workspace"])
+        .arg(fixtures_dir().join("js-npm"))   // npm = 3 pkgs via flag
+        .arg(fixtures_dir().join("js-pnpm"))  // pnpm = 4 pkgs via positional (wins)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.trim(), "Found 4 packages (pnpm workspace)");
+}
