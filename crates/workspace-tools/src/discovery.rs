@@ -58,12 +58,20 @@ fn read_package_globs(root: &Path, pm: PackageManager) -> Result<Vec<String>> {
 
             let globs: Vec<String> = if let Some(arr) = ws.as_array() {
                 arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
+                    .map(|v| {
+                        v.as_str()
+                            .map(String::from)
+                            .ok_or_else(|| anyhow!("workspaces entries must be strings, got: {v}"))
+                    })
+                    .collect::<Result<Vec<String>>>()?
             } else if let Some(pkgs) = ws.get("packages").and_then(|v| v.as_array()) {
                 pkgs.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
+                    .map(|v| {
+                        v.as_str()
+                            .map(String::from)
+                            .ok_or_else(|| anyhow!("workspaces entries must be strings, got: {v}"))
+                    })
+                    .collect::<Result<Vec<String>>>()?
             } else {
                 return Err(anyhow!(
                     "`workspaces` field must be a string array or {{ packages: string[] }}"
@@ -83,7 +91,10 @@ fn resolve_glob(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
     for entry in glob::glob(pattern_str).with_context(|| format!("bad glob {pattern}"))? {
         let path = entry.with_context(|| format!("glob entry error for {pattern}"))?;
         if path.is_dir() {
-            out.push(path.canonicalize().unwrap_or(path));
+            out.push(
+                path.canonicalize()
+                    .with_context(|| format!("canonicalizing {}", path.display()))?,
+            );
         }
     }
     Ok(out)
@@ -157,5 +168,49 @@ mod tests {
     fn errors_when_not_a_workspace() {
         let dir = PathBuf::from("/tmp");
         assert!(discover_packages(&dir).is_err());
+    }
+
+    /// Non-string entries in a flat `workspaces` array must produce an error,
+    /// not be silently dropped (Fix 2 – direct array form).
+    #[test]
+    fn errors_on_non_string_workspace_entry_array() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("rage_ws_test_nonstring_array");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"root","workspaces":[42]}"#,
+        )
+        .unwrap();
+        let err = discover_packages(&dir).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("workspaces entries must be strings"),
+            "expected error about non-string entries, got: {msg}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Non-string entries inside `workspaces.packages` must also produce an
+    /// error (Fix 2 – nested `packages` form).
+    #[test]
+    fn errors_on_non_string_workspace_packages_entry() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("rage_ws_test_nonstring_pkgs");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"root","workspaces":{"packages":[null]}}"#,
+        )
+        .unwrap();
+        let err = discover_packages(&dir).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("workspaces entries must be strings"),
+            "expected error about non-string entries, got: {msg}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
