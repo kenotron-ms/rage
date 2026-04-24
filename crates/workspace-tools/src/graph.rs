@@ -15,13 +15,18 @@ pub fn build_package_graph(packages: Vec<Package>) -> Result<Vec<Package>> {
     for mut pkg in packages {
         let manifest_path = pkg.path.join("package.json");
 
-        // Tolerate missing manifests — in-memory test packages and packages
-        // without a package.json on disk have no deps to resolve.
         let raw = match std::fs::read_to_string(&manifest_path) {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // No manifest on disk: treat as no deps.
+                // Real discovery paths always have a manifest; in-memory test
+                // packages may not.
                 out.push(pkg);
                 continue;
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e)
+                    .context(format!("reading {}", manifest_path.display())));
             }
         };
 
@@ -63,26 +68,20 @@ mod tests {
         pkgs.iter().find(|p| p.name == name).expect("package not found")
     }
 
-    fn sorted_deps(pkg: &Package) -> Vec<String> {
-        let mut d = pkg.dependencies.clone();
-        d.sort();
-        d
-    }
-
     #[test]
     fn resolves_pnpm_workspace_deps() {
         let dir = fixtures_dir().join("js-pnpm");
         let raw = discover_packages(&dir).unwrap();
         let resolved = build_package_graph(raw).unwrap();
 
-        assert_eq!(sorted_deps(get(&resolved, "@fixture/core")), Vec::<String>::new());
-        assert_eq!(sorted_deps(get(&resolved, "@fixture/utils")), vec!["@fixture/core"]);
+        assert!(get(&resolved, "@fixture/core").dependencies.is_empty());
+        assert_eq!(get(&resolved, "@fixture/utils").dependencies, vec!["@fixture/core"]);
         assert_eq!(
-            sorted_deps(get(&resolved, "@fixture/ui")),
+            get(&resolved, "@fixture/ui").dependencies,
             vec!["@fixture/core", "@fixture/utils"]
         );
         assert_eq!(
-            sorted_deps(get(&resolved, "@fixture/app")),
+            get(&resolved, "@fixture/app").dependencies,
             vec!["@fixture/core", "@fixture/ui"]
         );
     }
@@ -91,13 +90,13 @@ mod tests {
     fn resolves_yarn_workspace_deps() {
         let dir = fixtures_dir().join("js-yarn");
         let resolved = build_package_graph(discover_packages(&dir).unwrap()).unwrap();
-        assert_eq!(sorted_deps(get(&resolved, "@yarn-fixture/core")), Vec::<String>::new());
+        assert!(get(&resolved, "@yarn-fixture/core").dependencies.is_empty());
         assert_eq!(
-            sorted_deps(get(&resolved, "@yarn-fixture/lib")),
+            get(&resolved, "@yarn-fixture/lib").dependencies,
             vec!["@yarn-fixture/core"]
         );
         assert_eq!(
-            sorted_deps(get(&resolved, "@yarn-fixture/app")),
+            get(&resolved, "@yarn-fixture/app").dependencies,
             vec!["@yarn-fixture/core", "@yarn-fixture/lib"]
         );
     }
@@ -107,14 +106,77 @@ mod tests {
         let dir = fixtures_dir().join("js-npm");
         let resolved = build_package_graph(discover_packages(&dir).unwrap()).unwrap();
         assert_eq!(
-            sorted_deps(get(&resolved, "@npm-fixture/server")),
+            get(&resolved, "@npm-fixture/server").dependencies,
             vec!["@npm-fixture/shared"]
         );
         assert_eq!(
-            sorted_deps(get(&resolved, "@npm-fixture/client")),
+            get(&resolved, "@npm-fixture/client").dependencies,
             vec!["@npm-fixture/shared"]
         );
         assert!(get(&resolved, "@npm-fixture/shared").dependencies.is_empty());
+    }
+
+    #[test]
+    fn dependencies_are_returned_in_sorted_order() {
+        let dir = fixtures_dir().join("js-pnpm");
+        let raw = discover_packages(&dir).unwrap();
+        let resolved = build_package_graph(raw).unwrap();
+        for pkg in &resolved {
+            let mut expected = pkg.dependencies.clone();
+            expected.sort();
+            assert_eq!(
+                pkg.dependencies, expected,
+                "package {} deps not sorted: {:?}",
+                pkg.name, pkg.dependencies
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_dev_and_peer_dependencies() {
+        use std::fs;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // @ws/a has @ws/b as a devDependency
+        let a_dir = root.join("a");
+        fs::create_dir_all(&a_dir).unwrap();
+        fs::write(
+            a_dir.join("package.json"),
+            r#"{"name":"@ws/a","version":"1.0.0","devDependencies":{"@ws/b":"1.0.0"}}"#,
+        )
+        .unwrap();
+
+        // @ws/b has @ws/a as a peerDependency
+        let b_dir = root.join("b");
+        fs::create_dir_all(&b_dir).unwrap();
+        fs::write(
+            b_dir.join("package.json"),
+            r#"{"name":"@ws/b","version":"1.0.0","peerDependencies":{"@ws/a":"1.0.0"}}"#,
+        )
+        .unwrap();
+
+        let pkgs = vec![
+            Package {
+                name: "@ws/a".into(),
+                version: "1.0.0".into(),
+                path: a_dir,
+                dependencies: Vec::new(),
+            },
+            Package {
+                name: "@ws/b".into(),
+                version: "1.0.0".into(),
+                path: b_dir,
+                dependencies: Vec::new(),
+            },
+        ];
+
+        let resolved = build_package_graph(pkgs).unwrap();
+        let a = resolved.iter().find(|p| p.name == "@ws/a").unwrap();
+        let b = resolved.iter().find(|p| p.name == "@ws/b").unwrap();
+
+        assert_eq!(a.dependencies, vec!["@ws/b"], "devDependency should be resolved");
+        assert_eq!(b.dependencies, vec!["@ws/a"], "peerDependency should be resolved");
     }
 
     #[test]
