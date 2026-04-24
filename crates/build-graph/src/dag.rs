@@ -55,25 +55,9 @@ pub fn build_dag(packages: Vec<Package>) -> Result<WorkspaceDag, DagError> {
         pkg_map.insert(pkg.name.clone(), pkg);
     }
 
-    if petgraph::algo::is_cyclic_directed(&graph) {
-        let offender = graph
-            .node_indices()
-            .find(|&n| {
-                let mut dfs = petgraph::visit::Dfs::new(&graph, n);
-                let mut visited_self = false;
-                while let Some(m) = dfs.next(&graph) {
-                    if m == n && visited_self {
-                        return true;
-                    }
-                    if m == n {
-                        visited_self = true;
-                    }
-                }
-                false
-            })
-            .map(|i| graph[i].clone())
-            .unwrap_or_else(|| "<unknown>".to_string());
-        return Err(DagError::Cycle(offender));
+    // Detect cycles — toposort returns the offending node on failure
+    if let Err(cycle) = petgraph::algo::toposort(&graph, None) {
+        return Err(DagError::Cycle(graph[cycle.node_id()].clone()));
     }
 
     Ok(WorkspaceDag { graph, nodes, packages: pkg_map })
@@ -125,6 +109,7 @@ mod tests {
         // a -> b -> a
         let pkgs = vec![mk("a", &["b"]), mk("b", &["a"])];
         let err = build_dag(pkgs).unwrap_err();
-        assert!(matches!(err, DagError::Cycle(_)));
+        let DagError::Cycle(name) = err else { panic!("expected Cycle, got: {err:?}") };
+        assert!(name == "a" || name == "b", "cycle node name was: {name}");
     }
 }
