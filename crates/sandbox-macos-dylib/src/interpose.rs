@@ -1,5 +1,5 @@
 use crate::client::send_event;
-use libc::{c_int, c_void, mode_t};
+use libc::{c_char, c_int, c_void, mode_t};
 use std::ffi::CStr;
 
 /// A Mach-O `__DATA,__interpose` section entry.
@@ -57,4 +57,88 @@ unsafe extern "C" fn rage_open(path: *const libc::c_char, flags: c_int, mode: mo
 static INTERPOSE_OPEN: InterposeEntry = InterposeEntry {
     replacement: rage_open as *const c_void,
     original: libc::open as *const c_void,
+};
+
+/// Interposed replacement for libc's `openat(2)`.
+///
+/// # Safety
+///
+/// `path` may be null; we guard with an explicit null-check.  When non-null it
+/// must point to a valid, NUL-terminated C string — the contract imposed by the
+/// POSIX `openat` ABI.
+unsafe extern "C" fn rage_openat(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: mode_t,
+) -> c_int {
+    if !path.is_null() {
+        if let Ok(s) = CStr::from_ptr(path).to_str() {
+            let is_write = (flags & libc::O_WRONLY) != 0
+                || (flags & libc::O_RDWR) != 0
+                || (flags & libc::O_CREAT) != 0
+                || (flags & libc::O_TRUNC) != 0;
+
+            send_event(if is_write { "write" } else { "read" }, s);
+        }
+    }
+
+    libc::openat(dirfd, path, flags, mode as libc::c_uint)
+}
+
+#[link_section = "__DATA,__interpose"]
+#[used]
+static INTERPOSE_OPENAT: InterposeEntry = InterposeEntry {
+    replacement: rage_openat as *const c_void,
+    original: libc::openat as *const c_void,
+};
+
+/// Interposed replacement for libc's `stat(2)`.
+///
+/// # Safety
+///
+/// `path` may be null; we guard with an explicit null-check.  When non-null it
+/// must point to a valid, NUL-terminated C string.  `buf` must be a valid
+/// writable pointer to a `libc::stat` — this is the contract imposed by the
+/// POSIX `stat` ABI.
+unsafe extern "C" fn rage_stat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    if !path.is_null() {
+        if let Ok(s) = CStr::from_ptr(path).to_str() {
+            send_event("read", s);
+        }
+    }
+
+    libc::stat(path, buf)
+}
+
+#[link_section = "__DATA,__interpose"]
+#[used]
+static INTERPOSE_STAT: InterposeEntry = InterposeEntry {
+    replacement: rage_stat as *const c_void,
+    original: libc::stat as *const c_void,
+};
+
+/// Interposed replacement for libc's `lstat(2)`.
+///
+/// # Safety
+///
+/// `path` may be null; we guard with an explicit null-check.  When non-null it
+/// must point to a valid, NUL-terminated C string.  `buf` must be a valid
+/// writable pointer to a `libc::stat` — this is the contract imposed by the
+/// POSIX `lstat` ABI.
+unsafe extern "C" fn rage_lstat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    if !path.is_null() {
+        if let Ok(s) = CStr::from_ptr(path).to_str() {
+            send_event("read", s);
+        }
+    }
+
+    libc::lstat(path, buf)
+}
+
+#[link_section = "__DATA,__interpose"]
+#[used]
+static INTERPOSE_LSTAT: InterposeEntry = InterposeEntry {
+    replacement: rage_lstat as *const c_void,
+    original: libc::lstat as *const c_void,
 };

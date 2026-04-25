@@ -89,6 +89,32 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     #[ignore]
+    async fn stat_interposed_records_read() {
+        let dylib = dylib_path().expect("dylib_path() should succeed");
+        if !dylib.exists() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "-p", "sandbox-macos-dylib"])
+                .status()
+                .expect("failed to run cargo build -p sandbox-macos-dylib");
+            assert!(status.success(), "cargo build -p sandbox-macos-dylib failed");
+        }
+
+        let result = run_sandboxed("stat /etc/passwd > /dev/null", Path::new("/tmp"), &[])
+            .await
+            .unwrap();
+
+        assert!(
+            result.path_set.reads.iter().any(|p| p
+                .to_string_lossy()
+                .ends_with("passwd")),
+            "expected a path ending with 'passwd' in reads, got: {:?}",
+            result.path_set.reads
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore]
     async fn open_interposed_records_read() {
         let dylib = dylib_path().expect("dylib_path() should succeed");
         if !dylib.exists() {
