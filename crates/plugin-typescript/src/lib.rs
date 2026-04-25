@@ -92,6 +92,10 @@ impl EcosystemPlugin for TypeScriptPlugin {
                 path_pattern: "/private/var/folders/**".to_string(),
                 reason: "macOS temp dirs (V8 / node cache)".to_string(),
             },
+            AllowlistEntry {
+                path_pattern: "**/node_modules/.bin/**".to_string(),
+                reason: "locally-installed tool binaries (tsc, eslint, jest, etc.)".to_string(),
+            },
         ]
     }
 
