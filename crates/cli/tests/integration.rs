@@ -297,7 +297,7 @@ fn since_and_affected_are_mutually_exclusive() {
     // Using both --since and --affected together should exit nonzero and
     // print a message containing "mutually exclusive".
     let output = rage()
-        .args(["run", "build", "--since", "HEAD", "--affected"])
+        .args(["run", "build", "--since", "HEAD~1", "--affected"])
         .arg(fixtures_dir().join("js-pnpm"))
         .output()
         .unwrap();
