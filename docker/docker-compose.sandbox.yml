@@ -1,0 +1,38 @@
+version: '3.8'
+# Docker Compose for rage Linux eBPF sandbox integration tests.
+#
+# The sandbox tests require:
+#   - Linux kernel (eBPF tracepoints)
+#   - Privileged container (eBPF program loading requires CAP_SYS_ADMIN)
+#   - Nightly Rust + bpf toolchain (compiled by Dockerfile.sandbox-test)
+#
+# Usage:
+#   # One-shot: build + run + exit
+#   docker compose -f docker/docker-compose.sandbox.yml run --rm sandbox-test
+#
+#   # Interactive shell (for debugging):
+#   docker compose -f docker/docker-compose.sandbox.yml run --rm sandbox-test bash
+#
+# The test command passes --include-ignored so the Linux-only eBPF tests
+# (marked #[ignore = "requires Linux + eBPF privileges"]) execute.
+
+services:
+  sandbox-test:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sandbox-test
+    # eBPF program loading requires elevated privileges inside the container.
+    privileged: true
+    volumes:
+      # Mount workspace to avoid rebuilding inside image each run.
+      # On CI, remove the volume and let the Dockerfile COPY handle it.
+      - .:/rage
+    working_dir: /rage
+    command:
+      - cargo
+      - test
+      - -p
+      - sandbox-linux-ebpf
+      - --
+      - --include-ignored
+      - --nocapture
