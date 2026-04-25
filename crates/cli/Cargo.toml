@@ -25,6 +25,7 @@ scoping = { path = "../scoping" }
 tokio = { version = "1", features = ["full"] }
 daemon = { path = "../daemon" }
 serde_json = "1"
+webbrowser = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -687,6 +687,23 @@ fn since_with_no_changes_runs_nothing() {
     );
 }
 
+// ── rage open tests ──────────────────────────────────────────────────────────
+
+#[test]
+fn rage_open_errors_when_no_daemon() {
+    use std::process::Command;
+    let workspace = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_rage");
+    let out = Command::new(bin)
+        .args(["open"])
+        .arg(workspace.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "open should fail when no daemon");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no daemon"), "expected 'no daemon' message, got: {err}");
+}
+
 // ── daemon / dev / status integration tests ──────────────────────────────────
 
 /// Verify that `rage dev build <workspace>` spawns a detached daemon, sends

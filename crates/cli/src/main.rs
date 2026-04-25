@@ -86,6 +86,13 @@ enum Command {
         /// Positional workspace path (overrides --workspace).
         workspace_pos: Option<PathBuf>,
     },
+
+    /// Open the rage status page in the default browser.
+    Open {
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        workspace_pos: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -132,6 +139,13 @@ async fn main() -> Result<()> {
         } => {
             let root = resolve_workspace(workspace_pos, workspace);
             cmd_status(&root).await
+        }
+        Command::Open {
+            workspace,
+            workspace_pos,
+        } => {
+            let root = resolve_workspace(workspace_pos, workspace);
+            cmd_open(&root)
         }
     }
 }
@@ -211,6 +225,17 @@ async fn cmd_status(root: &Path) -> Result<()> {
     if let Ok(Some(resp)) = lines.next_line().await {
         println!("{resp}");
     }
+    Ok(())
+}
+
+fn cmd_open(root: &Path) -> Result<()> {
+    let disc = daemon::discovery::read_discovery(root)?;
+    let Some(d) = disc else {
+        anyhow::bail!("no daemon running for {} — run `rage dev` first", root.display());
+    };
+    let url = format!("http://127.0.0.1:{}/", d.http_port);
+    eprintln!("opening {url}");
+    webbrowser::open(&url).context("opening browser")?;
     Ok(())
 }
 
