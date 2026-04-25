@@ -468,6 +468,7 @@ dependencies = [
  "clap",
  "pipeline-config",
  "scheduler",
+ "scoping",
  "tempfile",
  "tokio",
  "workspace-tools",

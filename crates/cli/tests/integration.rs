@@ -178,6 +178,25 @@ fn run_unknown_script_exits_nonzero() {
     );
 }
 
+// ── --since flag tests ──────────────────────────────────────────────
+
+#[test]
+fn since_flag_is_recognized() {
+    // Before --since is implemented, clap rejects unknown flags with
+    // "unexpected argument". After it is wired in, that message must
+    // not appear regardless of whether git diff itself succeeds or fails.
+    let output = rage()
+        .args(["run", "build", "--since", "HEAD"])
+        .arg(fixtures_dir().join("js-pnpm"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--since should be a recognized flag, got stderr:\n{stderr}"
+    );
+}
+
 // ── cache integration tests ──────────────────────────────────────────────
 
 #[test]
