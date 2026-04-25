@@ -57,7 +57,28 @@ impl EcosystemPlugin for TypeScriptPlugin {
     }
 
     fn toolchain_allowlist(&self) -> Vec<AllowlistEntry> {
-        Vec::new()
+        vec![
+            AllowlistEntry {
+                path_pattern: "**/node_modules/typescript/**".to_string(),
+                reason: "tsc compiler internals".to_string(),
+            },
+            AllowlistEntry {
+                path_pattern: "**/node_modules/.pnpm/typescript@*/**".to_string(),
+                reason: "tsc compiler internals (pnpm)".to_string(),
+            },
+            AllowlistEntry {
+                path_pattern: "/usr/lib/**".to_string(),
+                reason: "system libraries".to_string(),
+            },
+            AllowlistEntry {
+                path_pattern: "/Library/**".to_string(),
+                reason: "macOS frameworks".to_string(),
+            },
+            AllowlistEntry {
+                path_pattern: "/private/var/folders/**".to_string(),
+                reason: "macOS temp dirs (V8 / node cache)".to_string(),
+            },
+        ]
     }
 
     fn declared_input_globs(&self, _task_name: &str, _config: &PluginConfig) -> Vec<String> {
@@ -134,9 +155,11 @@ mod tests {
     }
 
     #[test]
-    fn toolchain_allowlist_returns_empty() {
+    fn allowlist_covers_typescript_internals() {
         let p = TypeScriptPlugin::new();
-        assert!(p.toolchain_allowlist().is_empty());
+        let allow = p.toolchain_allowlist();
+        assert!(allow.iter().any(|e| e.path_pattern.contains("typescript")));
+        assert!(allow.iter().all(|e| !e.reason.is_empty()));
     }
 
     #[test]
