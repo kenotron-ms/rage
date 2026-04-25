@@ -27,6 +27,7 @@ build-graph = { path = "../build-graph" }
 workspace-tools = { path = "../workspace-tools" }
 scheduler = { path = "../scheduler" }
 pipeline-config = { path = "../pipeline-config" }
+plugin = { path = "../plugin" }
 
 [dev-dependencies]
 tempfile = "3"

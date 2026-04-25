@@ -19,7 +19,9 @@ pub struct PathsetStore {
 
 impl PathsetStore {
     pub fn new(dir: &Path) -> Self {
-        Self { dir: dir.to_path_buf() }
+        Self {
+            dir: dir.to_path_buf(),
+        }
     }
 
     /// All pathsets recorded under `weak_fp`. Empty if none.
@@ -44,8 +46,7 @@ impl PathsetStore {
         existing.push(ps);
         let json = serde_json::to_string_pretty(&existing).context("serializing pathsets")?;
         let path = self.path_for(weak_fp);
-        std::fs::write(&path, json)
-            .with_context(|| format!("writing {}", path.display()))?;
+        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 

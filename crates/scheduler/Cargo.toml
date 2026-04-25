@@ -14,12 +14,15 @@
     build-graph = { path = "../build-graph" }
     cache = { path = "../cache" }
     pipeline-config = { path = "../pipeline-config" }
+    plugin = { path = "../plugin" }
     sandbox = { path = "../sandbox" }
     tokio = { version = "1", features = ["full"] }
     thiserror = "2"
     anyhow = "1"
     serde_json = "1"
+    blake3 = "1"
 
     [dev-dependencies]
     tempfile = "3"
-    
+    plugin = { path = "../plugin" }
+    plugin-typescript = { path = "../plugin-typescript" }

@@ -143,10 +143,14 @@ mod tests {
     fn parses_cache_section() {
         let d = tmpdir();
         let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
-        f.write_all(br#"{"cache": {"backend": "local", "dir": "/tmp/rage-cache"}}"#).unwrap();
+        f.write_all(br#"{"cache": {"backend": "local", "dir": "/tmp/rage-cache"}}"#)
+            .unwrap();
         let cfg = load_config(&d).unwrap().unwrap();
         assert_eq!(cfg.cache.backend, "local");
-        assert_eq!(cfg.cache.dir, Some(std::path::PathBuf::from("/tmp/rage-cache")));
+        assert_eq!(
+            cfg.cache.dir,
+            Some(std::path::PathBuf::from("/tmp/rage-cache"))
+        );
     }
 
     #[test]

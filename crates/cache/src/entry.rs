@@ -66,7 +66,10 @@ mod tests {
             exit_code: 0,
             elapsed_ms: 10,
             cached_at: 0,
-            pathset_reads: vec![std::path::PathBuf::from("/a"), std::path::PathBuf::from("/b")],
+            pathset_reads: vec![
+                std::path::PathBuf::from("/a"),
+                std::path::PathBuf::from("/b"),
+            ],
         };
         let s = serde_json::to_string(&e).unwrap();
         let back: CacheEntry = serde_json::from_str(&s).unwrap();
@@ -77,7 +80,8 @@ mod tests {
     fn entry_back_compat_no_pathset_reads_in_old_json() {
         // Existing JSON files written by the single-phase cache lack
         // pathset_reads. Decoding must default the field to an empty vec.
-        let old = r#"{"fingerprint":"fp","command":"cmd","exit_code":0,"elapsed_ms":1,"cached_at":0}"#;
+        let old =
+            r#"{"fingerprint":"fp","command":"cmd","exit_code":0,"elapsed_ms":1,"cached_at":0}"#;
         let e: CacheEntry = serde_json::from_str(old).unwrap();
         assert!(e.pathset_reads.is_empty());
     }

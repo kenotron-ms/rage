@@ -701,7 +701,10 @@ fn rage_open_errors_when_no_daemon() {
         .unwrap();
     assert!(!out.status.success(), "open should fail when no daemon");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("no daemon"), "expected 'no daemon' message, got: {err}");
+    assert!(
+        err.contains("no daemon"),
+        "expected 'no daemon' message, got: {err}"
+    );
 }
 
 // ── daemon / dev / status integration tests ──────────────────────────────────
@@ -794,4 +797,164 @@ fn rage_dev_starts_daemon_and_returns_quickly() {
     }
     // Give the daemon a moment to exit
     std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+// ── root install task tests ─────────────────────────────────────────────────
+
+/// Stage a minimal pnpm workspace inside `dir`:
+/// - workspace package.json
+/// - pnpm-workspace.yaml referencing packages/*
+/// - pnpm-lock.yaml so the TypeScript plugin detects pnpm
+/// - one package `@fixture/install-test` with a `build` script
+fn stage_pnpm_workspace(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("package.json"),
+        br#"{"name":"root","private":true,"version":"0.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("pnpm-workspace.yaml"),
+        b"packages:\n  - 'packages/*'\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("pnpm-lock.yaml"), b"lockfileVersion: 6\n").unwrap();
+    let pkg = dir.join("packages").join("install-test");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        br#"{"name":"@fixture/install-test","version":"1.0.0","scripts":{"build":"echo BUILT-PACKAGE"}}"#,
+    )
+    .unwrap();
+}
+
+/// Write a fake `pnpm` shim to `bin_dir` that records its argv to
+/// `bin_dir/pnpm.log` and exits 0. Returns `bin_dir` for PATH prepending.
+fn install_pnpm_shim(bin_dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(bin_dir).unwrap();
+    let shim = bin_dir.join("pnpm");
+    let log = bin_dir.join("pnpm.log");
+    let script = format!(
+        "#!/bin/sh\necho FAKE-PNPM \"$@\" >> '{}'\necho INSTALL-RAN\nexit 0\n",
+        log.display()
+    );
+    std::fs::write(&shim, script).unwrap();
+    let mut perm = std::fs::metadata(&shim).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&shim, perm).unwrap();
+    bin_dir.to_path_buf()
+}
+
+#[test]
+fn run_pnpm_install_runs_before_package_builds() {
+    let work = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    stage_pnpm_workspace(work.path());
+    install_pnpm_shim(bin.path());
+
+    // Prepend shim dir to PATH so our fake `pnpm` is found first.
+    let existing_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", bin.path().display(), existing_path);
+
+    // --no-cache exercises the legacy single-phase runner branch
+    // (the two-phase branch is covered by the next test).
+    let output = rage()
+        .arg("run")
+        .arg("build")
+        .arg(work.path())
+        .arg("--no-cache")
+        .env("PATH", &new_path)
+        .output()
+        .expect("failed to run rage");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "rage exited non-zero.\nstderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+
+    // Ordering: workspace#install must appear before any package task.
+    let install_idx = stderr
+        .find("workspace#install")
+        .unwrap_or_else(|| panic!("workspace#install missing from stderr:\n{stderr}"));
+    let package_idx = stderr
+        .find("@fixture/install-test#build")
+        .unwrap_or_else(|| panic!("package task missing from stderr:\n{stderr}"));
+    assert!(
+        install_idx < package_idx,
+        "workspace#install must precede package task. stderr:\n{stderr}"
+    );
+
+    // Shim was actually invoked.
+    let log = std::fs::read_to_string(bin.path().join("pnpm.log")).unwrap();
+    assert!(log.contains("FAKE-PNPM install"), "shim log: {log}");
+}
+
+#[test]
+fn run_pnpm_install_is_cached_on_second_run() {
+    let work = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    stage_pnpm_workspace(work.path());
+    install_pnpm_shim(bin.path());
+
+    let existing_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", bin.path().display(), existing_path);
+
+    // HOME override so the default cache dir lives in our tempdir.
+    // (cmd_run honours $HOME/.rage/cache when rage.json doesn't pin a dir.)
+    let home = cache.path();
+
+    // Run #1 - install runs.
+    let out1 = rage()
+        .arg("run")
+        .arg("build")
+        .arg(work.path())
+        .env("PATH", &new_path)
+        .env("HOME", home)
+        .output()
+        .expect("rage run #1");
+    assert!(
+        out1.status.success(),
+        "first run failed:\nstderr:\n{}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let stderr1 = String::from_utf8(out1.stderr).unwrap();
+    assert!(
+        stderr1.contains("workspace#install starting"),
+        "first run should execute install, got:\n{stderr1}"
+    );
+
+    // Run #2 - install must be cached.
+    let out2 = rage()
+        .arg("run")
+        .arg("build")
+        .arg(work.path())
+        .env("PATH", &new_path)
+        .env("HOME", home)
+        .output()
+        .expect("rage run #2");
+    assert!(
+        out2.status.success(),
+        "second run failed:\nstderr:\n{}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let stderr2 = String::from_utf8(out2.stderr).unwrap();
+    assert!(
+        stderr2.contains("workspace#install \u{2713} (cached)"),
+        "second run should hit install cache, got:\n{stderr2}"
+    );
+    assert!(
+        !stderr2.contains("workspace#install starting"),
+        "second run must NOT re-run install, got:\n{stderr2}"
+    );
+
+    // Sanity check: shim log shows exactly one install invocation.
+    let log = std::fs::read_to_string(bin.path().join("pnpm.log")).unwrap();
+    let invocations = log.matches("FAKE-PNPM install").count();
+    assert_eq!(
+        invocations, 1,
+        "pnpm should run exactly once across both rage invocations; log:\n{log}"
+    );
 }

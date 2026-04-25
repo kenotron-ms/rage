@@ -67,10 +67,7 @@ async fn serve_state(State(app): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 /// GET /ws — upgrade the HTTP connection to a WebSocket.
-async fn ws_upgrade(
-    State(app): State<Arc<AppState>>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn ws_upgrade(State(app): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| ws_session(socket, app))
 }
 
@@ -102,8 +99,10 @@ async fn ws_session(socket: WebSocket, app: Arc<AppState>) {
         while let Some(Ok(Message::Text(t))) = stream.next().await {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
                 if v["type"] == "RetryTask" {
-                    if let (Some(serde_json::Value::String(p)), Some(serde_json::Value::String(s))) =
-                        (v.get("package"), v.get("script"))
+                    if let (
+                        Some(serde_json::Value::String(p)),
+                        Some(serde_json::Value::String(s)),
+                    ) = (v.get("package"), v.get("script"))
                     {
                         app_read.reconciler.retry_task(p.clone(), s.clone());
                     }
@@ -125,11 +124,7 @@ async fn ws_session(socket: WebSocket, app: Arc<AppState>) {
 
 /// Start the axum server on the given listener.
 pub async fn serve(listener: TcpListener, app: AppState) -> anyhow::Result<()> {
-    axum::serve(
-        listener,
-        router(app).into_make_service(),
-    )
-    .await?;
+    axum::serve(listener, router(app).into_make_service()).await?;
     Ok(())
 }
 

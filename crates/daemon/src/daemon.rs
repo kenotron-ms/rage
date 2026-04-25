@@ -192,7 +192,9 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         let mut d = Daemon::new(ws.path().to_path_buf());
         d.idle_timeout = std::time::Duration::from_secs(2);
-        let task = tokio::spawn(async move { let _ = d.run().await; });
+        let task = tokio::spawn(async move {
+            let _ = d.run().await;
+        });
         let mut disc = None;
         for _ in 0..50 {
             if let Ok(Some(d)) = crate::discovery::read_discovery(ws.path()) {
@@ -202,10 +204,17 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let disc = disc.expect("discovery file written");
-        assert!(disc.http_port > 0, "http_port must be a real port, got {}", disc.http_port);
+        assert!(
+            disc.http_port > 0,
+            "http_port must be a real port, got {}",
+            disc.http_port
+        );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let url = format!("http://127.0.0.1:{}/api/state", disc.http_port);
-        let out = std::process::Command::new("curl").args(["-s", &url]).output().unwrap();
+        let out = std::process::Command::new("curl")
+            .args(["-s", &url])
+            .output()
+            .unwrap();
         let body = String::from_utf8_lossy(&out.stdout);
         assert!(body.contains("state"), "body: {body}");
         task.abort();

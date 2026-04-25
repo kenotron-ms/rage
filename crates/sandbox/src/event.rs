@@ -59,9 +59,18 @@ mod tests {
     #[test]
     fn pathset_dedupes_and_sorts() {
         let events = vec![
-            AccessEvent::Read { path: "/b".into(), pid: 1 },
-            AccessEvent::Read { path: "/a".into(), pid: 1 },
-            AccessEvent::Read { path: "/a".into(), pid: 2 },
+            AccessEvent::Read {
+                path: "/b".into(),
+                pid: 1,
+            },
+            AccessEvent::Read {
+                path: "/a".into(),
+                pid: 1,
+            },
+            AccessEvent::Read {
+                path: "/a".into(),
+                pid: 2,
+            },
         ];
         let ps = PathSet::from_events(&events);
         assert_eq!(ps.reads, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
@@ -71,8 +80,14 @@ mod tests {
     #[test]
     fn read_then_write_separates_buckets() {
         let events = vec![
-            AccessEvent::Read { path: "/r".into(), pid: 1 },
-            AccessEvent::Write { path: "/w".into(), pid: 1 },
+            AccessEvent::Read {
+                path: "/r".into(),
+                pid: 1,
+            },
+            AccessEvent::Write {
+                path: "/w".into(),
+                pid: 1,
+            },
         ];
         let ps = PathSet::from_events(&events);
         assert_eq!(ps.reads, vec![PathBuf::from("/r")]);
