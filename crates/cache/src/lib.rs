@@ -13,6 +13,7 @@ pub mod strong_fp;
 pub mod tool_hash;
 pub mod two_phase;
 pub mod weak_fp;
+pub mod why_miss;
 
 pub use entry::CacheEntry;
 pub use fingerprint::fingerprint_task;
