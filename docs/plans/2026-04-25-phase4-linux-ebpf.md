@@ -1,6 +1,6 @@
 # Phase 4 — Linux eBPF Sandbox
 
-**Status:** Planned  
+**Status:** ✅ Complete — implementation merged to `main` at `6758042`; docker-compose.sandbox.yml + Dockerfile.sandbox-test + Linux integration tests added at `feat/phase4-complete-sandbox`  
 **Branch:** `feat/phase4-linux-ebpf`  
 **New crates:** `sandbox-linux-ebpf` (user-space), `sandbox-linux-ebpf-prog` (kernel, NOT in workspace)  
 **Modified crates:** `sandbox`

@@ -1,0 +1,31 @@
+# Dockerfile for Linux eBPF sandbox integration tests.
+#
+# Builds rage with the full eBPF toolchain and runs sandbox tests with
+# --include-ignored so the privileged Linux-only tests execute.
+#
+# Usage (via docker-compose.sandbox.yml):
+#   docker compose -f docker/docker-compose.sandbox.yml run sandbox-test
+#
+# Manual usage:
+#   docker build -f docker/Dockerfile.sandbox-test -t rage-sandbox-test .
+#   docker run --privileged rage-sandbox-test
+
+FROM rust:1.91
+
+# eBPF toolchain: LLVM/Clang for bpf target, libelf for aya loader
+RUN apt-get update && apt-get install -y \
+    llvm \
+    clang \
+    libelf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Nightly Rust + rust-src component required for -Z build-std=core on bpf target
+RUN rustup toolchain install nightly --component rust-src
+RUN rustup target add --toolchain nightly bpfel-unknown-none
+
+WORKDIR /rage
+COPY . .
+
+# Run sandbox-linux-ebpf tests. --include-ignored makes the privileged
+# eBPF tests (which are #[ignore] by default) execute inside Docker.
+CMD ["cargo", "test", "-p", "sandbox-linux-ebpf", "--", "--include-ignored", "--nocapture"]
