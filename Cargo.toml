@@ -5,6 +5,7 @@ members = [
     "crates/build-graph",
     "crates/pipeline-config",
     "crates/scheduler",
+    "crates/cache",
     "crates/cli",
 ]
 
