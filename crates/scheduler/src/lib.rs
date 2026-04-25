@@ -3,3 +3,6 @@
 
 pub mod runner;
 pub mod task;
+
+pub use runner::{compute_task_levels, run_tasks, RunError};
+pub use task::{build_task_list, Task, TaskError};
