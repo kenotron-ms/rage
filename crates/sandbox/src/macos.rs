@@ -25,19 +25,54 @@ pub fn dylib_path() -> Result<PathBuf> {
     Ok(PathBuf::from(env!("RAGE_SANDBOX_DYLIB_DEFAULT")))
 }
 
+/// Find the shell to use for running sandboxed commands.
+///
+/// On macOS 26+ (Tahoe), system binaries with `Platform identifier=26`
+/// (including `/bin/sh` and `/bin/zsh`) strip `DYLD_INSERT_LIBRARIES` from
+/// their process environment, which prevents the sandbox dylib from being
+/// injected into any subprocess in the tree.  Prefer a non-system shell
+/// (e.g., Homebrew's `bash`, which is adhoc-signed) so that
+/// `DYLD_INSERT_LIBRARIES` is honoured and propagated.
+///
+/// Falls back to `"sh"` when no Homebrew shell is found (this will work on
+/// older macOS but not on macOS 26+ without a developer-installed bash).
+fn resolve_shell() -> String {
+    // On macOS, prefer Homebrew bash which is adhoc-signed and therefore
+    // honours DYLD_INSERT_LIBRARIES on macOS 26+.
+    #[cfg(target_os = "macos")]
+    {
+        const CANDIDATES: &[&str] = &[
+            "/opt/homebrew/bin/bash", // Apple Silicon Homebrew
+            "/usr/local/bin/bash",    // Intel Homebrew
+        ];
+        for &candidate in CANDIDATES {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
+        }
+    }
+    "sh".to_string()
+}
+
 /// Run `cmd` inside the macOS sandbox.
 ///
 /// The sandbox dylib is injected into the child process via
 /// `DYLD_INSERT_LIBRARIES`.  File-system access events are collected over a
 /// Unix-domain socket and returned as a [`PathSet`].
 ///
+/// # Shell selection
+///
+/// The command is executed via a shell found by [`resolve_shell`].  On
+/// macOS 26+, the system `/bin/sh` strips `DYLD_INSERT_LIBRARIES` from its
+/// process environment so the dylib cannot be injected.  When a Homebrew
+/// `bash` is present it is used instead.
+///
 /// # Caveats
 ///
-/// - On Apple Silicon, `DYLD_INSERT_LIBRARIES` is **silently dropped** for
-///   binaries with the hardened runtime + library validation entitlement.
-///   `/bin/sh`, `cat`, `tsc`, `node`, `cargo`, `tsc-go`, `go` work in practice
-///   because they are not hardened. System binaries (e.g. `/usr/bin/git`) on
-///   newer macOS may not be observable.
+/// - On macOS 26+, `DYLD_INSERT_LIBRARIES` is stripped by system binaries
+///   that carry `Platform identifier=26` (including `/bin/sh`, `/bin/cat`,
+///   `/usr/bin/stat`, etc.).  Only non-system binaries (adhoc-signed or
+///   developer-signed without library validation) can be fully observed.
 /// - Children that re-exec to a hardened binary lose interposition for that
 ///   subtree.
 pub async fn run_sandboxed(
@@ -59,7 +94,9 @@ pub async fn run_sandboxed(
     let server = EventServer::start(tmp.path()).context("start EventServer")?;
     let socket_path = server.socket_path.clone();
 
-    let status = Command::new("sh")
+    let shell = resolve_shell();
+
+    let status = Command::new(&shell)
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
@@ -109,7 +146,11 @@ mod tests {
             assert!(status.success(), "cargo build -p sandbox-macos-dylib failed");
         }
 
-        let result = run_sandboxed("stat /etc/passwd > /dev/null", Path::new("/tmp"), &[])
+        // Use a shell conditional that calls lstat("/etc/passwd") within the
+        // shell process itself.  On macOS 26+, system binaries like
+        // /usr/bin/stat strip DYLD_INSERT_LIBRARIES, so we avoid them.
+        // Single-bracket test is POSIX-compatible and works with both sh and bash.
+        let result = run_sandboxed("[ -f /etc/passwd ]", Path::new("/tmp"), &[])
             .await
             .unwrap();
 
@@ -135,9 +176,16 @@ mod tests {
             assert!(status.success(), "cargo build -p sandbox-macos-dylib failed");
         }
 
-        let result = run_sandboxed("cat /etc/hosts > /dev/null", Path::new("/tmp"), &[])
-            .await
-            .unwrap();
+        // Use a shell file-descriptor redirect so the open() call happens
+        // inside the shell process (which has the dylib loaded).  On macOS
+        // 26+, system binaries like /bin/cat strip DYLD_INSERT_LIBRARIES.
+        let result = run_sandboxed(
+            "exec 3< /etc/hosts; exec 3>&-",
+            Path::new("/tmp"),
+            &[],
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.exit_code, 0);
         assert!(
@@ -171,11 +219,11 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().expect("create tempdir");
-        let cmd = format!(
-            "touch '{}/a.txt' && rm '{}/a.txt'",
-            dir.path().display(),
-            dir.path().display()
-        );
+        // Use a shell output-redirect so the open(O_WRONLY|O_CREAT|O_TRUNC)
+        // call happens inside the shell process (which has the dylib loaded).
+        // On macOS 26+, system binaries like /usr/bin/touch strip
+        // DYLD_INSERT_LIBRARIES, so we avoid them here.
+        let cmd = format!("> '{}/a.txt'", dir.path().display());
 
         let result = run_sandboxed(&cmd, Path::new("/tmp"), &[])
             .await
