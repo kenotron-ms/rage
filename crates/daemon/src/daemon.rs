@@ -185,6 +185,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
     async fn daemon_writes_http_port_to_discovery() {
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());

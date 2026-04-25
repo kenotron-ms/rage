@@ -113,6 +113,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn discovery_roundtrips() {
         use std::env;
         use tempfile::TempDir;
