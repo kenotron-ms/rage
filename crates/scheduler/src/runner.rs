@@ -30,6 +30,48 @@ pub enum RunError {
     },
 }
 
+/// Build a PATH value that prepends the two node_modules/.bin dirs for this task.
+///
+/// Prepend order (highest priority first):
+///   1. `{cwd}/node_modules/.bin`             (package-local binaries)
+///   2. `{workspace_root}/node_modules/.bin`   (workspace-root binaries, if different)
+///   3. existing system `PATH`
+///
+/// If `cwd` and `workspace_root` resolve to the same directory the bin dir is
+/// only included once (no duplicate entries).
+///
+/// # Why not std::env::join_paths?
+///
+/// `join_paths` fails if any component contains the path separator (':' on Unix).
+/// The existing PATH value already contains colons, so it cannot be passed as a
+/// single segment. Instead we concatenate manually using OS-specific separator.
+fn node_bin_path(cwd: &std::path::Path, workspace_root: &std::path::Path) -> std::ffi::OsString {
+    let pkg_bin = cwd.join("node_modules/.bin");
+    let ws_bin = workspace_root.join("node_modules/.bin");
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+
+    // Build extra-dirs list, deduplicating when cwd == workspace_root.
+    let mut extra: Vec<std::path::PathBuf> = vec![pkg_bin.clone()];
+    if ws_bin != pkg_bin {
+        extra.push(ws_bin);
+    }
+
+    // Manually concatenate with the OS path separator so we don't break on
+    // existing PATH values that already contain the separator character.
+    #[cfg(unix)]
+    const SEP: &str = ":";
+    #[cfg(windows)]
+    const SEP: &str = ";";
+
+    let mut result = std::ffi::OsString::new();
+    for dir in &extra {
+        result.push(dir.as_os_str());
+        result.push(SEP);
+    }
+    result.push(&existing);
+    result
+}
+
 /// Compute a content-addressed fingerprint for a root task.
 ///
 /// Hashes the command plus the contents of every path in `task.input_paths`.
@@ -207,10 +249,12 @@ async fn run_single_task(
     );
     let start = Instant::now();
 
+    let new_path = node_bin_path(&task.cwd, &task.workspace_root);
     let status = Command::new("sh")
         .arg("-c")
         .arg(&task.command)
         .current_dir(&task.cwd)
+        .env("PATH", &new_path)
         .status()
         .await
         .map_err(|e| RunError::Spawn {
@@ -279,10 +323,12 @@ async fn run_root_task_legacy(
 
     eprintln!("[rage] {}#{} starting", task.package_name, task.script_name);
     let start = Instant::now();
+    let new_path = node_bin_path(&task.cwd, &task.workspace_root);
     let status = Command::new("sh")
         .arg("-c")
         .arg(&task.command)
         .current_dir(&task.cwd)
+        .env("PATH", &new_path)
         .status()
         .await
         .map_err(|e| RunError::Spawn {
@@ -330,14 +376,38 @@ async fn run_root_task_legacy(
 
 /// Resolve the tool path from the first token of `command`.
 ///
-/// If the first token contains `/`, it is used as-is. Otherwise the token is
-/// searched in every directory listed in the `PATH` environment variable.
-/// Returns `None` if the token cannot be found.
-fn which_first(command: &str) -> Option<PathBuf> {
+/// Search order (highest priority first):
+///   1. `{cwd}/node_modules/.bin/{token}`            (package-local)
+///   2. `{workspace_root}/node_modules/.bin/{token}` (workspace-root)
+///   3. Directories in the system `PATH` environment variable
+///
+/// If the first token contains `/` it is used as-is (absolute or relative path).
+/// Returns `None` if the token cannot be found anywhere.
+fn which_first(
+    command: &str,
+    cwd: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> Option<PathBuf> {
     let first = command.split_whitespace().next()?;
     if first.contains('/') {
         return Some(PathBuf::from(first));
     }
+
+    // 1. Package-local node_modules/.bin
+    let pkg_bin = cwd.join("node_modules/.bin").join(first);
+    if pkg_bin.is_file() {
+        return Some(pkg_bin);
+    }
+
+    // 2. Workspace-root node_modules/.bin (skip if same as cwd)
+    if workspace_root != cwd {
+        let ws_bin = workspace_root.join("node_modules/.bin").join(first);
+        if ws_bin.is_file() {
+            return Some(ws_bin);
+        }
+    }
+
+    // 3. System PATH
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(first);
@@ -410,7 +480,8 @@ async fn run_single_task_two_phase(
     use cache::{CacheEntry, WeakFpInputs};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let tool_path = which_first(&task.command).unwrap_or_else(|| PathBuf::from("sh"));
+    let tool_path = which_first(&task.command, &task.cwd, &task.workspace_root)
+        .unwrap_or_else(|| PathBuf::from("sh"));
 
     let inputs = WeakFpInputs {
         command: &task.command,
@@ -438,10 +509,12 @@ async fn run_single_task_two_phase(
 
     let (exit_code, pathset) = match task.sandbox_mode {
         pipeline_config::SandboxMode::Loose => {
+            let new_path = node_bin_path(&task.cwd, &task.workspace_root);
             let status = Command::new("sh")
                 .arg("-c")
                 .arg(&task.command)
                 .current_dir(&task.cwd)
+                .env("PATH", &new_path)
                 .status()
                 .await
                 .map_err(|e| RunError::Spawn {
@@ -453,7 +526,9 @@ async fn run_single_task_two_phase(
             (code, StoredPathset::default())
         }
         _ => {
-            match sandbox::run_sandboxed(&task.command, &task.cwd, &[]).await {
+            let new_path = node_bin_path(&task.cwd, &task.workspace_root);
+            let env_pairs = vec![("PATH".to_string(), new_path.to_string_lossy().into_owned())];
+            match sandbox::run_sandboxed(&task.command, &task.cwd, &env_pairs).await {
                 Ok(r) => {
                     let ps = StoredPathset {
                         reads: r.path_set.reads,
@@ -463,10 +538,12 @@ async fn run_single_task_two_phase(
                 }
                 Err(_) => {
                     // Sandbox unavailable — fall back to plain sh execution
+                    let new_path2 = node_bin_path(&task.cwd, &task.workspace_root);
                     let status = Command::new("sh")
                         .arg("-c")
                         .arg(&task.command)
                         .current_dir(&task.cwd)
+                        .env("PATH", &new_path2)
                         .status()
                         .await
                         .map_err(|e| RunError::Spawn {
@@ -534,10 +611,12 @@ async fn run_root_task_two_phase(
 
     eprintln!("[rage] {}#{} starting", task.package_name, task.script_name);
     let start = Instant::now();
+    let new_path = node_bin_path(&task.cwd, &task.workspace_root);
     let status = Command::new("sh")
         .arg("-c")
         .arg(&task.command)
         .current_dir(&task.cwd)
+        .env("PATH", &new_path)
         .status()
         .await
         .map_err(|e| RunError::Spawn {
@@ -597,6 +676,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
         }
     }
 
@@ -694,6 +774,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Loose,
             is_root: true,
             input_paths: vec![PathBuf::from("/tmp/pnpm-lock.yaml")],
+            workspace_root: PathBuf::from("/tmp"),
         };
         let pkg_task = mk_task("core");
         let dag = build_dag(vec![mk_pkg("core", &[])]).unwrap();
@@ -717,6 +798,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Loose,
             is_root: true,
             input_paths: vec![],
+            workspace_root: PathBuf::from("/tmp"),
         };
         let mut tasks: Vec<Task> = ["core", "utils", "ui", "app"]
             .iter()
@@ -767,6 +849,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -783,6 +866,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -808,6 +892,7 @@ mod tests {
                 sandbox_mode: pipeline_config::SandboxMode::default(),
                 is_root: false,
                 input_paths: Vec::new(),
+                workspace_root: PathBuf::from("/tmp"),
             },
             Task {
                 package_name: "b".to_string(),
@@ -817,6 +902,7 @@ mod tests {
                 sandbox_mode: pipeline_config::SandboxMode::default(),
                 is_root: false,
                 input_paths: Vec::new(),
+                workspace_root: PathBuf::from("/tmp"),
             },
         ];
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
@@ -845,6 +931,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
         };
         let pkg = mk_pkg("cached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -879,6 +966,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
         };
         let pkg = mk_pkg("uncached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -897,6 +985,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Strict,
             is_root: false,
             input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
         };
         let pkg = mk_pkg("smoke", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -924,6 +1013,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Loose,
             is_root: false,
             input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
         };
         let pkg = mk_pkg("pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -974,6 +1064,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Loose,
             is_root: true,
             input_paths: vec![lock.clone()],
+            workspace_root: dir.path().to_path_buf(),
         };
         let fp_a = root_task_fingerprint(&task_a);
 
@@ -1007,6 +1098,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Loose,
             is_root: true,
             input_paths: vec![PathBuf::from("/this/does/not/exist/pnpm-lock.yaml")],
+            workspace_root: PathBuf::from("/tmp"),
         };
         let fp1 = root_task_fingerprint(&task);
         let fp2 = root_task_fingerprint(&task);
@@ -1015,5 +1107,102 @@ mod tests {
             "missing-file fingerprint must still be deterministic"
         );
         assert!(!fp1.is_empty());
+    }
+
+    // ── node_bin_path unit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn node_bin_path_deduplicates_when_cwd_is_workspace_root() {
+        let dir = PathBuf::from("/ws/packages/foo");
+        let result = node_bin_path(&dir, &dir);
+        let s = result.to_string_lossy().into_owned();
+        let count = s.matches("node_modules/.bin").count();
+        assert_eq!(count, 1, "same dir should only appear once: {s}");
+    }
+
+    #[test]
+    fn node_bin_path_prepends_pkg_before_workspace() {
+        let cwd = PathBuf::from("/ws/packages/foo");
+        let ws = PathBuf::from("/ws");
+        let result = node_bin_path(&cwd, &ws);
+        let s = result.to_string_lossy().into_owned();
+        assert!(
+            s.contains("/ws/packages/foo/node_modules/.bin"),
+            "pkg bin missing: {s}"
+        );
+        assert!(s.contains("/ws/node_modules/.bin"), "ws bin missing: {s}");
+        let pkg_pos = s.find("/ws/packages/foo/node_modules/.bin").unwrap();
+        let ws_pos = s.find("/ws/node_modules/.bin").unwrap();
+        assert!(
+            pkg_pos < ws_pos,
+            "package-local bin must come before workspace bin"
+        );
+    }
+
+    // ── which_first unit test ─────────────────────────────────────────────────
+
+    #[test]
+    fn which_first_prefers_local_node_modules_bin() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let tsc = bin_dir.join("tsc");
+        std::fs::write(&tsc, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tsc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let result = which_first("tsc --noEmit", dir.path(), dir.path());
+        assert_eq!(
+            result.as_deref(),
+            Some(tsc.as_path()),
+            "which_first should return the local tsc"
+        );
+    }
+
+    // ── PATH injection integration test ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn node_modules_bin_is_on_path_during_task() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let bin_dir = dir.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin_path = bin_dir.join("fake-tsc");
+        let sentinel = dir.path().join("fake-tsc-ran.txt");
+        std::fs::write(
+            &bin_path,
+            format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()).as_bytes(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let task = Task {
+            package_name: "test-pkg".to_string(),
+            script_name: "build".to_string(),
+            command: "fake-tsc".to_string(),
+            cwd: dir.path().to_path_buf(),
+            workspace_root: dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+        };
+        let pkg = mk_pkg("test-pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+        let cache_dir = tempdir().unwrap();
+        let cache = std::sync::Arc::new(
+            cache::TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap(),
+        );
+        run_tasks_two_phase(&dag, vec![task], cache).await.unwrap();
+        assert!(
+            sentinel.exists(),
+            "fake-tsc must have been found via node_modules/.bin"
+        );
     }
 }

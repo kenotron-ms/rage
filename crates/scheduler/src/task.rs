@@ -26,6 +26,9 @@ pub struct Task {
     /// Files whose contents are hashed to fingerprint a root task
     /// (e.g. `pnpm-lock.yaml`). Empty for non-root tasks.
     pub input_paths: Vec<PathBuf>,
+    /// Workspace root directory — used to build `{workspace_root}/node_modules/.bin`
+    /// PATH prefix so locally-installed tools are found.
+    pub workspace_root: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -68,6 +71,7 @@ pub fn build_task_list(
                 sandbox_mode: pipeline_config::SandboxMode::default(),
                 is_root: true,
                 input_paths: rt.input_paths,
+                workspace_root: workspace_root.to_path_buf(),
             });
         }
     }
@@ -103,6 +107,7 @@ pub fn build_task_list(
                 sandbox_mode: pipeline_config::SandboxMode::default(),
                 is_root: false,
                 input_paths: Vec::new(),
+                workspace_root: workspace_root.to_path_buf(),
             });
             package_tasks_added += 1;
         }
@@ -230,6 +235,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Strict,
             is_root: false,
             input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
         };
         assert_eq!(t.sandbox_mode, pipeline_config::SandboxMode::Strict);
     }
