@@ -1,0 +1,15 @@
+# Docker image for running Linux eBPF sandbox integration tests.
+# Usage: docker build -f docker/Dockerfile.linux-test -t rage-ebpf-test .
+#        docker run --privileged rage-ebpf-test
+FROM rust:1.91
+
+RUN apt-get update && apt-get install -y     llvm clang libelf-dev     && rm -rf /var/lib/apt/lists/*
+
+# Nightly Rust + rust-src component for eBPF cross-compilation
+RUN rustup toolchain install nightly --component rust-src
+RUN rustup target add --toolchain nightly bpfel-unknown-none
+
+WORKDIR /rage
+COPY . .
+
+CMD ["cargo", "test", "-p", "sandbox-linux-ebpf", "--", "--nocapture"]

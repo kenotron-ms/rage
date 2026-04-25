@@ -1,0 +1,25 @@
+[package]
+name = "sandbox-linux-ebpf-prog"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# This crate is NOT part of the main workspace — it's compiled separately
+# to the bpf target by sandbox-linux-ebpf/build.rs.
+[workspace]
+
+[[bin]]
+name = "sandbox-linux-ebpf-prog"
+path = "src/main.rs"
+
+[dependencies]
+aya-ebpf = { version = "0.1", features = ["loop"] }
+aya-log-ebpf = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+
+[lints.rust]
+unsafe_code = "allow"
