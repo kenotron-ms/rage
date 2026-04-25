@@ -22,7 +22,7 @@ plugin = { path = "../plugin" }
 plugin-typescript = { path = "../plugin-typescript" }
 workspace-tools = { path = "../workspace-tools" }
 scheduler = { path = "../scheduler" }
-cache = { path = "../cache" }
+cache = { path = "../cache", features = ["s3", "azure"] }
 scoping = { path = "../scoping" }
 tokio = { version = "1", features = ["full"] }
 daemon = { path = "../daemon" }

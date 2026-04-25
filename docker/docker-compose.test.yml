@@ -1,0 +1,44 @@
+version: '3.8'
+# Docker Compose for rage remote cache integration tests.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.test.yml up -d
+#   cargo test -p cache --features s3,azure -- --ignored
+#   docker compose -f docker/docker-compose.test.yml down
+
+services:
+  # MinIO: S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      retries: 3
+
+  # Create the test bucket after MinIO starts
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set myminio http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing myminio/rage-test-bucket
+      "
+
+  # Azurite: Azure Blob Storage emulator
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    ports:
+      - "10000:10000"
+      - "10001:10001"
+      - "10002:10002"
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0

@@ -19,11 +19,43 @@ pub struct SandboxConfig {
     pub default: SandboxMode,
 }
 
+/// Remote cache backend configuration.
+///
+/// The backend variant determines which fields are used. Credentials are NEVER
+/// stored here — use environment variables or the platform credential chain.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteBackend {
+    #[default]
+    Local,
+    S3,
+    Azure,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct CacheConfig {
+    /// Which storage backend to use. Default: "local".
+    /// Valid values: "local", "s3", "azure"
     pub backend: String,
+    /// Override the local cache directory. Default: .
     pub dir: Option<std::path::PathBuf>,
+    // ── S3 config (used when backend = "s3") ────────────────────────────────
+    /// S3 bucket name. Credentials from AWS standard credential chain.
+    pub bucket: Option<String>,
+    /// AWS region (e.g. "us-west-2"). Defaults to  env var.
+    pub region: Option<String>,
+    /// Key prefix in the bucket (e.g. "rage-cache/"). Default: "".
+    #[serde(default)]
+    pub s3_prefix: String,
+    // ── Azure config (used when backend = "azure") ─────────────────────────
+    /// Azure Blob container name.
+    pub container: Option<String>,
+    /// Azure storage account name. Credentials from env vars / managed identity.
+    pub account: Option<String>,
+    /// Blob name prefix. Default: "".
+    #[serde(default)]
+    pub azure_prefix: String,
 }
 
 impl Default for CacheConfig {
@@ -31,6 +63,12 @@ impl Default for CacheConfig {
         Self {
             backend: "local".to_string(),
             dir: None,
+            bucket: None,
+            region: None,
+            s3_prefix: String::new(),
+            container: None,
+            account: None,
+            azure_prefix: String::new(),
         }
     }
 }
