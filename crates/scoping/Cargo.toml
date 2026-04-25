@@ -1,0 +1,17 @@
+[package]
+    name = "scoping"
+    version = "0.0.0"
+    edition.workspace = true
+    rust-version.workspace = true
+    license.workspace = true
+    repository.workspace = true
+
+    [lints]
+    workspace = true
+
+    [dependencies]
+    workspace-tools = { path = "../workspace-tools" }
+    build-graph = { path = "../build-graph" }
+    anyhow = "1"
+    thiserror = "2"
+    
