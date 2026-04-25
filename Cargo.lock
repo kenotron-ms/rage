@@ -302,6 +302,7 @@ dependencies = [
  "cache",
  "chrono",
  "hex",
+ "libc",
  "nix",
  "notify",
  "pipeline-config",

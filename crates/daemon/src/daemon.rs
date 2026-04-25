@@ -1,5 +1,124 @@
-// implemented later
+use crate::discovery::{self, DiscoveryFile};
+use crate::messages::{DaemonMessage, DaemonResponse};
+use crate::reconciler::{self, ReconcilerHandle};
+use crate::socket::UnixSocketServer;
+use anyhow::Result;
+use std::path::PathBuf;
 
-    /// Main daemon struct.
-    pub struct Daemon;
-    
+pub struct Daemon {
+    pub workspace: PathBuf,
+    pub idle_timeout: std::time::Duration,
+}
+
+impl Daemon {
+    pub fn new(workspace: PathBuf) -> Self {
+        Self { workspace, idle_timeout: std::time::Duration::from_secs(3 * 60 * 60) }
+    }
+
+    pub async fn run(self) -> Result<()> {
+        let socket_path = discovery::socket_path(&self.workspace)?;
+        let server = UnixSocketServer::bind(&socket_path)?;
+        let discovery_file = DiscoveryFile {
+            pid: std::process::id(),
+            unix_socket: socket_path.clone(),
+            http_port: 0, // wired in Phase 11
+            start_time: chrono::Utc::now().to_rfc3339(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            workspace: self.workspace.clone(),
+        };
+        discovery::write_discovery(&self.workspace, &discovery_file)?;
+        let ws_for_cleanup = self.workspace.clone();
+        ctrlc_cleanup(ws_for_cleanup);
+        let handle: ReconcilerHandle = reconciler::spawn();
+        let last_activity = std::sync::Arc::new(tokio::sync::Mutex::new(std::time::Instant::now()));
+        spawn_idle_monitor(last_activity.clone(), self.idle_timeout, self.workspace.clone());
+        server.serve({
+            let handle = handle.clone();
+            let activity = last_activity.clone();
+            move |msg: DaemonMessage| {
+                let handle = handle.clone();
+                let activity = activity.clone();
+                async move {
+                    *activity.lock().await = std::time::Instant::now();
+                    match msg {
+                        DaemonMessage::SetDesiredState(d) => handle.set_desired(d),
+                        DaemonMessage::RetryTask { package, script } => handle.retry_task(package, script),
+                        DaemonMessage::Shutdown => { std::process::exit(0); }
+                        DaemonMessage::GetState => {}
+                    }
+                    let arc = handle.state();
+                    let s = arc.lock().await;
+                    DaemonResponse { state: s.state.kind, tasks: s.tasks.clone() }
+                }
+            }
+        }).await
+    }
+}
+
+fn ctrlc_cleanup(workspace: PathBuf) {
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        let _ = discovery::delete_discovery(&workspace);
+        std::process::exit(0);
+    });
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = sigterm.recv() => {},
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn spawn_idle_monitor(
+    activity: std::sync::Arc<tokio::sync::Mutex<std::time::Instant>>,
+    idle: std::time::Duration,
+    workspace: PathBuf,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let last = *activity.lock().await;
+            if last.elapsed() > idle {
+                let _ = discovery::delete_discovery(&workspace);
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    #[test]
+    fn daemon_new_sets_workspace_and_default_idle_timeout() {
+        let ws = PathBuf::from("/tmp/test-workspace");
+        let d = Daemon::new(ws.clone());
+        assert_eq!(d.workspace, ws, "workspace must be set");
+        assert_eq!(
+            d.idle_timeout,
+            Duration::from_secs(3 * 60 * 60),
+            "idle_timeout must default to 3 hours"
+        );
+    }
+
+    #[test]
+    fn daemon_fields_are_pub() {
+        let ws = PathBuf::from("/tmp/another-workspace");
+        let d = Daemon::new(ws.clone());
+        // Access pub fields directly
+        let _ = d.workspace;
+        let _ = d.idle_timeout;
+    }
+}
