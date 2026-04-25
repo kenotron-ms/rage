@@ -35,12 +35,20 @@ impl Default for CacheConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Policy {
+    pub selector: String,
+    #[serde(default)]
+    pub sandbox: Option<SandboxMode>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default)]
 pub struct RageConfig {
     pub plugins: Vec<String>,
     pub sandbox: SandboxConfig,
     pub cache: CacheConfig,
+    pub policies: Vec<Policy>,
 }
 
 /// Load `rage.json` from the workspace root. Returns `None` if absent.
@@ -131,5 +139,25 @@ mod tests {
         let cfg = load_config(&d).unwrap().unwrap();
         assert_eq!(cfg.cache.backend, "local");
         assert_eq!(cfg.cache.dir, None);
+    }
+
+    #[test]
+    fn parses_policies_array() {
+        let d = tmpdir();
+        let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
+        f.write_all(
+            br#"{
+            "policies": [
+                { "selector": "packages/core/**",   "sandbox": "strict" },
+                { "selector": "packages/legacy/**", "sandbox": "loose" }
+            ]
+        }"#,
+        )
+        .unwrap();
+        let cfg = load_config(&d).unwrap().unwrap();
+        assert_eq!(cfg.policies.len(), 2);
+        assert_eq!(cfg.policies[0].selector, "packages/core/**");
+        assert_eq!(cfg.policies[0].sandbox, Some(SandboxMode::Strict));
+        assert_eq!(cfg.policies[1].sandbox, Some(SandboxMode::Loose));
     }
 }
