@@ -1,8 +1,12 @@
 {
-  "name": "@yarn-fixture/app",
-  "version": "1.0.0",
-  "dependencies": {
-    "@yarn-fixture/lib": "1.0.0",
-    "@yarn-fixture/core": "1.0.0"
-  }
-}
+      "name": "@yarn-fixture/app",
+      "version": "1.0.0",
+      "scripts": {
+        "build": "echo 'building @yarn-fixture/app'"
+      },
+      "dependencies": {
+        "@yarn-fixture/lib": "1.0.0",
+        "@yarn-fixture/core": "1.0.0"
+      }
+    }
+    

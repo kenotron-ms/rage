@@ -1,4 +1,8 @@
 {
-  "name": "@npm-fixture/shared",
-  "version": "1.0.0"
-}
+      "name": "@npm-fixture/shared",
+      "version": "1.0.0",
+      "scripts": {
+        "build": "echo 'building @npm-fixture/shared'"
+      }
+    }
+    
