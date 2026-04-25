@@ -85,4 +85,29 @@ mod tests {
             path.display()
         );
     }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore]
+    async fn open_interposed_records_read() {
+        let dylib = dylib_path().expect("dylib_path() should succeed");
+        if !dylib.exists() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "-p", "sandbox-macos-dylib"])
+                .status()
+                .expect("failed to run cargo build -p sandbox-macos-dylib");
+            assert!(status.success(), "cargo build -p sandbox-macos-dylib failed");
+        }
+
+        let result = run_sandboxed("cat /etc/hosts > /dev/null", Path::new("/tmp"), &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.path_set.reads.contains(&PathBuf::from("/etc/hosts")),
+            "expected /etc/hosts in reads, got: {:?}",
+            result.path_set.reads
+        );
+    }
 }
