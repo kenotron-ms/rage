@@ -24,8 +24,45 @@ use std::path::{Path, PathBuf};
 /// Returns `None` if no version file exists. The returned string is whatever
 /// the file contains, trimmed: e.g. `"18.20.4"`, `"v20.11.0"`, `"lts/iron"`.
 /// Callers must handle a possible leading `v` themselves.
-pub fn resolve_node_version(_workspace_root: &Path) -> Option<String> {
-    None // intentionally unimplemented — see Task 2
+pub fn resolve_node_version(workspace_root: &Path) -> Option<String> {
+    // 1. .node-version — fnm/mise default, single line.
+    if let Ok(s) = std::fs::read_to_string(workspace_root.join(".node-version")) {
+        let v = s.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+
+    // 2. .nvmrc — nvm, single line; may include a leading "v".
+    if let Ok(s) = std::fs::read_to_string(workspace_root.join(".nvmrc")) {
+        let v = s.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+
+    // 3. .tool-versions — asdf/mise multi-tool format. We only care about
+    //    the line beginning with `nodejs ` (or `node `). First whitespace-
+    //    separated token after the tool name is the version.
+    if let Ok(s) = std::fs::read_to_string(workspace_root.join(".tool-versions")) {
+        for line in s.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let tool = parts.next().unwrap_or("");
+            if tool == "nodejs" || tool == "node" {
+                if let Some(v) = parts.next() {
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Locate the `bin/` directory for `version` under whichever supported version
