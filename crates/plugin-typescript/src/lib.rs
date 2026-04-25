@@ -6,6 +6,46 @@
 use plugin::{AllowlistEntry, EcosystemPlugin, OutputFile, PluginConfig, TaskDef};
 use std::path::Path;
 
+/// Read the Node.js version declared by the workspace.
+///
+/// Mirrors `scheduler::node_path::resolve_node_version`. Duplicated here so
+/// `plugin-typescript` does not depend on `scheduler`.
+fn read_node_version(workspace_root: &Path) -> Option<String> {
+    // 1. .node-version
+    if let Ok(s) = std::fs::read_to_string(workspace_root.join(".node-version")) {
+        let v = s.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    // 2. .nvmrc
+    if let Ok(s) = std::fs::read_to_string(workspace_root.join(".nvmrc")) {
+        let v = s.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    // 3. .tool-versions (asdf/mise)
+    if let Ok(s) = std::fs::read_to_string(workspace_root.join(".tool-versions")) {
+        for line in s.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let tool = parts.next().unwrap_or("");
+            if tool == "nodejs" || tool == "node" {
+                if let Some(v) = parts.next() {
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Convert a `rage.json`-parsed [`pipeline_config::PluginConfig`] into the flat
 /// [`PluginConfig`] consumed by [`EcosystemPlugin::declared_input_globs`].
 ///
@@ -96,6 +136,22 @@ impl EcosystemPlugin for TypeScriptPlugin {
                 path_pattern: "**/node_modules/.bin/**".to_string(),
                 reason: "locally-installed tool binaries (tsc, eslint, jest, etc.)".to_string(),
             },
+            AllowlistEntry {
+                path_pattern: "**/.local/share/fnm/**".to_string(),
+                reason: "fnm-managed Node.js binaries".to_string(),
+            },
+            AllowlistEntry {
+                path_pattern: "**/.nvm/**".to_string(),
+                reason: "nvm-managed Node.js binaries".to_string(),
+            },
+            AllowlistEntry {
+                path_pattern: "**/.asdf/**".to_string(),
+                reason: "asdf-managed runtime binaries".to_string(),
+            },
+            AllowlistEntry {
+                path_pattern: "**/.local/share/mise/**".to_string(),
+                reason: "mise-managed runtime binaries".to_string(),
+            },
         ]
     }
 
@@ -122,12 +178,21 @@ impl EcosystemPlugin for TypeScriptPlugin {
         // Detect the JS package manager from lockfile presence.
         // Priority: pnpm > yarn > npm. Returning at most one root task —
         // the "install" step for the detected manager.
+
+        // Build env_hash_inputs: fold in the resolved Node version so that
+        // changing .node-version invalidates the workspace#install cache key.
+        let mut env_hash_inputs: Vec<(String, String)> = Vec::new();
+        if let Some(v) = read_node_version(workspace_root) {
+            env_hash_inputs.push(("NODE_VERSION".to_string(), v));
+        }
+
         let pnpm_lock = workspace_root.join("pnpm-lock.yaml");
         if pnpm_lock.is_file() {
             return vec![plugin::RootTask {
                 name: "install".to_string(),
                 command: "pnpm install".to_string(),
                 input_paths: vec![pnpm_lock],
+                env_hash_inputs: env_hash_inputs.clone(),
             }];
         }
 
@@ -137,6 +202,7 @@ impl EcosystemPlugin for TypeScriptPlugin {
                 name: "install".to_string(),
                 command: "yarn install".to_string(),
                 input_paths: vec![yarn_lock],
+                env_hash_inputs: env_hash_inputs.clone(),
             }];
         }
 
@@ -146,6 +212,7 @@ impl EcosystemPlugin for TypeScriptPlugin {
                 name: "install".to_string(),
                 command: "npm install".to_string(),
                 input_paths: vec![npm_lock],
+                env_hash_inputs,
             }];
         }
 
@@ -458,5 +525,39 @@ mod tests {
         let tasks = TypeScriptPlugin::new().infer_root_tasks(dir.path());
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].command, "pnpm install");
+    }
+
+    // ── env_hash_inputs / NODE_VERSION tests ─────────────────────────────────
+
+    #[test]
+    fn infer_root_tasks_includes_node_version_when_dot_node_version_exists() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("yarn.lock"), b"").unwrap();
+        std::fs::write(dir.path().join(".node-version"), "18.20.4\n").unwrap();
+        let tasks = TypeScriptPlugin::new().infer_root_tasks(dir.path());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].env_hash_inputs,
+            vec![("NODE_VERSION".to_string(), "18.20.4".to_string())]
+        );
+    }
+
+    #[test]
+    fn infer_root_tasks_omits_env_hash_when_no_version_file() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("yarn.lock"), b"").unwrap();
+        let tasks = TypeScriptPlugin::new().infer_root_tasks(dir.path());
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].env_hash_inputs.is_empty());
+    }
+
+    #[test]
+    fn allowlist_includes_version_manager_dirs() {
+        let allow = TypeScriptPlugin::new().toolchain_allowlist();
+        let patterns: Vec<&str> = allow.iter().map(|e| e.path_pattern.as_str()).collect();
+        assert!(patterns.iter().any(|p| p.contains("fnm")));
+        assert!(patterns.iter().any(|p| p.contains(".nvm")));
+        assert!(patterns.iter().any(|p| p.contains(".asdf")));
+        assert!(patterns.iter().any(|p| p.contains("mise")));
     }
 }

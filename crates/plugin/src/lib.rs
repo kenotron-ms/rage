@@ -33,6 +33,11 @@ pub struct RootTask {
     /// single lockfile path; an empty vec is allowed (the command alone
     /// becomes the fingerprint, which is rarely what you want).
     pub input_paths: Vec<PathBuf>,
+    /// Extra `(key, value)` pairs folded into the fingerprint hash.
+    /// Used by ecosystems to bake environment-derived state (e.g. resolved
+    /// Node.js version) into the cache key without making the scheduler
+    /// ecosystem-aware. Empty by default.
+    pub env_hash_inputs: Vec<(String, String)>,
 }
 
 /// Implemented by each ecosystem (TypeScript, Rust, Go, ...).
