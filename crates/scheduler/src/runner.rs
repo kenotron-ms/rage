@@ -530,7 +530,12 @@ async fn run_single_task_two_phase(
     }
 
     // Phase 1: cache lookup
-    if cache.lookup(&inputs).is_some() {
+    if let Some((sf, _entry)) = cache.lookup(&inputs) {
+        // Replay captured output from the original run.
+        if let Some(out) = cache::output_store::read_output(cache.dir(), &sf) {
+            print!("{}", out.stdout);
+            eprint!("{}", out.stderr);
+        }
         eprintln!(
             "[rage] {}#{} \u{2713} (cached, two-phase)",
             task.package_name, task.script_name
@@ -544,23 +549,30 @@ async fn run_single_task_two_phase(
         task.package_name, task.script_name, task.sandbox_mode
     );
     let start = Instant::now();
+    let mut captured_stdout = String::new();
+    let mut captured_stderr = String::new();
 
     let (exit_code, pathset) = match task.sandbox_mode {
         pipeline_config::SandboxMode::Loose => {
             let new_path = node_bin_path(&task.cwd, &task.workspace_root);
-            let status = Command::new("sh")
-                .arg("-c")
-                .arg(&task.command)
-                .current_dir(&task.cwd)
-                .env("PATH", &new_path)
-                .status()
-                .await
-                .map_err(|e| RunError::Spawn {
-                    package: task.package_name.clone(),
-                    script: task.script_name.clone(),
-                    source: e,
-                })?;
-            let code = status.code().unwrap_or(-1);
+            let builder = {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c")
+                    .arg(&task.command)
+                    .current_dir(&task.cwd)
+                    .env("PATH", &new_path);
+                cmd
+            };
+            let (code, out, err) =
+                spawn_capture_tee(builder)
+                    .await
+                    .map_err(|e| RunError::Spawn {
+                        package: task.package_name.clone(),
+                        script: task.script_name.clone(),
+                        source: e,
+                    })?;
+            captured_stdout = out;
+            captured_stderr = err;
             (code, StoredPathset::default())
         }
         _ => {
@@ -577,19 +589,24 @@ async fn run_single_task_two_phase(
                 Err(_) => {
                     // Sandbox unavailable — fall back to plain sh execution
                     let new_path2 = node_bin_path(&task.cwd, &task.workspace_root);
-                    let status = Command::new("sh")
-                        .arg("-c")
-                        .arg(&task.command)
-                        .current_dir(&task.cwd)
-                        .env("PATH", &new_path2)
-                        .status()
-                        .await
-                        .map_err(|e| RunError::Spawn {
-                            package: task.package_name.clone(),
-                            script: task.script_name.clone(),
-                            source: e,
-                        })?;
-                    let code = status.code().unwrap_or(-1);
+                    let builder2 = {
+                        let mut cmd = Command::new("sh");
+                        cmd.arg("-c")
+                            .arg(&task.command)
+                            .current_dir(&task.cwd)
+                            .env("PATH", &new_path2);
+                        cmd
+                    };
+                    let (code, out, err) =
+                        spawn_capture_tee(builder2)
+                            .await
+                            .map_err(|e| RunError::Spawn {
+                                package: task.package_name.clone(),
+                                script: task.script_name.clone(),
+                                source: e,
+                            })?;
+                    captured_stdout = out;
+                    captured_stderr = err;
                     (code, StoredPathset::default())
                 }
             }
@@ -612,7 +629,20 @@ async fn run_single_task_two_phase(
             pathset_reads: vec![],
             abi_fingerprint: None,
         };
-        let _ = cache.record(&inputs, pathset, entry); // ignore write errors
+        let sf = cache.record(&inputs, pathset, entry).unwrap_or_default();
+
+        // Store captured output for later replay on cache hit.
+        if !sf.is_empty() {
+            cache::output_store::write_output(
+                cache.dir(),
+                &sf,
+                &cache::output_store::TaskOutput {
+                    stdout: captured_stdout.clone(),
+                    stderr: captured_stderr.clone(),
+                    exit_code: 0,
+                },
+            );
+        }
 
         // Compute and persist ABI fingerprint so downstream tasks can do early-cutoff.
         // Resolve output globs to find output files (e.g. .d.ts for TypeScript).
@@ -704,6 +734,72 @@ async fn run_root_task_two_phase(
 
 /// Resolve output globs for a task, returning matching file paths.
 /// Skips `node_modules`, `.git`, `target` directories (same as WF glob resolver).
+/// Spawn a command with piped stdout+stderr; tee to terminal in real time
+/// while also collecting into memory buffers.
+///
+/// Returns `(exit_code, stdout_utf8, stderr_utf8)`.
+async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Child;
+
+    builder.stdout(std::process::Stdio::piped());
+    builder.stderr(std::process::Stdio::piped());
+
+    let mut child: Child = builder.spawn()?;
+    let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
+    let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
+
+    let mut stdout_bytes: Vec<u8> = Vec::new();
+    let mut stderr_bytes: Vec<u8> = Vec::new();
+
+    // Drain both pipes concurrently while writing to real terminal.
+    let (r1, r2) = tokio::join!(
+        async {
+            let mut buf = [0u8; 8192];
+            let mut out = tokio::io::stdout();
+            loop {
+                match stdout_pipe.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        stdout_bytes.extend_from_slice(&buf[..n]);
+                        let _ = out.write_all(&buf[..n]).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            let _ = out.flush().await;
+            Ok(())
+        },
+        async {
+            let mut buf = [0u8; 8192];
+            let mut err = tokio::io::stderr();
+            loop {
+                match stderr_pipe.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        stderr_bytes.extend_from_slice(&buf[..n]);
+                        let _ = err.write_all(&buf[..n]).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            let _ = err.flush().await;
+            Ok(())
+        }
+    );
+    r1?;
+    r2?;
+
+    let status = child.wait().await?;
+    let code = status.code().unwrap_or(-1);
+
+    Ok((
+        code,
+        String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        String::from_utf8_lossy(&stderr_bytes).into_owned(),
+    ))
+}
+
 fn resolve_output_globs(cwd: &std::path::Path, output_globs: &[String]) -> Vec<std::path::PathBuf> {
     if output_globs.is_empty() {
         return Vec::new();
@@ -1588,5 +1684,68 @@ mod tests {
             wf_count_2, 1,
             "second run with same dep ABI: cache hit, still 1 WF entry"
         );
+    }
+
+    // ── Phase 5b: output capture + replay tests ──────────────────────────
+
+    #[tokio::test]
+    async fn captured_output_replayed_on_cache_hit() {
+        use cache::TwoPhaseCache;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+
+        // A task that prints to stdout.
+        let task = Task {
+            package_name: "output-pkg".to_string(),
+            script_name: "build".to_string(),
+            command: "printf 'hello from output-pkg\\n'".to_string(),
+            cwd: dir.path().to_path_buf(),
+            workspace_root: dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+        };
+
+        let cache = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
+        let pkg = mk_pkg("output-pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        // First run — executes task, captures output.
+        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone())
+            .await
+            .unwrap();
+
+        // Verify output was stored.
+        let output_files: Vec<_> = std::fs::read_dir(cache_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".output.json"))
+            .collect();
+        assert!(
+            !output_files.is_empty(),
+            "expected sf-*.output.json to be written after first run"
+        );
+
+        // Read and verify stored output.
+        let output_path = output_files[0].path();
+        let stored: cache::output_store::TaskOutput =
+            serde_json::from_str(&std::fs::read_to_string(&output_path).unwrap()).unwrap();
+        assert!(
+            stored.stdout.contains("hello from output-pkg"),
+            "stored stdout should contain task output: {:?}",
+            stored.stdout
+        );
+        assert_eq!(stored.exit_code, 0);
+
+        // Second run — should be a cache hit with replayed output.
+        run_tasks_two_phase(&dag, vec![task], cache.clone())
+            .await
+            .unwrap();
     }
 }
