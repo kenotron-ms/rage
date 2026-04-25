@@ -102,7 +102,7 @@ async fn cmd_run(root: &Path, script: &str) -> Result<()> {
 
     eprintln!("Running '{}' across {} packages", script, tasks.len());
 
-    scheduler::run_tasks(&dag, tasks)
+    scheduler::run_tasks(&dag, tasks, None)
         .await
         .with_context(|| format!("'{script}' run failed"))?;
 

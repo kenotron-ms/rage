@@ -12,6 +12,7 @@
     [dependencies]
     workspace-tools = { path = "../workspace-tools" }
     build-graph = { path = "../build-graph" }
+    cache = { path = "../cache" }
     tokio = { version = "1", features = ["full"] }
     thiserror = "2"
     anyhow = "1"

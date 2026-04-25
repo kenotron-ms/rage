@@ -87,14 +87,19 @@ pub fn compute_task_levels(dag: &WorkspaceDag, tasks: &[Task]) -> Vec<Vec<Task>>
 ///
 /// For each wave, all tasks run concurrently. Waves run sequentially.
 /// On any task failure, the wave is aborted and the error is returned.
-pub async fn run_tasks(dag: &WorkspaceDag, tasks: Vec<Task>) -> anyhow::Result<()> {
+pub async fn run_tasks(
+    dag: &WorkspaceDag,
+    tasks: Vec<Task>,
+    cache: Option<std::sync::Arc<dyn cache::CacheProvider>>,
+) -> anyhow::Result<()> {
     let levels = compute_task_levels(dag, &tasks);
 
     for level in levels {
         let mut set: JoinSet<Result<(), RunError>> = JoinSet::new();
 
         for task in level {
-            set.spawn(run_single_task(task));
+            let cache_clone = cache.clone();
+            set.spawn(run_single_task(task, cache_clone));
         }
 
         let mut first_error: Option<RunError> = None;
@@ -109,14 +114,12 @@ pub async fn run_tasks(dag: &WorkspaceDag, tasks: Vec<Task>) -> anyhow::Result<(
                     set.abort_all();
                 }
                 Err(_join_err) => {
-                    // Task panicked or was aborted
                     if first_error.is_none() {
                         first_error = Some(RunError::Killed {
                             package: "unknown".to_string(),
                             script: "unknown".to_string(),
                         });
                     }
-                    // Don't call abort_all() again if already called
                 }
             }
         }
@@ -129,7 +132,29 @@ pub async fn run_tasks(dag: &WorkspaceDag, tasks: Vec<Task>) -> anyhow::Result<(
     Ok(())
 }
 
-async fn run_single_task(task: Task) -> Result<(), RunError> {
+async fn run_single_task(
+    task: Task,
+    cache: Option<std::sync::Arc<dyn cache::CacheProvider>>,
+) -> Result<(), RunError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Compute fingerprint if cache is provided
+    let fingerprint = cache.as_ref().and_then(|_| {
+        cache::fingerprint_task(&task.command, &task.cwd).ok()
+    });
+
+    // Check cache — on hit, print and return early
+    if let (Some(fp), Some(c)) = (&fingerprint, &cache) {
+        if c.get(fp).is_some() {
+            eprintln!(
+                "[rage] {}#{} \u{2713} (cached)",
+                task.package_name, task.script_name
+            );
+            return Ok(());
+        }
+    }
+
+    // Cache miss (or no cache) — execute the task
     eprintln!(
         "[rage] {}#{} starting",
         task.package_name, task.script_name
@@ -148,18 +173,34 @@ async fn run_single_task(task: Task) -> Result<(), RunError> {
             source: e,
         })?;
 
-    let elapsed = start.elapsed().as_secs_f64();
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    let elapsed_ms = elapsed.as_millis() as u64;
 
     if status.success() {
+        // Store in cache on success
+        if let (Some(fp), Some(c)) = (&fingerprint, &cache) {
+            let entry = cache::CacheEntry {
+                fingerprint: fp.clone(),
+                command: task.command.clone(),
+                exit_code: 0,
+                elapsed_ms,
+                cached_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            };
+            let _ = c.put(fp, &entry); // ignore cache write errors
+        }
         eprintln!(
-            "[rage] {}#{} ✓ {:.2}s",
-            task.package_name, task.script_name, elapsed
+            "[rage] {}#{} \u{2713} {:.2}s",
+            task.package_name, task.script_name, elapsed_secs
         );
         Ok(())
     } else {
         let code = status.code().unwrap_or(-1);
         eprintln!(
-            "[rage] {}#{} ✗ FAILED (exit {code})",
+            "[rage] {}#{} \u{2717} FAILED (exit {code})",
             task.package_name, task.script_name
         );
         Err(RunError::TaskFailed {
@@ -295,7 +336,7 @@ mod tests {
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
-        run_tasks(&dag, vec![task]).await.unwrap();
+        run_tasks(&dag, vec![task], None).await.unwrap();
     }
 
     #[tokio::test]
@@ -308,7 +349,7 @@ mod tests {
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
-        let err = run_tasks(&dag, vec![task]).await.unwrap_err();
+        let err = run_tasks(&dag, vec![task], None).await.unwrap_err();
         assert!(err.to_string().contains("failing-pkg"));
     }
 
@@ -337,8 +378,57 @@ mod tests {
         ];
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
         let dag = build_dag(packages).unwrap();
-        run_tasks(&dag, tasks).await.unwrap();
+        run_tasks(&dag, tasks, None).await.unwrap();
         assert!(file_a.exists(), "task a should have run");
         assert!(file_b.exists(), "task b should have run");
+    }
+
+    #[tokio::test]
+    async fn task_is_cached_on_second_run() {
+        use cache::LocalCache;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let cache_dir = tempdir().unwrap();
+        let local = LocalCache::with_dir(cache_dir.path().to_path_buf()).unwrap();
+        let cache: Option<Arc<dyn cache::CacheProvider>> = Some(Arc::new(local));
+
+        let pkg_dir = tempdir().unwrap();
+        let task = Task {
+            package_name: "cached-pkg".to_string(),
+            script_name: "build".to_string(),
+            command: "echo cached-test".to_string(),
+            cwd: pkg_dir.path().to_path_buf(),
+        };
+        let pkg = mk_pkg("cached-pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        // First run — should execute and write to cache
+        run_tasks(&dag, vec![task.clone()], cache.clone()).await.unwrap();
+
+        // Verify a cache entry was written (check cache_dir has at least one .json file)
+        let json_files: Vec<_> = std::fs::read_dir(cache_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+            .collect();
+        assert!(!json_files.is_empty(), "cache entry should have been written");
+
+        // Second run — should be a cache hit (same fingerprint)
+        run_tasks(&dag, vec![task], cache).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_cache_option_executes_normally() {
+        let task = Task {
+            package_name: "uncached-pkg".to_string(),
+            script_name: "build".to_string(),
+            command: "echo no-cache-test".to_string(),
+            cwd: PathBuf::from("/tmp"),
+        };
+        let pkg = mk_pkg("uncached-pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+        // None = no cache — should just execute
+        run_tasks(&dag, vec![task], None).await.unwrap();
     }
 }
