@@ -30,6 +30,16 @@ pub fn dylib_path() -> Result<PathBuf> {
 /// The sandbox dylib is injected into the child process via
 /// `DYLD_INSERT_LIBRARIES`.  File-system access events are collected over a
 /// Unix-domain socket and returned as a [`PathSet`].
+///
+/// # Caveats
+///
+/// - On Apple Silicon, `DYLD_INSERT_LIBRARIES` is **silently dropped** for
+///   binaries with the hardened runtime + library validation entitlement.
+///   `/bin/sh`, `cat`, `tsc`, `node`, `cargo`, `tsc-go`, `go` work in practice
+///   because they are not hardened. System binaries (e.g. `/usr/bin/git`) on
+///   newer macOS may not be observable.
+/// - Children that re-exec to a hardened binary lose interposition for that
+///   subtree.
 pub async fn run_sandboxed(
     cmd: &str,
     cwd: &Path,
@@ -135,6 +145,16 @@ mod tests {
             "expected /etc/hosts in reads, got: {:?}",
             result.path_set.reads
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore]
+    async fn force_flat_namespace_is_set() {
+        let r = run_sandboxed("test 1 -eq 1", Path::new("/tmp"), &[])
+            .await
+            .unwrap();
+        assert_eq!(r.exit_code, 0);
     }
 
     #[cfg(target_os = "macos")]
