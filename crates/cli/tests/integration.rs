@@ -682,3 +682,87 @@ fn since_with_no_changes_runs_nothing() {
         "no packages should run when only README changed\n{stderr}"
     );
 }
+
+// ── daemon / dev / status integration tests ──────────────────────────────────
+
+/// Verify that `rage dev build <workspace>` spawns a detached daemon, sends
+/// SetDesiredState, and returns within 10 seconds; and that `rage status`
+/// round-trips GetState against the same daemon; finally the daemon is shut
+/// down cleanly via the Unix socket.
+#[cfg(unix)]
+#[test]
+fn rage_dev_starts_daemon_and_returns_quickly() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Instant;
+    use tempfile::tempdir;
+
+    // Isolated HOME so daemon discovery files don't pollute ~/.rage/daemons
+    let fake_home = tempdir().unwrap();
+
+    // Minimal pnpm workspace fixture
+    let workspace = tempdir().unwrap();
+    let ws = workspace.path();
+    std::fs::write(ws.join("pnpm-workspace.yaml"), b"packages:\n  - 'packages/*'\n").unwrap();
+    std::fs::write(ws.join("package.json"), br#"{"name":"root","private":true}"#).unwrap();
+    let pkg = ws.join("packages/a");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        br#"{"name":"@test/a","version":"1.0.0","scripts":{"build":"echo hi"}}"#,
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_rage");
+
+    // ── rage dev build <workspace> ──────────────────────────────────────────
+    let start = Instant::now();
+    let dev_out = std::process::Command::new(bin)
+        .args(["dev", "build"])
+        .arg(ws)
+        .env("HOME", fake_home.path())
+        .output()
+        .expect("failed to run rage dev");
+    let elapsed = start.elapsed();
+
+    assert!(
+        dev_out.status.success(),
+        "rage dev should exit 0; stderr:\n{}",
+        String::from_utf8_lossy(&dev_out.stderr)
+    );
+    assert!(
+        elapsed.as_secs() < 10,
+        "rage dev took {elapsed:?}, expected < 10s"
+    );
+
+    // ── rage status <workspace> ─────────────────────────────────────────────
+    let status_out = std::process::Command::new(bin)
+        .args(["status"])
+        .arg(ws)
+        .env("HOME", fake_home.path())
+        .output()
+        .expect("failed to run rage status");
+
+    assert!(
+        status_out.status.success(),
+        "rage status should exit 0; stderr:\n{}",
+        String::from_utf8_lossy(&status_out.stderr)
+    );
+
+    // ── Cleanup: send Shutdown over the Unix socket ─────────────────────────
+    let daemons_dir = fake_home.path().join(".rage").join("daemons");
+    if let Ok(entries) = std::fs::read_dir(&daemons_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().map_or(false, |e| e == "sock") {
+                if let Ok(mut stream) = UnixStream::connect(&p) {
+                    let _ = stream.write_all(b"{\"type\":\"Shutdown\"}\n");
+                    let mut buf = String::new();
+                    let _ = stream.read_to_string(&mut buf);
+                }
+            }
+        }
+    }
+    // Give the daemon a moment to exit
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}

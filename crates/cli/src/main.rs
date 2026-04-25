@@ -49,6 +49,43 @@ enum Command {
         #[arg(long)]
         affected: bool,
     },
+
+    /// Run the rage daemon in the foreground (for debugging).
+    Daemon {
+        /// Workspace root (defaults to cwd).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Positional workspace path (overrides --workspace).
+        workspace_pos: Option<PathBuf>,
+    },
+
+    /// Send `SetDesiredState` to the daemon — start one if none is running.
+    Dev {
+        /// Script name to run (e.g. `build`).
+        script: String,
+
+        /// Comma-separated list of target packages.
+        #[arg(long, value_delimiter = ',')]
+        target: Option<Vec<String>>,
+
+        /// Workspace root (defaults to cwd).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Positional workspace path (overrides --workspace).
+        workspace_pos: Option<PathBuf>,
+    },
+
+    /// Print the daemon's current state for this workspace.
+    Status {
+        /// Workspace root (defaults to cwd).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Positional workspace path (overrides --workspace).
+        workspace_pos: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -72,6 +109,29 @@ async fn main() -> Result<()> {
         } => {
             let root = resolve_workspace(workspace_pos, workspace);
             cmd_run(&root, &script, no_cache, since.as_deref(), affected).await
+        }
+        Command::Daemon {
+            workspace,
+            workspace_pos,
+        } => {
+            let root = resolve_workspace(workspace_pos, workspace);
+            daemon::Daemon::new(root).run().await
+        }
+        Command::Dev {
+            script,
+            target,
+            workspace,
+            workspace_pos,
+        } => {
+            let root = resolve_workspace(workspace_pos, workspace);
+            cmd_dev(&root, &script, target).await
+        }
+        Command::Status {
+            workspace,
+            workspace_pos,
+        } => {
+            let root = resolve_workspace(workspace_pos, workspace);
+            cmd_status(&root).await
         }
     }
 }
@@ -99,6 +159,74 @@ fn cmd_graph(root: &Path) -> Result<()> {
     let dag = build_graph::dag::build_dag(resolved).context("building package DAG")?;
     let dot = build_graph::dot::to_dot(&dag);
     print!("{dot}");
+    Ok(())
+}
+
+async fn cmd_dev(root: &Path, script: &str, target: Option<Vec<String>>) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+    let socket_path = daemon::discovery::socket_path(root)?;
+    if !socket_path.exists() {
+        spawn_detached_daemon(root)?;
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+    let stream = UnixStream::connect(&socket_path).await?;
+    let (read, mut write) = stream.into_split();
+    let msg = serde_json::json!({
+        "type": "SetDesiredState",
+        "workspace": root,
+        "script": script,
+        "targets": target,
+    });
+    let mut line = msg.to_string();
+    line.push('\n');
+    write.write_all(line.as_bytes()).await?;
+    write.shutdown().await.ok();
+    let mut lines = BufReader::new(read).lines();
+    if let Ok(Some(resp)) = lines.next_line().await {
+        eprintln!("[rage dev] daemon state: {resp}");
+    }
+    eprintln!("[rage dev] daemon running for {}", root.display());
+    Ok(())
+}
+
+async fn cmd_status(root: &Path) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+    let socket_path = daemon::discovery::socket_path(root)?;
+    if !socket_path.exists() {
+        eprintln!("no daemon running for {}", root.display());
+        return Ok(());
+    }
+    let stream = UnixStream::connect(&socket_path).await?;
+    let (read, mut write) = stream.into_split();
+    write.write_all(b"{\"type\":\"GetState\"}\n").await?;
+    write.shutdown().await.ok();
+    let mut lines = BufReader::new(read).lines();
+    if let Ok(Some(resp)) = lines.next_line().await {
+        println!("{resp}");
+    }
+    Ok(())
+}
+
+fn spawn_detached_daemon(root: &Path) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("daemon").arg(root);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    // Note: setsid() would fully detach from the controlling terminal but
+    // requires an unsafe pre_exec call, which the workspace lint policy
+    // (`unsafe_code = "forbid"`) disallows.  The spawned daemon still
+    // outlives the parent process on all supported platforms.
+    let child = cmd.spawn().context("spawning detached daemon")?;
+    drop(child); // do not wait
     Ok(())
 }
 

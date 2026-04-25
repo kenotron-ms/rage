@@ -23,6 +23,11 @@ scheduler = { path = "../scheduler" }
 cache = { path = "../cache" }
 scoping = { path = "../scoping" }
 tokio = { version = "1", features = ["full"] }
+daemon = { path = "../daemon" }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
