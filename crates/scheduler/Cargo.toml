@@ -14,6 +14,7 @@
     build-graph = { path = "../build-graph" }
     cache = { path = "../cache" }
     pipeline-config = { path = "../pipeline-config" }
+    sandbox = { path = "../sandbox" }
     tokio = { version = "1", features = ["full"] }
     thiserror = "2"
     anyhow = "1"

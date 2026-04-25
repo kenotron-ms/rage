@@ -598,6 +598,7 @@ dependencies = [
  "build-graph",
  "cache",
  "pipeline-config",
+ "sandbox",
  "serde_json",
  "tempfile",
  "thiserror",
