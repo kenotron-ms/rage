@@ -10,6 +10,8 @@ members = [
     "crates/cli",
     "crates/sandbox",
     "crates/sandbox-macos-dylib",
+    "crates/plugin",
+    "crates/plugin-typescript",
 ]
 
 [workspace.package]
