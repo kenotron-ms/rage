@@ -3,12 +3,13 @@ use crate::state::{
 };
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 #[derive(Clone)]
 pub struct ReconcilerHandle {
     pub state: Arc<Mutex<DaemonState>>,
     tx: tokio::sync::mpsc::UnboundedSender<ReconcilerCmd>,
+    state_changes: broadcast::Sender<()>,
 }
 
 pub enum ReconcilerCmd {
@@ -20,6 +21,9 @@ pub enum ReconcilerCmd {
 impl ReconcilerHandle {
     pub fn state(&self) -> Arc<Mutex<DaemonState>> {
         self.state.clone()
+    }
+    pub fn subscribe(&self) -> broadcast::Receiver<()> {
+        self.state_changes.subscribe()
     }
     pub fn set_desired(&self, d: DesiredState) {
         let _ = self.tx.send(ReconcilerCmd::SetDesiredState(d));
@@ -38,7 +42,9 @@ impl ReconcilerHandle {
 pub fn spawn() -> ReconcilerHandle {
     let state = Arc::new(Mutex::new(DaemonState::default()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ReconcilerCmd>();
+    let (state_tx, _) = broadcast::channel::<()>(64);
     let st_clone = state.clone();
+    let bcast = state_tx.clone();
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
             match cmd {
@@ -51,7 +57,9 @@ pub fn spawn() -> ReconcilerHandle {
                         };
                         s.tasks = vec![];
                     }
+                    let _ = bcast.send(());
                     let st = st_clone.clone();
+                    let b2 = bcast.clone();
                     tokio::spawn(async move {
                         match run_build(&d).await {
                             Ok(records) => {
@@ -68,12 +76,14 @@ pub fn spawn() -> ReconcilerHandle {
                                         BuildState::Ready
                                     },
                                 };
+                                let _ = b2.send(());
                             }
                             Err(_) => {
                                 let mut s = st.lock().await;
                                 s.state = BuildStateContainer {
                                     kind: BuildState::Blocked,
                                 };
+                                let _ = b2.send(());
                             }
                         }
                     });
@@ -90,7 +100,9 @@ pub fn spawn() -> ReconcilerHandle {
                         s.desired.clone()
                     };
                     if let Some(d) = desired {
+                        let _ = bcast.send(());
                         let st = st_clone.clone();
+                        let b2 = bcast.clone();
                         tokio::spawn(async move {
                             match run_build(&d).await {
                                 Ok(records) => {
@@ -107,12 +119,14 @@ pub fn spawn() -> ReconcilerHandle {
                                             BuildState::Ready
                                         },
                                     };
+                                    let _ = b2.send(());
                                 }
                                 Err(_) => {
                                     let mut s = st.lock().await;
                                     s.state = BuildStateContainer {
                                         kind: BuildState::Blocked,
                                     };
+                                    let _ = b2.send(());
                                 }
                             }
                         });
@@ -122,11 +136,16 @@ pub fn spawn() -> ReconcilerHandle {
                     let mut s = st_clone.lock().await;
                     s.tasks
                         .retain(|t| !(t.package == package && t.script == script));
+                    let _ = bcast.send(());
                 }
             }
         }
     });
-    ReconcilerHandle { state, tx }
+    ReconcilerHandle {
+        state,
+        tx,
+        state_changes: state_tx,
+    }
 }
 
 async fn run_build(d: &DesiredState) -> Result<Vec<TaskRecord>> {
@@ -181,6 +200,19 @@ mod tests {
     use super::*;
     use crate::state::{BuildState, DesiredState};
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn subscribe_receives_notification_on_state_change() {
+        let h = spawn();
+        let mut rx = h.subscribe();
+        h.set_desired(DesiredState {
+            workspace: std::path::PathBuf::from("/tmp"),
+            script: "build".into(),
+            targets: None,
+        });
+        let res = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+        assert!(res.is_ok(), "expected at least one state-change notification");
+    }
 
     #[tokio::test]
     async fn reconciler_runs_real_tasks_when_workspace_set() {
