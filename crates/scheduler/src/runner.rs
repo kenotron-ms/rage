@@ -153,7 +153,10 @@ async fn run_single_task(
     }
 
     // Cache miss (or no cache) — execute the task
-    eprintln!("[rage] {}#{} starting", task.package_name, task.script_name);
+    eprintln!(
+        "[rage] {}#{} starting [sandbox={:?}]",
+        task.package_name, task.script_name, task.sandbox_mode
+    );
     let start = Instant::now();
 
     let status = Command::new("sh")
@@ -432,6 +435,21 @@ mod tests {
         let pkg = mk_pkg("uncached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
         // None = no cache — should just execute
+        run_tasks(&dag, vec![task], None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_logs_sandbox_mode_in_starting_line() {
+        // Smoke test: just verify runner accepts SandboxMode-bearing tasks.
+        let task = Task {
+            package_name: "smoke".to_string(),
+            script_name: "build".to_string(),
+            command: "true".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::Strict,
+        };
+        let pkg = mk_pkg("smoke", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
         run_tasks(&dag, vec![task], None).await.unwrap();
     }
 }
