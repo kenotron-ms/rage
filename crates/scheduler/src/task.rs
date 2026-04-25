@@ -33,6 +33,14 @@ pub struct Task {
     /// Fed into the weak fingerprint so source changes invalidate the WF hash.
     /// Empty for root tasks (they use `input_paths` instead).
     pub declared_input_globs: Vec<String>,
+    /// Immediate dependency package names (from the workspace DAG).
+    /// Used to look up upstream ABI fingerprints for the early-cutoff mechanism:
+    /// if all deps' ABI fingerprints are unchanged, this task's WF is unchanged.
+    pub dep_package_names: Vec<String>,
+    /// Output globs (relative to package root) produced by this task.
+    /// Used to locate output files for ABI fingerprinting after a successful run.
+    /// Empty for root tasks.
+    pub output_globs: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -142,6 +150,8 @@ pub fn build_task_list(
                 input_paths: rt.input_paths,
                 workspace_root: workspace_root.to_path_buf(),
                 declared_input_globs: Vec::new(), // root tasks use input_paths, not globs
+                dep_package_names: Vec::new(),    // root tasks have no package deps
+                output_globs: Vec::new(),         // root tasks don't have output globs
             });
         }
     }
@@ -181,6 +191,20 @@ pub fn build_task_list(
             let mut declared_input_globs: Vec<String> = globs.into_iter().collect();
             declared_input_globs.sort(); // deterministic order
 
+            // Collect output globs from matching plugins (for ABI fingerprinting)
+            let mut out_globs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for p in plugins {
+                if package_matches_plugin(&pkg.path, *p) {
+                    for td in p.infer_tasks(&pkg.path) {
+                        if td.name == script_name {
+                            out_globs.extend(td.output_globs.iter().cloned());
+                        }
+                    }
+                }
+            }
+            let mut output_globs: Vec<String> = out_globs.into_iter().collect();
+            output_globs.sort();
+
             tasks.push(Task {
                 package_name: pkg_name.clone(),
                 script_name: script_name.to_string(),
@@ -191,6 +215,8 @@ pub fn build_task_list(
                 input_paths: Vec::new(),
                 workspace_root: workspace_root.to_path_buf(),
                 declared_input_globs,
+                dep_package_names: pkg.dependencies.clone(),
+                output_globs,
             });
             package_tasks_added += 1;
         }
@@ -320,6 +346,8 @@ mod tests {
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         assert_eq!(t.sandbox_mode, pipeline_config::SandboxMode::Strict);
     }

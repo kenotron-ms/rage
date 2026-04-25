@@ -280,6 +280,7 @@ async fn run_single_task(
                     .unwrap_or_default()
                     .as_secs(),
                 pathset_reads: vec![],
+                abi_fingerprint: None,
             };
             let _ = c.put(fp, &entry); // ignore cache write errors
         }
@@ -350,6 +351,7 @@ async fn run_root_task_legacy(
                     .unwrap_or_default()
                     .as_secs(),
                 pathset_reads: vec![],
+                abi_fingerprint: None,
             };
             let _ = c.put(&fp, &entry);
         }
@@ -483,12 +485,20 @@ async fn run_single_task_two_phase(
     let tool_path = which_first(&task.command, &task.cwd, &task.workspace_root)
         .unwrap_or_else(|| PathBuf::from("sh"));
 
+    // Gather dep ABI fingerprints for early-cutoff WF computation
+    let dep_abi_fps: Vec<(String, String)> = task
+        .dep_package_names
+        .iter()
+        .filter_map(|dep| cache.get_pkg_abi_fp(dep).map(|fp| (dep.clone(), fp)))
+        .collect();
+
     let inputs = WeakFpInputs {
         command: &task.command,
         tool_path: &tool_path,
         package_path: &task.cwd,
         declared_input_globs: &task.declared_input_globs,
         tracked_env: &[],
+        dep_abi_fingerprints: &dep_abi_fps,
     };
 
     // Phase 1: cache lookup
@@ -572,8 +582,22 @@ async fn run_single_task_two_phase(
                 .unwrap_or_default()
                 .as_secs(),
             pathset_reads: vec![],
+            abi_fingerprint: None,
         };
         let _ = cache.record(&inputs, pathset, entry); // ignore write errors
+
+        // Compute and persist ABI fingerprint so downstream tasks can do early-cutoff.
+        // Resolve output globs to find output files (e.g. .d.ts for TypeScript).
+        let output_files = resolve_output_globs(&task.cwd, &task.output_globs);
+        if !output_files.is_empty() {
+            // For now use a simple hash of .d.ts files directly (plugin-agnostic).
+            // Phase 3+: call plugin.abi_fingerprint() here when plugin ref is available.
+            let abi_fp = compute_abi_fingerprint_from_outputs(&output_files);
+            if let Some(fp) = abi_fp {
+                cache.set_pkg_abi_fp(&task.package_name, &fp);
+            }
+        }
+
         eprintln!(
             "[rage] {}#{} \u{2713} {:.2}s",
             task.package_name,
@@ -650,6 +674,148 @@ async fn run_root_task_two_phase(
     }
 }
 
+/// Resolve output globs for a task, returning matching file paths.
+/// Skips `node_modules`, `.git`, `target` directories (same as WF glob resolver).
+fn resolve_output_globs(cwd: &std::path::Path, output_globs: &[String]) -> Vec<std::path::PathBuf> {
+    if output_globs.is_empty() {
+        return Vec::new();
+    }
+    use walkdir::WalkDir;
+
+    // Build a simple glob matcher without pulling in extra deps.
+    // We use the same simple_glob_match from task.rs would need, but here
+    // we do a full recursive walk matching against each glob.
+    // For correctness, we use globset from the cache crate indirectly:
+    // since scheduler depends on cache which depends on globset, we can
+    // use a simple path-matching approach here.
+    let mut results = Vec::new();
+    const SKIP_DIRS: &[&str] = &["node_modules", "target", "dist", ".git"];
+
+    for entry in WalkDir::new(cwd)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.file_type().is_dir() {
+                let name = e.file_name().to_string_lossy();
+                !SKIP_DIRS.contains(&name.as_ref())
+            } else {
+                true
+            }
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let rel = match path.strip_prefix(cwd) {
+            Ok(r) => r.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+        // Check against each output glob using simple prefix/suffix matching
+        for glob in output_globs {
+            if output_glob_matches(glob, &rel) {
+                results.push(path.to_path_buf());
+                break;
+            }
+        }
+    }
+    results
+}
+
+/// Simple glob matcher for output files: supports `*` and `**`.
+fn output_glob_matches(glob: &str, path: &str) -> bool {
+    // Normalize separators
+    let glob = glob.replace('\\', "/");
+    let path = path.replace('\\', "/");
+    glob_match_recursive(glob.split('/').collect(), path.split('/').collect())
+}
+
+fn glob_match_recursive(mut pattern: Vec<&str>, mut path: Vec<&str>) -> bool {
+    loop {
+        match (pattern.first(), path.first()) {
+            (None, None) => return true,
+            (None, _) => return false,
+            (Some(&"**"), _) => {
+                pattern.remove(0);
+                if pattern.is_empty() {
+                    return true;
+                }
+                // Try matching rest of pattern from each position in path
+                for i in 0..=path.len() {
+                    if glob_match_recursive(pattern.clone(), path[i..].to_vec()) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            (_, None) => return false,
+            (Some(p), Some(s)) => {
+                if !simple_component_match(p, s) {
+                    return false;
+                }
+                pattern.remove(0);
+                path.remove(0);
+            }
+        }
+    }
+}
+
+fn simple_component_match(pattern: &str, s: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == s;
+    }
+    // Split on '*' and do prefix/infix/suffix matching
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut remaining = s;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            if !remaining.starts_with(part) {
+                return false;
+            }
+            remaining = &remaining[part.len()..];
+        } else if i == parts.len() - 1 {
+            return remaining.ends_with(part);
+        } else if let Some(pos) = remaining.find(part) {
+            remaining = &remaining[pos + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Compute an ABI fingerprint from a list of output files.
+/// Hashes the contents of `.d.ts`, `.d.cts`, and `.d.mts` files.
+/// Returns `None` if no declaration files are found.
+fn compute_abi_fingerprint_from_outputs(files: &[std::path::PathBuf]) -> Option<String> {
+    let mut dts_paths: Vec<&std::path::Path> = files
+        .iter()
+        .map(|p| p.as_path())
+        .filter(|p| {
+            let s = p.to_string_lossy();
+            s.ends_with(".d.ts") || s.ends_with(".d.cts") || s.ends_with(".d.mts")
+        })
+        .collect();
+    if dts_paths.is_empty() {
+        return None;
+    }
+    dts_paths.sort();
+    let mut hasher = blake3::Hasher::new();
+    for path in dts_paths {
+        hasher.update(path.as_os_str().as_encoded_bytes());
+        if let Ok(content) = std::fs::read(path) {
+            hasher.update(&content);
+        }
+    }
+    Some(hasher.finalize().to_hex().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +844,8 @@ mod tests {
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         }
     }
 
@@ -777,6 +945,8 @@ mod tests {
             input_paths: vec![PathBuf::from("/tmp/pnpm-lock.yaml")],
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let pkg_task = mk_task("core");
         let dag = build_dag(vec![mk_pkg("core", &[])]).unwrap();
@@ -802,6 +972,8 @@ mod tests {
             input_paths: vec![],
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let mut tasks: Vec<Task> = ["core", "utils", "ui", "app"]
             .iter()
@@ -854,6 +1026,8 @@ mod tests {
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -872,6 +1046,8 @@ mod tests {
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -899,6 +1075,8 @@ mod tests {
                 input_paths: Vec::new(),
                 workspace_root: PathBuf::from("/tmp"),
                 declared_input_globs: Vec::new(),
+                dep_package_names: Vec::new(),
+                output_globs: Vec::new(),
             },
             Task {
                 package_name: "b".to_string(),
@@ -910,6 +1088,8 @@ mod tests {
                 input_paths: Vec::new(),
                 workspace_root: PathBuf::from("/tmp"),
                 declared_input_globs: Vec::new(),
+                dep_package_names: Vec::new(),
+                output_globs: Vec::new(),
             },
         ];
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
@@ -940,6 +1120,8 @@ mod tests {
             input_paths: Vec::new(),
             workspace_root: pkg_dir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let pkg = mk_pkg("cached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -976,6 +1158,8 @@ mod tests {
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let pkg = mk_pkg("uncached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -996,6 +1180,8 @@ mod tests {
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let pkg = mk_pkg("smoke", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1025,6 +1211,8 @@ mod tests {
             input_paths: Vec::new(),
             workspace_root: pkg_dir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let pkg = mk_pkg("pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1077,6 +1265,8 @@ mod tests {
             input_paths: vec![lock.clone()],
             workspace_root: dir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let fp_a = root_task_fingerprint(&task_a);
 
@@ -1112,6 +1302,8 @@ mod tests {
             input_paths: vec![PathBuf::from("/this/does/not/exist/pnpm-lock.yaml")],
             workspace_root: PathBuf::from("/tmp"),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let fp1 = root_task_fingerprint(&task);
         let fp2 = root_task_fingerprint(&task);
@@ -1206,6 +1398,8 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1241,6 +1435,8 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             declared_input_globs: vec!["src/**/*.ts".to_string(), "package.json".to_string()],
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
         };
 
         let cache_dir = tempdir().unwrap();
@@ -1281,6 +1477,88 @@ mod tests {
             wf_files_after_second.len(),
             2,
             "source change must produce a new WF entry (cache miss)"
+        );
+    }
+
+    // ── Phase 3: ABI early-cutoff integration test ───────────────────────────
+
+    #[tokio::test]
+    async fn abi_early_cutoff_hit_when_dep_api_unchanged() {
+        // Simulate: core builds and produces a .d.ts file (its ABI fingerprint is stored).
+        // utils depends on core. When core's *implementation* changes but its .d.ts
+        // doesn't, utils should hit the cache via WF (same dep ABI fingerprint).
+        use tempfile::tempdir;
+        let core_dir = tempdir().unwrap();
+        let utils_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+
+        // Write a .d.ts file for "core" that will be its ABI output
+        let dts_file = core_dir.path().join("index.d.ts");
+        std::fs::write(&dts_file, b"export declare const x: number;\n").unwrap();
+
+        // Pre-populate core's ABI fingerprint in cache (simulates core having run)
+        let cache = std::sync::Arc::new(
+            cache::TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap(),
+        );
+
+        // Compute what core's ABI fingerprint would be
+        let core_abi = {
+            use plugin::OutputFile;
+            use plugin_typescript::TypeScriptPlugin;
+            let outputs = vec![OutputFile {
+                path: dts_file.clone(),
+            }];
+            plugin::EcosystemPlugin::abi_fingerprint(&TypeScriptPlugin::new(), &outputs).unwrap()
+        };
+        cache.set_pkg_abi_fp("core", &core_abi);
+
+        // utils task declares "core" as a dep
+        let utils_task = Task {
+            package_name: "utils".to_string(),
+            script_name: "build".to_string(),
+            command: "echo utils-build".to_string(),
+            cwd: utils_dir.path().to_path_buf(),
+            workspace_root: utils_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            declared_input_globs: Vec::new(),
+            dep_package_names: vec!["core".to_string()],
+            output_globs: Vec::new(),
+        };
+
+        let pkg_utils = mk_pkg("utils", &["core"]);
+        let pkg_core = mk_pkg("core", &[]);
+        let dag = build_dag(vec![pkg_core, pkg_utils]).unwrap();
+
+        // First run: utils runs (cache miss) — WF includes core's ABI fp
+        run_tasks_two_phase(&dag, vec![utils_task.clone()], cache.clone())
+            .await
+            .unwrap();
+
+        // Verify one WF entry for utils
+        let wf_count_1 = std::fs::read_dir(cache_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("wf-"))
+            .count();
+        assert_eq!(wf_count_1, 1, "first run: one WF entry");
+
+        // utils runs AGAIN with the same core ABI fingerprint →
+        // same WF → cache HIT → printed as "(cached, two-phase)"
+        run_tasks_two_phase(&dag, vec![utils_task], cache.clone())
+            .await
+            .unwrap();
+
+        // WF entry count must still be 1 (hit, not a second entry)
+        let wf_count_2 = std::fs::read_dir(cache_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("wf-"))
+            .count();
+        assert_eq!(
+            wf_count_2, 1,
+            "second run with same dep ABI: cache hit, still 1 WF entry"
         );
     }
 }
