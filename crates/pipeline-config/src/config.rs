@@ -44,11 +44,25 @@ pub struct Policy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default)]
+pub struct InputGlobsConfig {
+    pub extend: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
+pub struct PluginConfig {
+    pub input_globs: InputGlobsConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
 pub struct RageConfig {
     pub plugins: Vec<String>,
     pub sandbox: SandboxConfig,
     pub cache: CacheConfig,
     pub policies: Vec<Policy>,
+    pub plugins_config: std::collections::HashMap<String, PluginConfig>,
 }
 
 /// Load `rage.json` from the workspace root. Returns `None` if absent.
@@ -139,6 +153,29 @@ mod tests {
         let cfg = load_config(&d).unwrap().unwrap();
         assert_eq!(cfg.cache.backend, "local");
         assert_eq!(cfg.cache.dir, None);
+    }
+
+    #[test]
+    fn parses_plugins_config() {
+        let d = tmpdir();
+        let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
+        f.write_all(
+            br#"{
+            "plugins_config": {
+                "rage-typescript": {
+                    "input_globs": {
+                        "extend":  ["../../tsconfig.base.json"],
+                        "exclude": ["**/*.test.ts"]
+                    }
+                }
+            }
+        }"#,
+        )
+        .unwrap();
+        let cfg = load_config(&d).unwrap().unwrap();
+        let ts = cfg.plugins_config.get("rage-typescript").unwrap();
+        assert_eq!(ts.input_globs.extend, vec!["../../tsconfig.base.json"]);
+        assert_eq!(ts.input_globs.exclude, vec!["**/*.test.ts"]);
     }
 
     #[test]
