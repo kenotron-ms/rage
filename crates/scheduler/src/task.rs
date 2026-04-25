@@ -16,6 +16,8 @@ pub struct Task {
     pub command: String,
     /// Working directory (package root)
     pub cwd: PathBuf,
+    /// Sandbox mode to apply when executing this task
+    pub sandbox_mode: pipeline_config::SandboxMode,
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +63,7 @@ pub fn build_task_list(dag: &WorkspaceDag, script_name: &str) -> Result<Vec<Task
                 script_name: script_name.to_string(),
                 command: cmd,
                 cwd: pkg.path.clone(),
+                sandbox_mode: pipeline_config::SandboxMode::default(),
             });
         }
         // else: silently skip packages without the script
@@ -140,6 +143,18 @@ mod tests {
         // "test" script is not defined in any fixture package
         let err = build_task_list(&dag, "test").unwrap_err();
         assert!(matches!(err, TaskError::NoMatchingScript(_)));
+    }
+
+    #[test]
+    fn task_carries_sandbox_mode() {
+        let t = Task {
+            package_name: "x".to_string(),
+            script_name: "build".to_string(),
+            command: "echo".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::Strict,
+        };
+        assert_eq!(t.sandbox_mode, pipeline_config::SandboxMode::Strict);
     }
 
     #[test]

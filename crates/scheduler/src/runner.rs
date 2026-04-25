@@ -229,6 +229,7 @@ mod tests {
             script_name: "build".to_string(),
             command: format!("echo {name}"),
             cwd: PathBuf::from(format!("/tmp/{name}")),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
         }
     }
 
@@ -324,6 +325,7 @@ mod tests {
             script_name: "build".to_string(),
             command: "echo hello".to_string(),
             cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -337,6 +339,7 @@ mod tests {
             script_name: "build".to_string(),
             command: "false".to_string(), // exits with code 1
             cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -359,12 +362,14 @@ mod tests {
                 script_name: "build".to_string(),
                 command: cmd_a,
                 cwd: PathBuf::from("/tmp"),
+                sandbox_mode: pipeline_config::SandboxMode::default(),
             },
             Task {
                 package_name: "b".to_string(),
                 script_name: "build".to_string(),
                 command: cmd_b,
                 cwd: PathBuf::from("/tmp"),
+                sandbox_mode: pipeline_config::SandboxMode::default(),
             },
         ];
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
@@ -390,6 +395,7 @@ mod tests {
             script_name: "build".to_string(),
             command: "echo cached-test".to_string(),
             cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
         };
         let pkg = mk_pkg("cached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -421,6 +427,7 @@ mod tests {
             script_name: "build".to_string(),
             command: "echo no-cache-test".to_string(),
             cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
         };
         let pkg = mk_pkg("uncached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
