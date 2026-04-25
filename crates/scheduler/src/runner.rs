@@ -487,7 +487,7 @@ async fn run_single_task_two_phase(
         command: &task.command,
         tool_path: &tool_path,
         package_path: &task.cwd,
-        declared_input_globs: &[],
+        declared_input_globs: &task.declared_input_globs,
         tracked_env: &[],
     };
 
@@ -677,6 +677,7 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         }
     }
 
@@ -775,6 +776,7 @@ mod tests {
             is_root: true,
             input_paths: vec![PathBuf::from("/tmp/pnpm-lock.yaml")],
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         };
         let pkg_task = mk_task("core");
         let dag = build_dag(vec![mk_pkg("core", &[])]).unwrap();
@@ -799,6 +801,7 @@ mod tests {
             is_root: true,
             input_paths: vec![],
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         };
         let mut tasks: Vec<Task> = ["core", "utils", "ui", "app"]
             .iter()
@@ -850,6 +853,7 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -867,6 +871,7 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -893,6 +898,7 @@ mod tests {
                 is_root: false,
                 input_paths: Vec::new(),
                 workspace_root: PathBuf::from("/tmp"),
+                declared_input_globs: Vec::new(),
             },
             Task {
                 package_name: "b".to_string(),
@@ -903,6 +909,7 @@ mod tests {
                 is_root: false,
                 input_paths: Vec::new(),
                 workspace_root: PathBuf::from("/tmp"),
+                declared_input_globs: Vec::new(),
             },
         ];
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
@@ -932,6 +939,7 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: Vec::new(),
         };
         let pkg = mk_pkg("cached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -967,6 +975,7 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         };
         let pkg = mk_pkg("uncached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -986,6 +995,7 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         };
         let pkg = mk_pkg("smoke", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1014,6 +1024,7 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: Vec::new(),
         };
         let pkg = mk_pkg("pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1065,6 +1076,7 @@ mod tests {
             is_root: true,
             input_paths: vec![lock.clone()],
             workspace_root: dir.path().to_path_buf(),
+            declared_input_globs: Vec::new(),
         };
         let fp_a = root_task_fingerprint(&task_a);
 
@@ -1099,6 +1111,7 @@ mod tests {
             is_root: true,
             input_paths: vec![PathBuf::from("/this/does/not/exist/pnpm-lock.yaml")],
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         };
         let fp1 = root_task_fingerprint(&task);
         let fp2 = root_task_fingerprint(&task);
@@ -1192,6 +1205,7 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Loose,
             is_root: false,
             input_paths: Vec::new(),
+            declared_input_globs: Vec::new(),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1203,6 +1217,70 @@ mod tests {
         assert!(
             sentinel.exists(),
             "fake-tsc must have been found via node_modules/.bin"
+        );
+    }
+
+    // ── Phase 2 regression test: declared_input_globs wired ─────────────────
+
+    #[tokio::test]
+    async fn source_change_causes_cache_miss_with_input_globs() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("index.ts");
+        std::fs::write(&src_file, b"export const v = 1;").unwrap();
+
+        let task = Task {
+            package_name: "ts-pkg".to_string(),
+            script_name: "build".to_string(),
+            command: "echo build".to_string(),
+            cwd: dir.path().to_path_buf(),
+            workspace_root: dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            declared_input_globs: vec!["src/**/*.ts".to_string(), "package.json".to_string()],
+        };
+
+        let cache_dir = tempdir().unwrap();
+        let cache = std::sync::Arc::new(
+            cache::TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap(),
+        );
+        let pkg = mk_pkg("ts-pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        // First run — cache miss, WF computed from src/index.ts content
+        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone())
+            .await
+            .unwrap();
+
+        let wf_files_after_first: Vec<_> = std::fs::read_dir(cache_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("wf-"))
+            .collect();
+        assert_eq!(
+            wf_files_after_first.len(),
+            1,
+            "one WF entry after first run"
+        );
+
+        // Mutate declared input — WF must change
+        std::fs::write(&src_file, b"export const v = 2;").unwrap();
+
+        // Second run — must MISS because WF changed (source file content changed)
+        run_tasks_two_phase(&dag, vec![task], cache).await.unwrap();
+
+        let wf_files_after_second: Vec<_> = std::fs::read_dir(cache_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("wf-"))
+            .collect();
+        assert_eq!(
+            wf_files_after_second.len(),
+            2,
+            "source change must produce a new WF entry (cache miss)"
         );
     }
 }
