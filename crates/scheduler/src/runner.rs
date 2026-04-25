@@ -36,10 +36,8 @@ pub enum RunError {
 /// Within a wave, tasks are sorted by package name for determinism.
 pub fn compute_task_levels(dag: &WorkspaceDag, tasks: &[Task]) -> Vec<Vec<Task>> {
     // Build lookup: package_name -> task
-    let task_map: HashMap<&str, &Task> = tasks
-        .iter()
-        .map(|t| (t.package_name.as_str(), t))
-        .collect();
+    let task_map: HashMap<&str, &Task> =
+        tasks.iter().map(|t| (t.package_name.as_str(), t)).collect();
 
     // Get topo order (deps first)
     let order = topological_sort(dag).expect("DAG is acyclic by construction");
@@ -139,9 +137,9 @@ async fn run_single_task(
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Compute fingerprint if cache is provided
-    let fingerprint = cache.as_ref().and_then(|_| {
-        cache::fingerprint_task(&task.command, &task.cwd).ok()
-    });
+    let fingerprint = cache
+        .as_ref()
+        .and_then(|_| cache::fingerprint_task(&task.command, &task.cwd).ok());
 
     // Check cache — on hit, print and return early
     if let (Some(fp), Some(c)) = (&fingerprint, &cache) {
@@ -155,10 +153,7 @@ async fn run_single_task(
     }
 
     // Cache miss (or no cache) — execute the task
-    eprintln!(
-        "[rage] {}#{} starting",
-        task.package_name, task.script_name
-    );
+    eprintln!("[rage] {}#{} starting", task.package_name, task.script_name);
     let start = Instant::now();
 
     let status = Command::new("sh")
@@ -262,11 +257,7 @@ mod tests {
     #[test]
     fn linear_chain_is_separate_levels() {
         let tasks: Vec<Task> = ["a", "b", "c"].iter().map(|n| mk_task(n)).collect();
-        let packages = vec![
-            mk_pkg("a", &[]),
-            mk_pkg("b", &["a"]),
-            mk_pkg("c", &["b"]),
-        ];
+        let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &["a"]), mk_pkg("c", &["b"])];
         let dag = build_dag(packages).unwrap();
         let levels = compute_task_levels(&dag, &tasks);
         assert_eq!(levels.len(), 3, "linear chain → 3 levels");
@@ -404,7 +395,9 @@ mod tests {
         let dag = build_dag(vec![pkg]).unwrap();
 
         // First run — should execute and write to cache
-        run_tasks(&dag, vec![task.clone()], cache.clone()).await.unwrap();
+        run_tasks(&dag, vec![task.clone()], cache.clone())
+            .await
+            .unwrap();
 
         // Verify a cache entry was written (check cache_dir has at least one .json file)
         let json_files: Vec<_> = std::fs::read_dir(cache_dir.path())
@@ -412,7 +405,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             .collect();
-        assert!(!json_files.is_empty(), "cache entry should have been written");
+        assert!(
+            !json_files.is_empty(),
+            "cache entry should have been written"
+        );
 
         // Second run — should be a cache hit (same fingerprint)
         run_tasks(&dag, vec![task], cache).await.unwrap();

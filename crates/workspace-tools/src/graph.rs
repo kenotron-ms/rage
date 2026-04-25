@@ -8,8 +8,7 @@ use std::collections::HashSet;
 /// workspace-internal packages it depends on. External npm dependencies
 /// (anything not in the workspace) are filtered out.
 pub fn build_package_graph(packages: Vec<Package>) -> Result<Vec<Package>> {
-    let workspace_names: HashSet<String> =
-        packages.iter().map(|p| p.name.clone()).collect();
+    let workspace_names: HashSet<String> = packages.iter().map(|p| p.name.clone()).collect();
 
     let mut out = Vec::with_capacity(packages.len());
     for mut pkg in packages {
@@ -25,8 +24,9 @@ pub fn build_package_graph(packages: Vec<Package>) -> Result<Vec<Package>> {
                 continue;
             }
             Err(e) => {
-                return Err(anyhow::Error::from(e)
-                    .context(format!("reading {}", manifest_path.display())));
+                return Err(
+                    anyhow::Error::from(e).context(format!("reading {}", manifest_path.display()))
+                );
             }
         };
 
@@ -59,13 +59,17 @@ mod tests {
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .parent().unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
             .join("fixtures")
     }
 
     fn get<'a>(pkgs: &'a [Package], name: &str) -> &'a Package {
-        pkgs.iter().find(|p| p.name == name).expect("package not found")
+        pkgs.iter()
+            .find(|p| p.name == name)
+            .expect("package not found")
     }
 
     #[test]
@@ -75,7 +79,10 @@ mod tests {
         let resolved = build_package_graph(raw).unwrap();
 
         assert!(get(&resolved, "@fixture/core").dependencies.is_empty());
-        assert_eq!(get(&resolved, "@fixture/utils").dependencies, vec!["@fixture/core"]);
+        assert_eq!(
+            get(&resolved, "@fixture/utils").dependencies,
+            vec!["@fixture/core"]
+        );
         assert_eq!(
             get(&resolved, "@fixture/ui").dependencies,
             vec!["@fixture/core", "@fixture/utils"]
@@ -113,7 +120,9 @@ mod tests {
             get(&resolved, "@npm-fixture/client").dependencies,
             vec!["@npm-fixture/shared"]
         );
-        assert!(get(&resolved, "@npm-fixture/shared").dependencies.is_empty());
+        assert!(get(&resolved, "@npm-fixture/shared")
+            .dependencies
+            .is_empty());
     }
 
     #[test]
@@ -175,8 +184,16 @@ mod tests {
         let a = resolved.iter().find(|p| p.name == "@ws/a").unwrap();
         let b = resolved.iter().find(|p| p.name == "@ws/b").unwrap();
 
-        assert_eq!(a.dependencies, vec!["@ws/b"], "devDependency should be resolved");
-        assert_eq!(b.dependencies, vec!["@ws/a"], "peerDependency should be resolved");
+        assert_eq!(
+            a.dependencies,
+            vec!["@ws/b"],
+            "devDependency should be resolved"
+        );
+        assert_eq!(
+            b.dependencies,
+            vec!["@ws/a"],
+            "peerDependency should be resolved"
+        );
     }
 
     #[test]

@@ -71,16 +71,18 @@ fn resolve_workspace(pos: Option<PathBuf>, named: Option<PathBuf>) -> PathBuf {
 }
 
 fn cmd_graph(root: &Path) -> Result<()> {
-    let pm = workspace_tools::detect_package_manager(root).with_context(|| {
-        format!("{} is not a recognized JS workspace", root.display())
-    })?;
+    let pm = workspace_tools::detect_package_manager(root)
+        .with_context(|| format!("{} is not a recognized JS workspace", root.display()))?;
 
-    let raw = workspace_tools::discover_packages(root)
-        .context("discovering workspace packages")?;
-    let resolved = workspace_tools::build_package_graph(raw)
-        .context("resolving package dependency edges")?;
+    let raw = workspace_tools::discover_packages(root).context("discovering workspace packages")?;
+    let resolved =
+        workspace_tools::build_package_graph(raw).context("resolving package dependency edges")?;
 
-    eprintln!("Found {} packages ({} workspace)", resolved.len(), pm.as_str());
+    eprintln!(
+        "Found {} packages ({} workspace)",
+        resolved.len(),
+        pm.as_str()
+    );
 
     let dag = build_graph::dag::build_dag(resolved).context("building package DAG")?;
     let dot = build_graph::dot::to_dot(&dag);
@@ -92,16 +94,18 @@ async fn cmd_run(root: &Path, script: &str, no_cache: bool) -> Result<()> {
     use cache::LocalCache;
     use std::sync::Arc;
 
-    let pm = workspace_tools::detect_package_manager(root).with_context(|| {
-        format!("{} is not a recognized JS workspace", root.display())
-    })?;
+    let pm = workspace_tools::detect_package_manager(root)
+        .with_context(|| format!("{} is not a recognized JS workspace", root.display()))?;
 
-    let raw = workspace_tools::discover_packages(root)
-        .context("discovering workspace packages")?;
-    let resolved = workspace_tools::build_package_graph(raw)
-        .context("resolving package dependency edges")?;
+    let raw = workspace_tools::discover_packages(root).context("discovering workspace packages")?;
+    let resolved =
+        workspace_tools::build_package_graph(raw).context("resolving package dependency edges")?;
 
-    eprintln!("Found {} packages ({} workspace)", resolved.len(), pm.as_str());
+    eprintln!(
+        "Found {} packages ({} workspace)",
+        resolved.len(),
+        pm.as_str()
+    );
 
     let dag = build_graph::dag::build_dag(resolved).context("building package DAG")?;
 

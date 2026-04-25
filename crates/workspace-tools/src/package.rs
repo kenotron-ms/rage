@@ -30,9 +30,9 @@ impl Package {
         let name = parsed
             .get("name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!(
-                "{} is missing a `name` field", manifest_path.display()
-            ))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("{} is missing a `name` field", manifest_path.display())
+            })?
             .to_string();
 
         let version = parsed
@@ -57,8 +57,10 @@ mod tests {
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .parent().unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
             .join("fixtures")
     }
 
@@ -85,7 +87,10 @@ mod tests {
     fn errors_on_missing_directory() {
         let dir = fixtures_dir().join("js-pnpm/packages/nonexistent");
         let err = Package::from_manifest_dir(dir).unwrap_err();
-        assert!(err.to_string().contains("reading"), "expected read error, got: {err}");
+        assert!(
+            err.to_string().contains("reading"),
+            "expected read error, got: {err}"
+        );
     }
 
     #[test]
@@ -95,7 +100,10 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("package.json"), r#"{"version":"1.0.0"}"#).unwrap();
         let err = Package::from_manifest_dir(tmp.clone()).unwrap_err();
-        assert!(err.to_string().contains("missing a `name` field"), "got: {err}");
+        assert!(
+            err.to_string().contains("missing a `name` field"),
+            "got: {err}"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

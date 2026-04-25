@@ -10,7 +10,11 @@ pub fn to_dot(dag: &WorkspaceDag) -> String {
     let mut out = String::new();
     writeln!(out, "digraph workspace {{").unwrap();
     writeln!(out, "  rankdir=\"LR\";").unwrap();
-    writeln!(out, "  node [shape=\"box\", style=\"rounded\", fontname=\"monospace\"];").unwrap();
+    writeln!(
+        out,
+        "  node [shape=\"box\", style=\"rounded\", fontname=\"monospace\"];"
+    )
+    .unwrap();
 
     // Nodes — sorted by name
     let mut names: Vec<&String> = dag.packages.keys().collect();
@@ -73,10 +77,14 @@ mod tests {
             mk("@fixture/utils", &["@fixture/core"]),
             mk("@fixture/ui", &["@fixture/core", "@fixture/utils"]),
             mk("@fixture/app", &["@fixture/ui", "@fixture/core"]),
-        ]).unwrap();
+        ])
+        .unwrap();
         let dot = to_dot(&dag);
 
-        assert!(dot.contains(r#""@fixture/core" [label="@fixture/core@1.0.0"]"#), "dot was: {dot}");
+        assert!(
+            dot.contains(r#""@fixture/core" [label="@fixture/core@1.0.0"]"#),
+            "dot was: {dot}"
+        );
         assert!(dot.contains(r#""@fixture/app" [label="@fixture/app@1.0.0"]"#));
 
         assert!(dot.contains(r#""@fixture/utils" -> "@fixture/core""#));
@@ -92,18 +100,13 @@ mod tests {
 
     #[test]
     fn output_is_deterministic() {
-        let pkgs1 = vec![
-            mk("a", &["b"]),
-            mk("b", &[]),
-            mk("c", &["a", "b"]),
-        ];
-        let pkgs2 = vec![
-            mk("c", &["b", "a"]),
-            mk("b", &[]),
-            mk("a", &["b"]),
-        ];
+        let pkgs1 = vec![mk("a", &["b"]), mk("b", &[]), mk("c", &["a", "b"])];
+        let pkgs2 = vec![mk("c", &["b", "a"]), mk("b", &[]), mk("a", &["b"])];
         let dot1 = to_dot(&build_dag(pkgs1).unwrap());
         let dot2 = to_dot(&build_dag(pkgs2).unwrap());
-        assert_eq!(dot1, dot2, "DOT output must be deterministic regardless of input order");
+        assert_eq!(
+            dot1, dot2,
+            "DOT output must be deterministic regardless of input order"
+        );
     }
 }

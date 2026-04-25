@@ -9,7 +9,10 @@ pub fn topological_sort(dag: &WorkspaceDag) -> Result<Vec<String>, DagError> {
     let reversed = Reversed(&dag.graph);
     let order = petgraph::algo::toposort(reversed, None)
         .map_err(|_| DagError::Cycle("<cycle detected in topo>".to_string()))?;
-    Ok(order.into_iter().map(|idx| dag.graph[idx].clone()).collect())
+    Ok(order
+        .into_iter()
+        .map(|idx| dag.graph[idx].clone())
+        .collect())
 }
 
 #[cfg(test)]
@@ -29,7 +32,10 @@ mod tests {
     }
 
     fn pos(order: &[String], name: &str) -> usize {
-        order.iter().position(|n| n == name).expect("name not in order")
+        order
+            .iter()
+            .position(|n| n == name)
+            .expect("name not in order")
     }
 
     #[test]
@@ -46,7 +52,8 @@ mod tests {
             mk("utils", &["core"]),
             mk("ui", &["core", "utils"]),
             mk("app", &["ui", "core"]),
-        ]).unwrap();
+        ])
+        .unwrap();
         let order = topological_sort(&dag).unwrap();
         assert_eq!(order.len(), 4);
         assert!(pos(&order, "core") < pos(&order, "utils"));

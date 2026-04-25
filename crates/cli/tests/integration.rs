@@ -119,8 +119,8 @@ fn graph_via_workspace_flag() {
 fn positional_overrides_workspace_flag() {
     let output = rage()
         .args(["graph", "--workspace"])
-        .arg(fixtures_dir().join("js-npm"))   // npm = 3 pkgs via flag
-        .arg(fixtures_dir().join("js-pnpm"))  // pnpm = 4 pkgs via positional (wins)
+        .arg(fixtures_dir().join("js-npm")) // npm = 3 pkgs via flag
+        .arg(fixtures_dir().join("js-pnpm")) // pnpm = 4 pkgs via positional (wins)
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -143,7 +143,10 @@ fn run_build_pnpm_exits_zero() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Found 4 packages"), "should report package count");
+    assert!(
+        stderr.contains("Found 4 packages"),
+        "should report package count"
+    );
     assert!(stderr.contains("Done."), "should report completion");
 }
 
@@ -182,15 +185,20 @@ fn no_cache_flag_accepted() {
     // Verify --no-cache is a recognized flag (doesn't error with "unexpected argument")
     let bin = env!("CARGO_BIN_EXE_rage");
     let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
-        .parent().unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
         .join("fixtures");
     let output = std::process::Command::new(bin)
         .args(["run", "build", "--no-cache"])
         .arg(fixtures_dir.join("js-pnpm"))
         .output()
         .unwrap();
-    assert!(output.status.success(), "rage run build --no-cache should succeed");
+    assert!(
+        output.status.success(),
+        "rage run build --no-cache should succeed"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Done."));
 }
@@ -203,8 +211,10 @@ fn second_run_uses_cache() {
     let cache_dir = tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_rage");
     let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
-        .parent().unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
         .join("fixtures");
 
     let run = |extra_args: &[&str]| {

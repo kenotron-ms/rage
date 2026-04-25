@@ -30,8 +30,7 @@ pub enum TaskError {
 /// - Packages without `scripts.{script_name}` in their `package.json` are silently skipped.
 /// - Returns `TaskError::NoMatchingScript` if no package has the script.
 pub fn build_task_list(dag: &WorkspaceDag, script_name: &str) -> Result<Vec<Task>, TaskError> {
-    let order = topological_sort(dag)
-        .expect("DAG is acyclic by construction");
+    let order = topological_sort(dag).expect("DAG is acyclic by construction");
 
     let mut tasks: Vec<Task> = Vec::new();
 
@@ -151,9 +150,15 @@ mod tests {
         let resolved = build_package_graph(raw).unwrap();
         let dag = build_dag(resolved).unwrap();
         let tasks = build_task_list(&dag, "build").unwrap();
-        let core = tasks.iter().find(|t| t.package_name == "@fixture/core").unwrap();
+        let core = tasks
+            .iter()
+            .find(|t| t.package_name == "@fixture/core")
+            .unwrap();
         assert_eq!(core.script_name, "build");
-        assert!(core.command.contains("@fixture/core"), "command should reference the package");
+        assert!(
+            core.command.contains("@fixture/core"),
+            "command should reference the package"
+        );
         assert!(core.cwd.ends_with("core"));
         assert!(core.cwd.is_absolute());
     }

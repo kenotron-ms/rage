@@ -43,15 +43,15 @@ fn read_package_globs(root: &Path, pm: PackageManager) -> Result<Vec<String>> {
             struct PnpmWorkspace {
                 packages: Vec<String>,
             }
-            let parsed: PnpmWorkspace = serde_yml::from_str(&raw)
-                .context("parsing pnpm-workspace.yaml")?;
+            let parsed: PnpmWorkspace =
+                serde_yml::from_str(&raw).context("parsing pnpm-workspace.yaml")?;
             Ok(parsed.packages)
         }
         PackageManager::Yarn | PackageManager::Npm => {
             let raw = std::fs::read_to_string(root.join("package.json"))
                 .context("reading root package.json")?;
-            let parsed: serde_json::Value = serde_json::from_str(&raw)
-                .context("parsing root package.json")?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw).context("parsing root package.json")?;
             let ws = parsed
                 .get("workspaces")
                 .ok_or_else(|| anyhow!("root package.json has no `workspaces` field"))?;
@@ -106,8 +106,10 @@ mod tests {
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .parent().unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
             .join("fixtures")
     }
 

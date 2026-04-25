@@ -28,10 +28,7 @@ pub fn fingerprint_task(command: &str, pkg_dir: &Path) -> Result<String> {
             // Prune excluded directories — don't descend into them
             if e.file_type().is_dir() {
                 let name = e.file_name().to_string_lossy();
-                !matches!(
-                    name.as_ref(),
-                    "node_modules" | "target" | "dist" | ".git"
-                )
+                !matches!(name.as_ref(), "node_modules" | "target" | "dist" | ".git")
             } else {
                 true
             }
@@ -39,11 +36,7 @@ pub fn fingerprint_task(command: &str, pkg_dir: &Path) -> Result<String> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
-            let ext = e
-                .path()
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
+            let ext = e.path().extension().and_then(|s| s.to_str()).unwrap_or("");
             matches!(
                 ext,
                 "ts" | "tsx" | "js" | "jsx" | "mts" | "cts" | "rs" | "go" | "py" | "json"
@@ -54,9 +47,11 @@ pub fn fingerprint_task(command: &str, pkg_dir: &Path) -> Result<String> {
 
     files.sort();
 
-    // 3. Hash each source file's contents
-    for file in files {
-        let contents = std::fs::read(&file).unwrap_or_default(); // missing file → treat as empty (tolerant)
+    // 3. Hash each source file's path and contents
+    for file in &files {
+        // Include the path so that renames (same content, different name) invalidate the cache.
+        hasher.update(file.as_os_str().as_encoded_bytes());
+        let contents = std::fs::read(file).unwrap_or_default(); // missing file → treat as empty (tolerant)
         hasher.update(&contents);
     }
 
@@ -130,5 +125,23 @@ mod tests {
         // should still return a fingerprint based on the command alone.
         let h = fingerprint_task("echo test", Path::new("/tmp/nonexistent-rage-test-xyz")).unwrap();
         assert_eq!(h.len(), 64);
+    }
+
+    #[test]
+    fn renaming_file_changes_hash() {
+        // Renaming a file (same content, different path) must invalidate the fingerprint.
+        // Without path-in-hash, a rename would produce a false cache hit.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("utils.ts"), b"export const x = 1;").unwrap();
+        let h1 = fingerprint_task("build", dir.path()).unwrap();
+
+        // Rename: identical content, different filename
+        fs::rename(dir.path().join("utils.ts"), dir.path().join("helpers.ts")).unwrap();
+        let h2 = fingerprint_task("build", dir.path()).unwrap();
+
+        assert_ne!(
+            h1, h2,
+            "renaming a source file must change the fingerprint even when content is identical"
+        );
     }
 }

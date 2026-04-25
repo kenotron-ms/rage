@@ -44,9 +44,9 @@ pub fn build_dag(packages: Vec<Package>) -> Result<WorkspaceDag, DagError> {
     for pkg in &packages {
         let src = nodes[&pkg.name];
         for dep in &pkg.dependencies {
-            let dst = *nodes.get(dep).ok_or_else(|| {
-                DagError::UnknownDependency(pkg.name.clone(), dep.clone())
-            })?;
+            let dst = *nodes
+                .get(dep)
+                .ok_or_else(|| DagError::UnknownDependency(pkg.name.clone(), dep.clone()))?;
             graph.add_edge(src, dst, ());
         }
     }
@@ -60,7 +60,11 @@ pub fn build_dag(packages: Vec<Package>) -> Result<WorkspaceDag, DagError> {
         return Err(DagError::Cycle(graph[cycle.node_id()].clone()));
     }
 
-    Ok(WorkspaceDag { graph, nodes, packages: pkg_map })
+    Ok(WorkspaceDag {
+        graph,
+        nodes,
+        packages: pkg_map,
+    })
 }
 
 #[cfg(test)]
@@ -109,7 +113,9 @@ mod tests {
         // a -> b -> a
         let pkgs = vec![mk("a", &["b"]), mk("b", &["a"])];
         let err = build_dag(pkgs).unwrap_err();
-        let DagError::Cycle(name) = err else { panic!("expected Cycle, got: {err:?}") };
+        let DagError::Cycle(name) = err else {
+            panic!("expected Cycle, got: {err:?}")
+        };
         assert!(name == "a" || name == "b", "cycle node name was: {name}");
     }
 }

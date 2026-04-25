@@ -47,8 +47,7 @@ impl CacheProvider for LocalCache {
 
     fn put(&self, key: &str, entry: &CacheEntry) -> Result<()> {
         let path = self.dir.join(format!("{key}.json"));
-        let json = serde_json::to_string_pretty(entry)
-            .context("serializing cache entry")?;
+        let json = serde_json::to_string_pretty(entry).context("serializing cache entry")?;
         std::fs::write(&path, json)
             .with_context(|| format!("writing cache entry to {}", path.display()))?;
         Ok(())
@@ -107,7 +106,10 @@ mod tests {
         let cache = LocalCache::with_dir(dir.path().to_path_buf()).unwrap();
         // Write garbage JSON to a cache key file
         std::fs::write(dir.path().join("badkey.json"), b"not valid json").unwrap();
-        assert!(cache.get("badkey").is_none(), "corrupt JSON should return None");
+        assert!(
+            cache.get("badkey").is_none(),
+            "corrupt JSON should return None"
+        );
     }
 
     #[test]
