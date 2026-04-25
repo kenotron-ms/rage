@@ -31,10 +31,29 @@ impl LocalCache {
 
     /// Create a LocalCache using the given directory.
     /// Creates the directory if it does not exist.
+    /// A leading `~` is expanded to the user's home directory.
     pub fn with_dir(dir: PathBuf) -> Result<Self> {
+        let dir = expand_tilde(dir)?;
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating cache dir {}", dir.display()))?;
         Ok(Self { dir })
+    }
+}
+
+fn expand_tilde(p: PathBuf) -> Result<PathBuf> {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .context("HOME or USERPROFILE not set")?;
+        Ok(PathBuf::from(home).join(rest))
+    } else if s == "~" {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .context("HOME or USERPROFILE not set")?;
+        Ok(PathBuf::from(home))
+    } else {
+        Ok(p)
     }
 }
 
@@ -110,6 +129,16 @@ mod tests {
             cache.get("badkey").is_none(),
             "corrupt JSON should return None"
         );
+    }
+
+    #[test]
+    fn with_dir_expands_tilde() {
+        let cache = LocalCache::with_dir(PathBuf::from("~/.rage-test-tilde-expansion")).unwrap();
+        // Just verifying construction doesn't fail; cleanup not strictly necessary.
+        let _ = cache;
+        let home = std::env::var("HOME").unwrap();
+        assert!(std::path::PathBuf::from(home).join(".rage-test-tilde-expansion").exists());
+        std::fs::remove_dir_all(std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".rage-test-tilde-expansion")).ok();
     }
 
     #[test]
