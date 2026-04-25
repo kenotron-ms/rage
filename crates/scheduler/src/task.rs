@@ -41,6 +41,9 @@ pub struct Task {
     /// Used to locate output files for ABI fingerprinting after a successful run.
     /// Empty for root tasks.
     pub output_globs: Vec<String>,
+    /// Extra (key, value) pairs hashed alongside `input_paths` for root tasks.
+    /// Empty for non-root tasks. Sourced from `RootTask::env_hash_inputs`.
+    pub env_hash_inputs: Vec<(String, String)>,
 }
 
 #[derive(Debug, Error)]
@@ -152,6 +155,7 @@ pub fn build_task_list(
                 declared_input_globs: Vec::new(), // root tasks use input_paths, not globs
                 dep_package_names: Vec::new(),    // root tasks have no package deps
                 output_globs: Vec::new(),         // root tasks don't have output globs
+                env_hash_inputs: rt.env_hash_inputs,
             });
         }
     }
@@ -217,6 +221,7 @@ pub fn build_task_list(
                 declared_input_globs,
                 dep_package_names: pkg.dependencies.clone(),
                 output_globs,
+                env_hash_inputs: Vec::new(),
             });
             package_tasks_added += 1;
         }
@@ -348,6 +353,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         assert_eq!(t.sandbox_mode, pipeline_config::SandboxMode::Strict);
     }

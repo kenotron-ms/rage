@@ -38,7 +38,9 @@ pub enum RunError {
 /// remains deterministic across runs.
 pub(crate) fn root_task_fingerprint(task: &Task) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"rage.root-task.v1\0");
+    // v2: adds env_hash_inputs support. Bumping the version tag ensures
+    // existing v1 cache entries are correctly invalidated.
+    hasher.update(b"rage.root-task.v2\0");
     hasher.update(task.command.as_bytes());
     hasher.update(b"\0");
     for path in &task.input_paths {
@@ -55,6 +57,17 @@ pub(crate) fn root_task_fingerprint(task: &Task) -> String {
                 hasher.update(b"\0");
             }
         }
+    }
+    // Fold ecosystem-supplied env hash inputs (e.g. NODE_VERSION). Sort by
+    // key so the order plugins push pairs in does not affect the fingerprint.
+    let mut env_pairs = task.env_hash_inputs.clone();
+    env_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    for (k, v) in &env_pairs {
+        hasher.update(b"env:");
+        hasher.update(k.as_bytes());
+        hasher.update(b"=");
+        hasher.update(v.as_bytes());
+        hasher.update(b"\0");
     }
     hasher.finalize().to_hex().to_string()
 }
@@ -905,6 +918,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         }
     }
 
@@ -1006,6 +1020,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let pkg_task = mk_task("core");
         let dag = build_dag(vec![mk_pkg("core", &[])]).unwrap();
@@ -1033,6 +1048,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let mut tasks: Vec<Task> = ["core", "utils", "ui", "app"]
             .iter()
@@ -1087,6 +1103,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1107,6 +1124,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1136,6 +1154,7 @@ mod tests {
                 declared_input_globs: Vec::new(),
                 dep_package_names: Vec::new(),
                 output_globs: Vec::new(),
+                env_hash_inputs: Vec::new(),
             },
             Task {
                 package_name: "b".to_string(),
@@ -1149,6 +1168,7 @@ mod tests {
                 declared_input_globs: Vec::new(),
                 dep_package_names: Vec::new(),
                 output_globs: Vec::new(),
+                env_hash_inputs: Vec::new(),
             },
         ];
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
@@ -1181,6 +1201,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let pkg = mk_pkg("cached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1219,6 +1240,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let pkg = mk_pkg("uncached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1241,6 +1263,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let pkg = mk_pkg("smoke", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1272,6 +1295,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let pkg = mk_pkg("pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1326,6 +1350,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let fp_a = root_task_fingerprint(&task_a);
 
@@ -1363,6 +1388,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let fp1 = root_task_fingerprint(&task);
         let fp2 = root_task_fingerprint(&task);
@@ -1373,6 +1399,39 @@ mod tests {
         assert!(!fp1.is_empty());
     }
 
+    #[test]
+        fn root_task_fingerprint_changes_with_env_hash_inputs() {
+            use std::path::PathBuf;
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("yarn.lock"), b"v1\n").unwrap();
+            let mk = |env: Vec<(String, String)>| Task {
+                package_name: "workspace".to_string(),
+                script_name: "install".to_string(),
+                command: "yarn install".to_string(),
+                cwd: dir.path().to_path_buf(),
+                sandbox_mode: pipeline_config::SandboxMode::Loose,
+                is_root: true,
+                input_paths: vec![dir.path().join("yarn.lock")],
+                workspace_root: dir.path().to_path_buf(),
+                declared_input_globs: Vec::new(),
+                dep_package_names: Vec::new(),
+                output_globs: Vec::new(),
+                env_hash_inputs: env,
+            };
+            let fp_none = root_task_fingerprint(&mk(Vec::new()));
+            let fp_v18 = root_task_fingerprint(&mk(vec![(
+                "NODE_VERSION".to_string(),
+                "18.20.4".to_string(),
+            )]));
+            let fp_v20 = root_task_fingerprint(&mk(vec![(
+                "NODE_VERSION".to_string(),
+                "20.11.0".to_string(),
+            )]));
+            assert_ne!(fp_none, fp_v18, "adding NODE_VERSION must change fingerprint");
+            assert_ne!(fp_v18, fp_v20, "different NODE_VERSION must change fingerprint");
+        }
+
+    
     // ── PATH injection integration test ─────────────────────────────────────
 
     #[tokio::test]
@@ -1406,6 +1465,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -1443,6 +1503,7 @@ mod tests {
             declared_input_globs: vec!["src/**/*.ts".to_string(), "package.json".to_string()],
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
 
         let cache_dir = tempdir().unwrap();
@@ -1531,6 +1592,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: vec!["core".to_string()],
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
 
         let pkg_utils = mk_pkg("utils", &["core"]);
@@ -1592,6 +1654,7 @@ mod tests {
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
         };
 
         let cache = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
