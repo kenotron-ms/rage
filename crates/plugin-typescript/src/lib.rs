@@ -81,8 +81,23 @@ impl EcosystemPlugin for TypeScriptPlugin {
         ]
     }
 
-    fn declared_input_globs(&self, _task_name: &str, _config: &PluginConfig) -> Vec<String> {
-        Vec::new()
+    fn declared_input_globs(&self, task_name: &str, config: &PluginConfig) -> Vec<String> {
+        let mut globs: Vec<String> = match task_name {
+            "typecheck" | "build" => vec![
+                "src/**/*.ts".to_string(),
+                "src/**/*.tsx".to_string(),
+                "tsconfig*.json".to_string(),
+                "package.json".to_string(),
+            ],
+            _ => vec![
+                "**/*.ts".to_string(),
+                "**/*.tsx".to_string(),
+                "package.json".to_string(),
+            ],
+        };
+        globs.extend(config.extend_input_globs.iter().cloned());
+        globs.retain(|g| !config.exclude_input_globs.contains(g));
+        globs
     }
 
     fn abi_fingerprint(&self, _outputs: &[OutputFile]) -> Option<String> {
@@ -163,10 +178,51 @@ mod tests {
     }
 
     #[test]
-    fn declared_input_globs_returns_empty() {
+    fn declared_inputs_for_typecheck_has_src_and_tsconfig() {
         let p = TypeScriptPlugin::new();
-        let config = PluginConfig::default();
-        assert!(p.declared_input_globs("build", &config).is_empty());
+        let g = p.declared_input_globs("typecheck", &PluginConfig::default());
+        assert!(g.contains(&"src/**/*.ts".to_string()));
+        assert!(g.contains(&"tsconfig*.json".to_string()));
+        assert!(g.contains(&"package.json".to_string()));
+    }
+
+    #[test]
+    fn declared_inputs_for_build_includes_test_files() {
+        // build globs intentionally include tests so that test-affecting builds
+        // recompute. exclude is configurable via PluginConfig.
+        let p = TypeScriptPlugin::new();
+        let g = p.declared_input_globs("build", &PluginConfig::default());
+        assert!(g.iter().any(|s| s.contains("src/")));
+    }
+
+    #[test]
+    fn declared_inputs_extends_with_user_config() {
+        let p = TypeScriptPlugin::new();
+        let cfg = PluginConfig {
+            extend_input_globs: vec!["../../tsconfig.base.json".to_string()],
+            exclude_input_globs: vec![],
+        };
+        let g = p.declared_input_globs("typecheck", &cfg);
+        assert!(g.contains(&"../../tsconfig.base.json".to_string()));
+    }
+
+    #[test]
+    fn declared_inputs_excludes_per_user_config() {
+        let p = TypeScriptPlugin::new();
+        let cfg = PluginConfig {
+            extend_input_globs: vec![],
+            exclude_input_globs: vec!["src/**/*.ts".to_string()],
+        };
+        let g = p.declared_input_globs("typecheck", &cfg);
+        assert!(!g.contains(&"src/**/*.ts".to_string()));
+        assert!(g.contains(&"tsconfig*.json".to_string()));
+    }
+
+    #[test]
+    fn unknown_task_returns_generic_globs() {
+        let p = TypeScriptPlugin::new();
+        let g = p.declared_input_globs("custom-task", &PluginConfig::default());
+        assert!(!g.is_empty(), "should return at least a generic ts/tsx glob");
     }
 
     #[test]
