@@ -259,3 +259,175 @@ fn second_run_uses_cache() {
         "second run should show cached tasks, got:\n{stderr}"
     );
 }
+
+// ── scoping integration tests ──────────────────────────────────────────────
+
+#[test]
+fn since_flag_skips_unaffected_packages() {
+    use std::fs;
+    use std::process::Command as Cmd;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // 1. Set up a pnpm workspace in the temp dir
+    //    Copy the js-pnpm fixture layout manually (package.json + pnpm-workspace.yaml)
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("fixtures")
+        .join("js-pnpm");
+
+    // Recursive copy helper
+    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+        fs::create_dir_all(dst).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &dst_path);
+            } else {
+                fs::copy(entry.path(), dst_path).unwrap();
+            }
+        }
+    }
+    copy_dir(&fixtures_dir, root);
+
+    // 2. Initialize git repo and commit everything
+    let git = |args: &[&str]| {
+        Cmd::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@test.com"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-m", "initial"]);
+
+    // 3. Modify only @fixture/utils/package.json (add a comment field)
+    let utils_pkg = root.join("packages").join("utils").join("package.json");
+    let original = fs::read_to_string(&utils_pkg).unwrap();
+    let modified = original.replace(
+        "\"version\": \"1.0.0\"",
+        "\"version\": \"1.0.1\"",
+    );
+    fs::write(&utils_pkg, modified).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-m", "bump utils version"]);
+
+    // 4. Run rage with --since HEAD~1
+    let bin = env!("CARGO_BIN_EXE_rage");
+    let output = Cmd::new(bin)
+        .args(["run", "build", "--since", "HEAD~1", "--no-cache"])
+        .arg(root)
+        .env("RAGE_CACHE_DIR", root.join(".rage-test-cache"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "rage run --since should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // utils, ui, and app should have run (ui and app depend on utils)
+    assert!(
+        stderr.contains("@fixture/utils"),
+        "utils should run (directly affected)\n{stderr}"
+    );
+    assert!(
+        stderr.contains("@fixture/ui"),
+        "ui should run (depends on utils)\n{stderr}"
+    );
+    assert!(
+        stderr.contains("@fixture/app"),
+        "app should run (depends on ui)\n{stderr}"
+    );
+
+    // core should NOT have run (doesn't depend on utils)
+    assert!(
+        !stderr.contains("@fixture/core#build"),
+        "core should be scoped out\n{stderr}"
+    );
+
+    // Scoping message should appear
+    assert!(
+        stderr.contains("Scoping to packages affected since HEAD~1"),
+        "scoping message should appear\n{stderr}"
+    );
+}
+
+#[test]
+fn since_with_no_changes_runs_nothing() {
+    use std::fs;
+    use std::process::Command as Cmd;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // Copy fixture
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("fixtures")
+        .join("js-pnpm");
+
+    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+        fs::create_dir_all(dst).unwrap();
+        for entry in fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &dst_path);
+            } else {
+                fs::copy(entry.path(), dst_path).unwrap();
+            }
+        }
+    }
+    copy_dir(&fixtures_dir, root);
+
+    let git = |args: &[&str]| {
+        Cmd::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@test.com"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-m", "initial"]);
+
+    // Make a second commit that changes nothing in any package
+    // Write to root-level file outside any package
+    fs::write(root.join("README.md"), b"# test").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-m", "add readme"]);
+
+    let bin = env!("CARGO_BIN_EXE_rage");
+    let output = Cmd::new(bin)
+        .args(["run", "build", "--since", "HEAD~1", "--no-cache"])
+        .arg(root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should print "Nothing to do" or run 0 packages
+    assert!(
+        stderr.contains("Nothing to do") || stderr.contains("0 affected"),
+        "no packages should run when only README changed\n{stderr}"
+    );
+}
