@@ -21,13 +21,9 @@ pub fn affected_packages(
     changed_files: &[PathBuf],
 ) -> HashSet<String> {
     // 1. Find directly-affected packages: those whose path contains a changed file
-    let mut directly_affected: Vec<String> = packages
+    let directly_affected: Vec<String> = packages
         .iter()
-        .filter(|pkg| {
-            changed_files
-                .iter()
-                .any(|f| f.starts_with(&pkg.path))
-        })
+        .filter(|pkg| changed_files.iter().any(|f| f.starts_with(&pkg.path)))
         .map(|pkg| pkg.name.clone())
         .collect();
 
@@ -44,7 +40,7 @@ pub fn affected_packages(
     let reversed = Reversed(&dag.graph);
     let mut affected: HashSet<String> = HashSet::new();
 
-    for pkg_name in directly_affected.drain(..) {
+    for pkg_name in directly_affected {
         if let Some(&start) = dag.nodes.get(&pkg_name) {
             let mut bfs = Bfs::new(reversed, start);
             while let Some(nx) = bfs.next(reversed) {
@@ -129,7 +125,10 @@ mod tests {
         let affected = affected_packages(&packages, &dag, &changed);
 
         assert!(affected.contains("app"), "app directly affected");
-        assert!(!affected.contains("core"), "core not affected when only app changes");
+        assert!(
+            !affected.contains("core"),
+            "core not affected when only app changes"
+        );
     }
 
     #[test]
@@ -146,7 +145,11 @@ mod tests {
         let changed = vec![file("/workspace/core/src/main.ts")];
         let affected = affected_packages(&packages, &dag, &changed);
 
-        assert_eq!(affected.len(), 4, "all 4 packages should be affected when core changes");
+        assert_eq!(
+            affected.len(),
+            4,
+            "all 4 packages should be affected when core changes"
+        );
     }
 
     #[test]

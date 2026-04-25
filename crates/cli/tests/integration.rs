@@ -16,6 +16,19 @@ fn rage() -> Command {
     Command::new(env!("CARGO_BIN_EXE_rage"))
 }
 
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path);
+        } else {
+            std::fs::copy(entry.path(), dst_path).unwrap();
+        }
+    }
+}
+
 // ── pnpm smoke tests ───────────────────────────────────────────────────────
 
 #[test]
@@ -281,20 +294,7 @@ fn since_flag_skips_unaffected_packages() {
         .join("fixtures")
         .join("js-pnpm");
 
-    // Recursive copy helper
-    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
-        fs::create_dir_all(dst).unwrap();
-        for entry in fs::read_dir(src).unwrap() {
-            let entry = entry.unwrap();
-            let dst_path = dst.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_dir(&entry.path(), &dst_path);
-            } else {
-                fs::copy(entry.path(), dst_path).unwrap();
-            }
-        }
-    }
-    copy_dir(&fixtures_dir, root);
+    copy_dir_recursive(&fixtures_dir, root);
 
     // 2. Initialize git repo and commit everything
     let git = |args: &[&str]| {
@@ -313,10 +313,7 @@ fn since_flag_skips_unaffected_packages() {
     // 3. Modify only @fixture/utils/package.json (add a comment field)
     let utils_pkg = root.join("packages").join("utils").join("package.json");
     let original = fs::read_to_string(&utils_pkg).unwrap();
-    let modified = original.replace(
-        "\"version\": \"1.0.0\"",
-        "\"version\": \"1.0.1\"",
-    );
+    let modified = original.replace("\"version\": \"1.0.0\"", "\"version\": \"1.0.1\"");
     fs::write(&utils_pkg, modified).unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-m", "bump utils version"]);
@@ -383,19 +380,7 @@ fn since_with_no_changes_runs_nothing() {
         .join("fixtures")
         .join("js-pnpm");
 
-    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
-        fs::create_dir_all(dst).unwrap();
-        for entry in fs::read_dir(src).unwrap() {
-            let entry = entry.unwrap();
-            let dst_path = dst.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                copy_dir(&entry.path(), &dst_path);
-            } else {
-                fs::copy(entry.path(), dst_path).unwrap();
-            }
-        }
-    }
-    copy_dir(&fixtures_dir, root);
+    copy_dir_recursive(&fixtures_dir, root);
 
     let git = |args: &[&str]| {
         Cmd::new("git")

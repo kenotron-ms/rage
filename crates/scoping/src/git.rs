@@ -89,7 +89,10 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(names.contains(&"a.ts".to_string()), "a.ts should be changed");
+        assert!(
+            names.contains(&"a.ts".to_string()),
+            "a.ts should be changed"
+        );
         assert!(
             !names.contains(&"b.ts".to_string()),
             "b.ts should not be changed"
@@ -97,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_empty_when_no_changes() {
+    fn returns_only_files_in_diff_range() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         git_init(root);
@@ -131,8 +134,11 @@ mod tests {
         .unwrap();
         git_commit_all(root, "initial");
 
-        fs::write(root.join("packages").join("core").join("index.ts"), b"export const x = 1;")
-            .unwrap();
+        fs::write(
+            root.join("packages").join("core").join("index.ts"),
+            b"export const x = 1;",
+        )
+        .unwrap();
         git_commit_all(root, "update core");
 
         let changed = git_changed_files(root, "HEAD~1").unwrap();

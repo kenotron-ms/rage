@@ -539,7 +539,6 @@ dependencies = [
  "build-graph",
  "petgraph",
  "tempfile",
- "thiserror",
  "workspace-tools",
 ]
 

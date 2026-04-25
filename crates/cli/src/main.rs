@@ -104,8 +104,8 @@ async fn cmd_run(root: &Path, script: &str, no_cache: bool, since: Option<&str>)
         .with_context(|| format!("{} is not a recognized JS workspace", root.display()))?;
 
     let raw = workspace_tools::discover_packages(root).context("discovering workspace packages")?;
-    let resolved = workspace_tools::build_package_graph(raw)
-        .context("resolving package dependency edges")?;
+    let resolved =
+        workspace_tools::build_package_graph(raw).context("resolving package dependency edges")?;
 
     eprintln!(
         "Found {} packages ({} workspace)",
