@@ -9,7 +9,7 @@
 //! # async fn example() -> anyhow::Result<()> {
 //! use sandbox::run_sandboxed;
 //!
-//! let result = run_sandboxed("echo hello", ".", &[]).await?;
+//! let result = run_sandboxed("echo hello", std::path::Path::new("."), &[]).await?;
 //! println!("exit_code={}", result.exit_code);
 //! # Ok(())
 //! # }
