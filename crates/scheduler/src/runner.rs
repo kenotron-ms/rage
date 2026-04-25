@@ -567,6 +567,20 @@ async fn run_single_task_two_phase(
     let elapsed_ms = elapsed.as_millis() as u64;
 
     if exit_code == 0 {
+        // Compute ABI fingerprint BEFORE creating the CacheEntry so it can be
+        // stored in entry.abi_fingerprint for downstream inspection.
+        // Uses a plugin-agnostic .d.ts hasher (equivalent to TypeScriptPlugin::abi_fingerprint).
+        let output_files = resolve_output_globs(&task.cwd, &task.output_globs);
+        let abi_fp: Option<String> = if !output_files.is_empty() {
+            compute_abi_fingerprint_from_outputs(&output_files)
+        } else {
+            None
+        };
+        // Persist to the pkg-abi store so downstream tasks can read it during WF computation.
+        if let Some(fp) = &abi_fp {
+            cache.set_pkg_abi_fp(&task.package_name, fp);
+        }
+
         let entry = CacheEntry {
             fingerprint: String::new(),
             command: task.command.clone(),
@@ -577,7 +591,7 @@ async fn run_single_task_two_phase(
                 .unwrap_or_default()
                 .as_secs(),
             pathset_reads: vec![],
-            abi_fingerprint: None,
+            abi_fingerprint: abi_fp,
         };
         let sf = cache.record(&inputs, pathset, entry).unwrap_or_default();
 
@@ -592,18 +606,6 @@ async fn run_single_task_two_phase(
                     exit_code: 0,
                 },
             );
-        }
-
-        // Compute and persist ABI fingerprint so downstream tasks can do early-cutoff.
-        // Resolve output globs to find output files (e.g. .d.ts for TypeScript).
-        let output_files = resolve_output_globs(&task.cwd, &task.output_globs);
-        if !output_files.is_empty() {
-            // For now use a simple hash of .d.ts files directly (plugin-agnostic).
-            // Phase 3+: call plugin.abi_fingerprint() here when plugin ref is available.
-            let abi_fp = compute_abi_fingerprint_from_outputs(&output_files);
-            if let Some(fp) = abi_fp {
-                cache.set_pkg_abi_fp(&task.package_name, &fp);
-            }
         }
 
         eprintln!(
@@ -1634,6 +1636,84 @@ mod tests {
         assert_eq!(
             wf_count_2, 1,
             "second run with same dep ABI: cache hit, still 1 WF entry"
+        );
+    }
+
+    // ── Phase 3 fix: entry.abi_fingerprint populated from .d.ts outputs ───────────
+
+    /// Verify that after a task with .d.ts output_globs runs, the CacheEntry
+    /// stored in the two-phase cache carries a non-None abi_fingerprint.
+    ///
+    /// BUG: entry.abi_fingerprint was hardcoded None even though
+    /// compute_abi_fingerprint_from_outputs() was called. Fix: compute ABI fp
+    /// *before* CacheEntry construction and include it in the entry.
+    #[tokio::test]
+    async fn entry_abi_fingerprint_set_when_dts_outputs_exist() {
+        use cache::TwoPhaseCache;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let cache_dir = tempdir().unwrap();
+        let pkg_dir = tempdir().unwrap();
+
+        // Pre-create a .d.ts file (simulates TypeScript compiler output)
+        std::fs::write(
+            pkg_dir.path().join("index.d.ts"),
+            b"export declare const x: number;\n",
+        )
+        .unwrap();
+
+        let cache = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
+
+        let task = Task {
+            package_name: "ts-lib".to_string(),
+            script_name: "build".to_string(),
+            command: "echo ok".to_string(),
+            cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: vec!["**/*.d.ts".to_string()],
+            env_hash_inputs: Vec::new(),
+        };
+
+        let pkg = mk_pkg("ts-lib", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone())
+            .await
+            .unwrap();
+
+        let tool_path = crate::node_path::which_first(
+            &task.command,
+            &task.cwd,
+            &task.workspace_root,
+        )
+        .unwrap_or_else(|| std::path::PathBuf::from("echo"));
+
+        let inputs = cache::WeakFpInputs {
+            command: &task.command,
+            tool_path: &tool_path,
+            package_path: &task.cwd,
+            declared_input_globs: &task.declared_input_globs,
+            tracked_env: &[],
+            dep_abi_fingerprints: &[],
+        };
+
+        let (_, entry) = cache.lookup(&inputs).expect("entry must exist after first run");
+        assert!(
+            entry.abi_fingerprint.is_some(),
+            "entry.abi_fingerprint must be Some(_) when .d.ts output files exist; \
+             got None - fix: compute ABI fp before creating CacheEntry"
+        );
+
+        let pkg_abi = cache.get_pkg_abi_fp("ts-lib");
+        assert_eq!(
+            entry.abi_fingerprint, pkg_abi,
+            "entry.abi_fingerprint and pkg-abi store must agree"
         );
     }
 

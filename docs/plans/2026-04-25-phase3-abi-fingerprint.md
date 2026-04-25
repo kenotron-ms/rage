@@ -1,6 +1,6 @@
 # Phase 3 — Wire abi_fingerprint into TwoPhaseCache
 
-**Status:** Planned  
+**Status:** ✅ Complete — merged to `main` at `92437ac`; entry.abi_fingerprint fix at `feat/phase3-complete-abi-fingerprint`  
 **Branch:** `feat/phase3-abi-fingerprint`  
 **Crates touched:** `cache`, `scheduler`
 
