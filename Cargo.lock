@@ -214,6 +214,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -575,6 +585,10 @@ dependencies = [
 [[package]]
 name = "sandbox-macos-dylib"
 version = "0.0.0"
+dependencies = [
+ "ctor",
+ "libc",
+]
 
 [[package]]
 name = "scheduler"
