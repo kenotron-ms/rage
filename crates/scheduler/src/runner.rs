@@ -30,22 +30,56 @@ pub enum RunError {
     },
 }
 
+/// Compute a content-addressed fingerprint for a root task.
+///
+/// Hashes the command plus the contents of every path in `task.input_paths`.
+/// Missing files are folded in as `missing:{path}\0` so the fingerprint
+/// remains deterministic across runs.
+pub(crate) fn root_task_fingerprint(task: &Task) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rage.root-task.v1\0");
+    hasher.update(task.command.as_bytes());
+    hasher.update(b"\0");
+    for path in &task.input_paths {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                hasher.update(b"present:");
+                hasher.update(path.to_string_lossy().as_bytes());
+                hasher.update(b"\0");
+                hasher.update(&bytes);
+            }
+            Err(_) => {
+                hasher.update(b"missing:");
+                hasher.update(path.to_string_lossy().as_bytes());
+                hasher.update(b"\0");
+            }
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 /// Group tasks into parallel execution waves.
 ///
-/// A task is placed in wave N where:
-///   N = 1 + max(wave of deps that also have tasks), or 0 if no deps have tasks.
+/// Root tasks (`is_root: true`) are placed alone in wave 0 — they are not in
+/// the package DAG and run before any package task. All package tasks shift
+/// down by one wave when at least one root task is present.
 ///
 /// Within a wave, tasks are sorted by package name for determinism.
 pub fn compute_task_levels(dag: &WorkspaceDag, tasks: &[Task]) -> Vec<Vec<Task>> {
-    // Build lookup: package_name -> task
-    let task_map: HashMap<&str, &Task> =
-        tasks.iter().map(|t| (t.package_name.as_str(), t)).collect();
+    // Partition: root tasks live in their own wave 0; package tasks go through
+    // the normal topological levelling pass.
+    let (root_tasks, package_tasks): (Vec<&Task>, Vec<&Task>) =
+        tasks.iter().partition(|t| t.is_root);
 
-    // Get topo order (deps first)
+    let task_map: HashMap<&str, &Task> = package_tasks
+        .iter()
+        .map(|t| (t.package_name.as_str(), *t))
+        .collect();
+
     let order = topological_sort(dag).expect("DAG is acyclic by construction");
 
     let mut level_of: HashMap<&str, usize> = HashMap::new();
-    let mut levels: Vec<Vec<Task>> = Vec::new();
+    let mut package_levels: Vec<Vec<Task>> = Vec::new();
 
     for pkg_name in &order {
         if !task_map.contains_key(pkg_name.as_str()) {
@@ -57,7 +91,6 @@ pub fn compute_task_levels(dag: &WorkspaceDag, tasks: &[Task]) -> Vec<Vec<Task>>
             None => continue,
         };
 
-        // Level = 1 + max level of deps that have tasks; or 0
         let level = pkg
             .dependencies
             .iter()
@@ -69,18 +102,27 @@ pub fn compute_task_levels(dag: &WorkspaceDag, tasks: &[Task]) -> Vec<Vec<Task>>
 
         level_of.insert(pkg_name.as_str(), level);
 
-        if level >= levels.len() {
-            levels.resize_with(level + 1, Vec::new);
+        if level >= package_levels.len() {
+            package_levels.resize_with(level + 1, Vec::new);
         }
-        levels[level].push((*task_map[pkg_name.as_str()]).clone());
+        package_levels[level].push((*task_map[pkg_name.as_str()]).clone());
     }
 
-    // Sort within each level for determinism
-    for level in &mut levels {
+    for level in &mut package_levels {
         level.sort_by(|a, b| a.package_name.cmp(&b.package_name));
     }
 
-    levels
+    // Prepend the root-task wave when there are any root tasks.
+    if root_tasks.is_empty() {
+        package_levels
+    } else {
+        let mut root_wave: Vec<Task> = root_tasks.into_iter().cloned().collect();
+        root_wave.sort_by(|a, b| a.package_name.cmp(&b.package_name));
+        let mut out = Vec::with_capacity(package_levels.len() + 1);
+        out.push(root_wave);
+        out.extend(package_levels);
+        out
+    }
 }
 
 /// Execute tasks in wave-parallel order using Tokio.
@@ -136,6 +178,10 @@ async fn run_single_task(
     task: Task,
     cache: Option<std::sync::Arc<dyn cache::CacheProvider>>,
 ) -> Result<(), RunError> {
+    if task.is_root {
+        return run_root_task_legacy(task, cache).await;
+    }
+
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Compute fingerprint if cache is provided
@@ -196,6 +242,79 @@ async fn run_single_task(
         eprintln!(
             "[rage] {}#{} \u{2713} {:.2}s",
             task.package_name, task.script_name, elapsed_secs
+        );
+        Ok(())
+    } else {
+        let code = status.code().unwrap_or(-1);
+        eprintln!(
+            "[rage] {}#{} \u{2717} FAILED (exit {code})",
+            task.package_name, task.script_name
+        );
+        Err(RunError::TaskFailed {
+            package: task.package_name,
+            script: task.script_name,
+            code,
+        })
+    }
+}
+
+async fn run_root_task_legacy(
+    task: Task,
+    cache: Option<std::sync::Arc<dyn cache::CacheProvider>>,
+) -> Result<(), RunError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fp = root_task_fingerprint(&task);
+
+    // Cache hit?
+    if let Some(c) = &cache {
+        if c.get(&fp).is_some() {
+            eprintln!(
+                "[rage] {}#{} \u{2713} (cached)",
+                task.package_name, task.script_name
+            );
+            return Ok(());
+        }
+    }
+
+    eprintln!(
+        "[rage] {}#{} starting",
+        task.package_name, task.script_name
+    );
+    let start = Instant::now();
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(&task.command)
+        .current_dir(&task.cwd)
+        .status()
+        .await
+        .map_err(|e| RunError::Spawn {
+            package: task.package_name.clone(),
+            script: task.script_name.clone(),
+            source: e,
+        })?;
+    let elapsed = start.elapsed();
+
+    if status.success() {
+        if let Some(c) = &cache {
+            let entry = cache::CacheEntry {
+                fingerprint: fp.clone(),
+                command: task.command.clone(),
+                exit_code: 0,
+                elapsed_ms: elapsed.as_millis() as u64,
+                cached_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                pathset_reads: vec![],
+            };
+            let _ = c.put(&fp, &entry);
+        }
+        eprintln!(
+            "[rage] {}#{} \u{2713} {:.2}s",
+            task.package_name,
+            task.script_name,
+            elapsed.as_secs_f64()
         );
         Ok(())
     } else {
@@ -286,6 +405,10 @@ async fn run_single_task_two_phase(
     task: Task,
     cache: Arc<cache::TwoPhaseCache>,
 ) -> Result<(), RunError> {
+    if task.is_root {
+        return run_root_task_two_phase(task, cache).await;
+    }
+
     use cache::{CacheEntry, WeakFpInputs};
     use cache::pathset_store::StoredPathset;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -397,6 +520,63 @@ async fn run_single_task_two_phase(
     }
 }
 
+async fn run_root_task_two_phase(
+    task: Task,
+    cache: Arc<cache::TwoPhaseCache>,
+) -> Result<(), RunError> {
+    let fp = root_task_fingerprint(&task);
+    let marker = cache.dir().join(format!("root-{fp}.done"));
+
+    if marker.exists() {
+        eprintln!(
+            "[rage] {}#{} \u{2713} (cached)",
+            task.package_name, task.script_name
+        );
+        return Ok(());
+    }
+
+    eprintln!(
+        "[rage] {}#{} starting",
+        task.package_name, task.script_name
+    );
+    let start = Instant::now();
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(&task.command)
+        .current_dir(&task.cwd)
+        .status()
+        .await
+        .map_err(|e| RunError::Spawn {
+            package: task.package_name.clone(),
+            script: task.script_name.clone(),
+            source: e,
+        })?;
+    let elapsed = start.elapsed();
+
+    if status.success() {
+        // Best-effort marker write — cache failures must not break a build.
+        let _ = std::fs::write(&marker, b"");
+        eprintln!(
+            "[rage] {}#{} \u{2713} {:.2}s",
+            task.package_name,
+            task.script_name,
+            elapsed.as_secs_f64()
+        );
+        Ok(())
+    } else {
+        let code = status.code().unwrap_or(-1);
+        eprintln!(
+            "[rage] {}#{} \u{2717} FAILED (exit {code})",
+            task.package_name, task.script_name
+        );
+        Err(RunError::TaskFailed {
+            package: task.package_name,
+            script: task.script_name,
+            code,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +601,8 @@ mod tests {
             command: format!("echo {name}"),
             cwd: PathBuf::from(format!("/tmp/{name}")),
             sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: false,
+            input_paths: Vec::new(),
         }
     }
 
@@ -433,7 +615,7 @@ mod tests {
         }
     }
 
-    // ── compute_task_levels tests ──────────────────────────────────────────
+    // ── compute_task_levels tests ─────────────────────────────────────────────
 
     #[test]
     fn single_package_is_level_zero() {
@@ -497,7 +679,8 @@ mod tests {
         let raw = discover_packages(&root).unwrap();
         let resolved = build_package_graph(raw).unwrap();
         let dag = build_dag(resolved).unwrap();
-        let tasks = build_task_list(&dag, "build").unwrap();
+        let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
+        let tasks = build_task_list(&dag, "build", &root, &plugins).unwrap();
         let levels = compute_task_levels(&dag, &tasks);
         // core(L0) → utils(L1) → ui(L2) → app(L3)
         assert_eq!(levels.len(), 4);
@@ -507,7 +690,74 @@ mod tests {
         assert_eq!(levels[3][0].package_name, "@fixture/app");
     }
 
-    // ── run_tasks tests ────────────────────────────────────────────────────
+    #[test]
+    fn root_task_alone_in_wave_zero_pushes_package_to_wave_one() {
+        let root_task = Task {
+            package_name: "workspace".to_string(),
+            script_name: "install".to_string(),
+            command: "pnpm install".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: true,
+            input_paths: vec![PathBuf::from("/tmp/pnpm-lock.yaml")],
+        };
+        let pkg_task = mk_task("core");
+        let dag = build_dag(vec![mk_pkg("core", &[])]).unwrap();
+        let levels = compute_task_levels(&dag, &[root_task, pkg_task]);
+        assert_eq!(levels.len(), 2, "expected two waves: [install] then [core]");
+        assert_eq!(levels[0].len(), 1);
+        assert!(levels[0][0].is_root);
+        assert_eq!(levels[0][0].package_name, "workspace");
+        assert_eq!(levels[1].len(), 1);
+        assert_eq!(levels[1][0].package_name, "core");
+        assert!(!levels[1][0].is_root);
+    }
+
+    #[test]
+    fn root_task_pushes_diamond_down_one_wave() {
+        let root_task = Task {
+            package_name: "workspace".to_string(),
+            script_name: "install".to_string(),
+            command: "pnpm install".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: true,
+            input_paths: vec![],
+        };
+        let mut tasks: Vec<Task> = ["core", "utils", "ui", "app"]
+            .iter()
+            .map(|n| mk_task(n))
+            .collect();
+        tasks.insert(0, root_task);
+        let packages = vec![
+            mk_pkg("core", &[]),
+            mk_pkg("utils", &["core"]),
+            mk_pkg("ui", &["core", "utils"]),
+            mk_pkg("app", &["ui", "core"]),
+        ];
+        let dag = build_dag(packages).unwrap();
+        let levels = compute_task_levels(&dag, &tasks);
+        // 1 install wave + 4 package waves
+        assert_eq!(levels.len(), 5);
+        assert!(levels[0][0].is_root);
+        assert_eq!(levels[1][0].package_name, "core");
+        assert_eq!(levels[2][0].package_name, "utils");
+        assert_eq!(levels[3][0].package_name, "ui");
+        assert_eq!(levels[4][0].package_name, "app");
+    }
+
+    #[test]
+    fn no_root_tasks_means_no_extra_wave() {
+        // Sanity: if there are no root tasks, behaviour matches the legacy version.
+        let tasks: Vec<Task> = ["a", "b"].iter().map(|n| mk_task(n)).collect();
+        let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
+        let dag = build_dag(packages).unwrap();
+        let levels = compute_task_levels(&dag, &tasks);
+        assert_eq!(levels.len(), 1, "two independent packages, no root → 1 wave");
+        assert_eq!(levels[0].len(), 2);
+    }
+
+    // ── run_tasks tests ───────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn single_successful_task_runs() {
@@ -517,6 +767,8 @@ mod tests {
             command: "echo hello".to_string(),
             cwd: PathBuf::from("/tmp"),
             sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: false,
+            input_paths: Vec::new(),
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -531,6 +783,8 @@ mod tests {
             command: "false".to_string(), // exits with code 1
             cwd: PathBuf::from("/tmp"),
             sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: false,
+            input_paths: Vec::new(),
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -554,6 +808,8 @@ mod tests {
                 command: cmd_a,
                 cwd: PathBuf::from("/tmp"),
                 sandbox_mode: pipeline_config::SandboxMode::default(),
+                is_root: false,
+                input_paths: Vec::new(),
             },
             Task {
                 package_name: "b".to_string(),
@@ -561,6 +817,8 @@ mod tests {
                 command: cmd_b,
                 cwd: PathBuf::from("/tmp"),
                 sandbox_mode: pipeline_config::SandboxMode::default(),
+                is_root: false,
+                input_paths: Vec::new(),
             },
         ];
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
@@ -587,6 +845,8 @@ mod tests {
             command: "echo cached-test".to_string(),
             cwd: pkg_dir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: false,
+            input_paths: Vec::new(),
         };
         let pkg = mk_pkg("cached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -619,6 +879,8 @@ mod tests {
             command: "echo no-cache-test".to_string(),
             cwd: PathBuf::from("/tmp"),
             sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: false,
+            input_paths: Vec::new(),
         };
         let pkg = mk_pkg("uncached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -635,6 +897,8 @@ mod tests {
             command: "true".to_string(),
             cwd: PathBuf::from("/tmp"),
             sandbox_mode: pipeline_config::SandboxMode::Strict,
+            is_root: false,
+            input_paths: Vec::new(),
         };
         let pkg = mk_pkg("smoke", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -660,6 +924,8 @@ mod tests {
             command: "echo build".to_string(),
             cwd: pkg_dir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
         };
         let pkg = mk_pkg("pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
@@ -671,5 +937,59 @@ mod tests {
         assert!(entries.iter().any(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("sf-")), "expected sf-*.entry file");
 
         run_tasks_two_phase(&dag, vec![task], two_phase).await.unwrap();
+    }
+
+    // ── root task fingerprint tests ───────────────────────────────────────────
+
+    #[test]
+    fn root_task_fingerprint_changes_with_lockfile_contents() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let lock = dir.path().join("pnpm-lock.yaml");
+
+        std::fs::write(&lock, b"version: 1\n").unwrap();
+        let task_a = Task {
+            package_name: "workspace".to_string(),
+            script_name: "install".to_string(),
+            command: "pnpm install".to_string(),
+            cwd: dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: true,
+            input_paths: vec![lock.clone()],
+        };
+        let fp_a = root_task_fingerprint(&task_a);
+
+        // Same task, same lockfile bytes → same fingerprint.
+        let fp_a_again = root_task_fingerprint(&task_a);
+        assert_eq!(fp_a, fp_a_again);
+
+        // Mutate the lockfile → fingerprint changes.
+        std::fs::write(&lock, b"version: 2\n").unwrap();
+        let fp_b = root_task_fingerprint(&task_a);
+        assert_ne!(fp_a, fp_b, "fingerprint must change with lockfile contents");
+
+        // Different command → different fingerprint.
+        let task_c = Task { command: "yarn install".to_string(), ..task_a.clone() };
+        let fp_c = root_task_fingerprint(&task_c);
+        assert_ne!(fp_b, fp_c);
+    }
+
+    #[test]
+    fn root_task_fingerprint_handles_missing_lockfile() {
+        // Missing files are hashed as a deterministic sentinel — the fingerprint
+        // is still stable, just different from the "file present" case.
+        let task = Task {
+            package_name: "workspace".to_string(),
+            script_name: "install".to_string(),
+            command: "pnpm install".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: true,
+            input_paths: vec![PathBuf::from("/this/does/not/exist/pnpm-lock.yaml")],
+        };
+        let fp1 = root_task_fingerprint(&task);
+        let fp2 = root_task_fingerprint(&task);
+        assert_eq!(fp1, fp2, "missing-file fingerprint must still be deterministic");
+        assert!(!fp1.is_empty());
     }
 }
