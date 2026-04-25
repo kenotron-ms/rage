@@ -182,4 +182,229 @@ mod tests {
             Some("18.20.4".to_string())
         );
     }
+
+    // ── find_version_manager_bin ──────────────────────────────────────────────
+
+    /// Build a fake fnm tree under `home`, return the bin dir we expect to find.
+    fn fake_fnm(home: &Path, version: &str) -> PathBuf {
+        let bin = home
+            .join(".local/share/fnm/node-versions")
+            .join(format!("v{version}"))
+            .join("installation/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        bin
+    }
+
+    fn fake_nvm(home: &Path, version: &str) -> PathBuf {
+        let bin = home
+            .join(".nvm/versions/node")
+            .join(format!("v{version}"))
+            .join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        bin
+    }
+
+    fn fake_asdf(home: &Path, version: &str) -> PathBuf {
+        let bin = home.join(".asdf/installs/nodejs").join(version).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        bin
+    }
+
+    fn fake_mise(home: &Path, version: &str) -> PathBuf {
+        let bin = home
+            .join(".local/share/mise/installs/node")
+            .join(version)
+            .join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        bin
+    }
+
+    /// Run a closure with `HOME` (and `FNM_DIR`/`NVM_DIR` cleared) pointing
+    /// at `home`, restoring the originals afterwards.
+    ///
+    /// NOTE: edition 2021 — set_var / remove_var are safe functions here.
+    /// Tests in this module must be run sequentially (default for `cargo test --lib`
+    /// with no explicit `#[test(parallel)]`).
+    fn with_home<F: FnOnce()>(home: &Path, f: F) {
+        let prev_home = std::env::var_os("HOME");
+        let prev_fnm = std::env::var_os("FNM_DIR");
+        let prev_nvm = std::env::var_os("NVM_DIR");
+        std::env::set_var("HOME", home);
+        std::env::remove_var("FNM_DIR");
+        std::env::remove_var("NVM_DIR");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_fnm {
+            Some(v) => std::env::set_var("FNM_DIR", v),
+            None => std::env::remove_var("FNM_DIR"),
+        }
+        match prev_nvm {
+            Some(v) => std::env::set_var("NVM_DIR", v),
+            None => std::env::remove_var("NVM_DIR"),
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    #[test]
+    fn find_version_manager_bin_finds_fnm() {
+        let home = tempdir().unwrap();
+        let expected = fake_fnm(home.path(), "18.20.4");
+        with_home(home.path(), || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(expected.clone()));
+        });
+    }
+
+    #[test]
+    fn find_version_manager_bin_strips_leading_v() {
+        let home = tempdir().unwrap();
+        let expected = fake_fnm(home.path(), "20.11.0");
+        with_home(home.path(), || {
+            assert_eq!(find_version_manager_bin("v20.11.0"), Some(expected.clone()));
+        });
+    }
+
+    #[test]
+    fn find_version_manager_bin_falls_back_to_nvm() {
+        let home = tempdir().unwrap();
+        let expected = fake_nvm(home.path(), "18.20.4");
+        with_home(home.path(), || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(expected.clone()));
+        });
+    }
+
+    #[test]
+    fn find_version_manager_bin_falls_back_to_asdf() {
+        let home = tempdir().unwrap();
+        let expected = fake_asdf(home.path(), "18.20.4");
+        with_home(home.path(), || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(expected.clone()));
+        });
+    }
+
+    #[test]
+    fn find_version_manager_bin_falls_back_to_mise() {
+        let home = tempdir().unwrap();
+        let expected = fake_mise(home.path(), "18.20.4");
+        with_home(home.path(), || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(expected.clone()));
+        });
+    }
+
+    #[test]
+    fn find_version_manager_bin_returns_none_when_nothing_installed() {
+        let home = tempdir().unwrap();
+        with_home(home.path(), || {
+            assert_eq!(find_version_manager_bin("18.20.4"), None);
+        });
+    }
+
+    #[test]
+    fn find_version_manager_bin_prefers_fnm_over_nvm() {
+        let home = tempdir().unwrap();
+        let fnm_bin = fake_fnm(home.path(), "18.20.4");
+        let _nvm_bin = fake_nvm(home.path(), "18.20.4");
+        with_home(home.path(), || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(fnm_bin.clone()));
+        });
+    }
+
+    // ── build_node_path ───────────────────────────────────────────────────────
+
+    #[test]
+    fn build_node_path_prepends_pkg_then_workspace_then_existing() {
+        let ws = tempdir().unwrap();
+        let pkg = ws.path().join("packages/foo");
+        let pkg_bin = pkg.join("node_modules/.bin");
+        let ws_bin = ws.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&pkg_bin).unwrap();
+        std::fs::create_dir_all(&ws_bin).unwrap();
+
+        let path = build_node_path(&pkg, ws.path(), "/usr/bin:/bin");
+        let parts: Vec<&str> = path.split(':').collect();
+        assert_eq!(parts[0], pkg_bin.to_str().unwrap());
+        assert_eq!(parts[1], ws_bin.to_str().unwrap());
+        assert!(parts.contains(&"/usr/bin"));
+        assert!(parts.contains(&"/bin"));
+    }
+
+    #[test]
+    fn build_node_path_omits_nonexistent_node_modules() {
+        // pkg/node_modules/.bin doesn't exist — must not appear in PATH.
+        let ws = tempdir().unwrap();
+        let pkg = ws.path().join("packages/foo");
+        std::fs::create_dir_all(&pkg).unwrap(); // pkg dir but no node_modules
+
+        let path = build_node_path(&pkg, ws.path(), "/usr/bin");
+        assert!(
+            !path.contains("node_modules/.bin"),
+            "non-existent node_modules/.bin must not be on PATH; got {path}"
+        );
+    }
+
+    #[test]
+    fn build_node_path_dedupes_when_pkg_equals_workspace() {
+        let ws = tempdir().unwrap();
+        let bin = ws.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let path = build_node_path(ws.path(), ws.path(), "/usr/bin");
+        let count = path.matches(bin.to_str().unwrap()).count();
+        assert_eq!(count, 1, "node_modules/.bin must appear exactly once");
+    }
+
+    #[test]
+    fn build_node_path_includes_version_manager_bin_when_node_version_set() {
+        let home = tempdir().unwrap();
+        let vm_bin = fake_fnm(home.path(), "18.20.4");
+
+        let ws = tempdir().unwrap();
+        std::fs::write(ws.path().join(".node-version"), "18.20.4\n").unwrap();
+
+        with_home(home.path(), || {
+            let path = build_node_path(ws.path(), ws.path(), "/usr/bin");
+            assert!(
+                path.contains(vm_bin.to_str().unwrap()),
+                "expected fnm bin {} in PATH, got: {path}",
+                vm_bin.display()
+            );
+        });
+    }
+
+    #[test]
+    fn build_node_path_skips_version_manager_when_no_version_file() {
+        let home = tempdir().unwrap();
+        let _vm_bin = fake_fnm(home.path(), "18.20.4");
+
+        let ws = tempdir().unwrap();
+        // No .node-version file — VM bin must NOT be added.
+
+        with_home(home.path(), || {
+            let path = build_node_path(ws.path(), ws.path(), "/usr/bin");
+            assert!(
+                !path.contains("fnm"),
+                "no .node-version means no VM bin on PATH; got: {path}"
+            );
+        });
+    }
+
+    #[test]
+    fn build_node_path_skips_version_manager_when_version_not_installed() {
+        // .node-version says 18.20.4 but no version manager has it — fall through.
+        let home = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        std::fs::write(ws.path().join(".node-version"), "18.20.4\n").unwrap();
+
+        with_home(home.path(), || {
+            let path = build_node_path(ws.path(), ws.path(), "/usr/bin");
+            assert!(
+                !path.contains("fnm") && !path.contains(".nvm") && !path.contains(".asdf"),
+                "missing VM install must yield no VM bin; got: {path}"
+            );
+        });
+    }
 }
