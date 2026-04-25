@@ -7,13 +7,36 @@
 use blake3::Hasher;
 use std::path::{Path, PathBuf};
 
+/// Compute the strong fingerprint.
+///
+/// # Pathset filtering
+///
+/// Files under `node_modules` are excluded from the SF hash.  Their
+/// contents are managed by the package manager (yarn/pnpm/npm) and are
+/// stable for any given lockfile.  The lockfile is already tracked by the
+/// root-task fingerprint (`workspace#install`), so changes to installed
+/// packages will invalidate the root task and cause a full rebuild —
+/// including re-populating all SF entries.
+///
+/// Excluding `node_modules` dramatically reduces the number of file reads
+/// per SF computation (TypeScript stdlib alone can add hundreds of files)
+/// without sacrificing correctness.
 pub fn compute_strong_fingerprint(weak_fp: &str, pathset_reads: &[PathBuf]) -> String {
     let mut hasher = Hasher::new();
     hasher.update(b"wf:");
     hasher.update(weak_fp.as_bytes());
     hasher.update(b"\n");
 
-    let mut sorted: Vec<&Path> = pathset_reads.iter().map(|p| p.as_path()).collect();
+    let mut sorted: Vec<&Path> = pathset_reads
+        .iter()
+        .map(|p| p.as_path())
+        // Skip files inside node_modules — they're pinned by the lockfile.
+        .filter(|p| {
+            !p.components().any(|c| {
+                c.as_os_str() == std::ffi::OsStr::new("node_modules")
+            })
+        })
+        .collect();
     sorted.sort();
     sorted.dedup();
 
