@@ -34,7 +34,7 @@ fn matches_policy(policy: &Policy, path: &str) -> Option<SandboxMode> {
     }
     // Also try with a trailing slash so that selectors like "packages/foo/**"
     // match the directory path "packages/foo" itself (not just its children).
-    if !path.ends_with('/') && matcher.is_match(&format!("{}/", path)) {
+    if !path.ends_with('/') && matcher.is_match(format!("{}/", path)) {
         return policy.sandbox.clone();
     }
     None

@@ -486,6 +486,59 @@ fn since_flag_skips_unaffected_packages() {
 }
 
 #[test]
+fn rage_run_loads_rage_json_cache_dir() {
+    use std::process::Command;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
+
+    // minimal pnpm workspace with one package
+    std::fs::write(
+        workspace.path().join("pnpm-workspace.yaml"),
+        b"packages:\n  - 'packages/*'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.path().join("package.json"),
+        br#"{"name":"root","private":true}"#,
+    )
+    .unwrap();
+    let pkg = workspace.path().join("packages/p");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        br#"{"name":"@x/p","version":"1.0.0","scripts":{"build":"echo hi"}}"#,
+    )
+    .unwrap();
+
+    // rage.json points cache.dir at our tempdir
+    std::fs::write(
+        workspace.path().join("rage.json"),
+        format!(
+            r#"{{ "cache": {{ "backend": "local", "dir": "{}" }} }}"#,
+            cache_dir.path().to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_rage");
+    let out = Command::new(bin)
+        .args(["run", "build"])
+        .arg(workspace.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Cache should have been written into rage.json's cache.dir, not ~/.rage/cache
+    let entries: Vec<_> = std::fs::read_dir(cache_dir.path()).unwrap().collect();
+    assert!(
+        !entries.is_empty(),
+        "expected cache entries in {}",
+        cache_dir.path().display()
+    );
+}
+
+#[test]
 fn since_with_no_changes_runs_nothing() {
     use std::fs;
     use std::process::Command as Cmd;

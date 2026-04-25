@@ -119,6 +119,11 @@ async fn cmd_run(
     let pm = workspace_tools::detect_package_manager(root)
         .with_context(|| format!("{} is not a recognized JS workspace", root.display()))?;
 
+    // Load rage.json (optional; absent → defaults).
+    let config = pipeline_config::load_config(root)
+        .with_context(|| "loading rage.json")?
+        .unwrap_or_default();
+
     let raw = workspace_tools::discover_packages(root).context("discovering workspace packages")?;
     let resolved =
         workspace_tools::build_package_graph(raw).context("resolving package dependency edges")?;
@@ -156,7 +161,7 @@ async fn cmd_run(
         None
     };
 
-    let mut tasks = scheduler::task::build_task_list(&dag, script)
+    let mut tasks = scheduler::task::build_task_list_with_config(&dag, script, root, &config)
         .with_context(|| format!("no packages have a '{script}' script"))?;
 
     // Filter tasks by scope if --since or --affected was given
@@ -173,7 +178,12 @@ async fn cmd_run(
     let cache: Option<Arc<dyn cache::CacheProvider>> = if no_cache {
         None
     } else {
-        match LocalCache::new() {
+        // Resolve cache dir: CLI flag > rage.json > RAGE_CACHE_DIR > ~/.rage/cache.
+        let cache_result = match &config.cache.dir {
+            Some(d) => LocalCache::with_dir(d.clone()),
+            None => LocalCache::new(),
+        };
+        match cache_result {
             Ok(lc) => Some(Arc::new(lc)),
             Err(e) => {
                 eprintln!("[rage] warning: cache unavailable: {e}");
