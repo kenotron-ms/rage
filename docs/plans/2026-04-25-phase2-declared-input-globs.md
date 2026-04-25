@@ -1,6 +1,6 @@
 # Phase 2 — Wire declared_input_globs into TwoPhaseCache
 
-**Status:** Planned  
+**Status:** ✅ Complete — merged to `main` at `872a2d9`  
 **Branch:** `feat/phase2-declared-input-globs`  
 **Crates touched:** `scheduler`, `cache` (tests only)
 
