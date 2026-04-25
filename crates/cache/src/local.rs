@@ -85,6 +85,7 @@ mod tests {
             exit_code: 0,
             elapsed_ms: 10,
             cached_at: 0,
+            pathset_reads: vec![],
         }
     }
 
@@ -152,6 +153,7 @@ mod tests {
             exit_code: 0,
             elapsed_ms: 500,
             cached_at: 100,
+            pathset_reads: vec![],
         };
         cache.put("fp1", &e1).unwrap();
         cache.put("fp2", &e2).unwrap();

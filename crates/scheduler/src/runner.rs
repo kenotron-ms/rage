@@ -187,6 +187,7 @@ async fn run_single_task(
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
+                pathset_reads: vec![],
             };
             let _ = c.put(fp, &entry); // ignore cache write errors
         }
