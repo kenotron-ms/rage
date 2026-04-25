@@ -100,8 +100,28 @@ impl EcosystemPlugin for TypeScriptPlugin {
         globs
     }
 
-    fn abi_fingerprint(&self, _outputs: &[OutputFile]) -> Option<String> {
-        None
+    fn abi_fingerprint(&self, outputs: &[OutputFile]) -> Option<String> {
+        let mut dts_paths: Vec<&std::path::Path> = outputs
+            .iter()
+            .map(|o| o.path.as_path())
+            .filter(|p| {
+                let s = p.to_string_lossy();
+                s.ends_with(".d.ts") || s.ends_with(".d.cts") || s.ends_with(".d.mts")
+            })
+            .collect();
+        if dts_paths.is_empty() {
+            return None;
+        }
+        dts_paths.sort();
+        let mut hasher = blake3::Hasher::new();
+        for path in dts_paths {
+            // Hash the path so reorders/renames affect the fingerprint.
+            hasher.update(path.as_os_str().as_encoded_bytes());
+            if let Ok(content) = std::fs::read(path) {
+                hasher.update(&content);
+            }
+        }
+        Some(hasher.finalize().to_hex().to_string())
     }
 }
 
@@ -230,5 +250,76 @@ mod tests {
         let p = TypeScriptPlugin::new();
         let outputs: Vec<OutputFile> = vec![];
         assert!(p.abi_fingerprint(&outputs).is_none());
+    }
+
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn output_at(dir: &std::path::Path, name: &str, content: &[u8]) -> OutputFile {
+        let p = dir.join(name);
+        fs::write(&p, content).unwrap();
+        OutputFile { path: p }
+    }
+
+    #[test]
+    fn abi_returns_none_when_no_dts() {
+        let dir = tempdir().unwrap();
+        let outs = vec![output_at(dir.path(), "index.js", b"console.log(1)")];
+        let p = TypeScriptPlugin::new();
+        assert!(
+            p.abi_fingerprint(&outs).is_none()
+                || p.abi_fingerprint(&outs) == Some(blake3::hash(b"").to_hex().to_string())
+        );
+    }
+
+    #[test]
+    fn abi_returns_hash_when_dts_present() {
+        let dir = tempdir().unwrap();
+        let outs = vec![
+            output_at(dir.path(), "index.js", b"console.log(1)"),
+            output_at(dir.path(), "index.d.ts", b"export declare const x: number;"),
+        ];
+        let p = TypeScriptPlugin::new();
+        let h = p.abi_fingerprint(&outs);
+        assert!(h.is_some());
+        let hex = h.unwrap();
+        assert_eq!(hex.len(), 64);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn abi_changes_with_dts_content() {
+        let dir = tempdir().unwrap();
+        let dts = dir.path().join("a.d.ts");
+        fs::write(&dts, b"export declare const x: number;").unwrap();
+        let outs = vec![OutputFile { path: dts.clone() }];
+        let p = TypeScriptPlugin::new();
+        let h1 = p.abi_fingerprint(&outs).unwrap();
+        fs::write(&dts, b"export declare const x: string;").unwrap();
+        let h2 = p.abi_fingerprint(&outs).unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn abi_stable_across_path_order() {
+        let dir = tempdir().unwrap();
+        let a = output_at(dir.path(), "a.d.ts", b"declare const a: 1");
+        let b = output_at(dir.path(), "b.d.ts", b"declare const b: 2");
+        let p = TypeScriptPlugin::new();
+        let h1 = p.abi_fingerprint(&[a.clone(), b.clone()]).unwrap();
+        let h2 = p.abi_fingerprint(&[b, a]).unwrap();
+        assert_eq!(h1, h2, "abi_fingerprint must sort outputs");
+    }
+
+    #[test]
+    fn abi_ignores_non_dts() {
+        let dir = tempdir().unwrap();
+        let dts = output_at(dir.path(), "index.d.ts", b"declare const x: 1");
+        let p = TypeScriptPlugin::new();
+        let h_only = p.abi_fingerprint(&[dts.clone()]).unwrap();
+        // adding a .js file must not affect the fingerprint
+        let js = output_at(dir.path(), "index.js", b"x=1");
+        let h_with_js = p.abi_fingerprint(&[dts, js]).unwrap();
+        assert_eq!(h_only, h_with_js);
     }
 }
