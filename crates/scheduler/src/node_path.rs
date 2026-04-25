@@ -185,12 +185,45 @@ pub fn build_node_path(task_cwd: &Path, workspace_root: &Path, system_path: &str
 ///
 /// If `token` contains `/`, it is returned verbatim (treated as an explicit
 /// absolute or relative path).
-pub fn which_first(
-    _command: &str,
-    _cwd: &Path,
-    _workspace_root: &Path,
-) -> Option<PathBuf> {
-    None // intentionally unimplemented — see Task 6
+pub fn which_first(command: &str, cwd: &Path, workspace_root: &Path) -> Option<PathBuf> {
+    let first = command.split_whitespace().next()?;
+    if first.contains('/') {
+        return Some(PathBuf::from(first));
+    }
+
+    // 1. {cwd}/node_modules/.bin/{first}
+    let pkg_candidate = cwd.join("node_modules/.bin").join(first);
+    if pkg_candidate.is_file() {
+        return Some(pkg_candidate);
+    }
+
+    // 2. {workspace_root}/node_modules/.bin/{first}
+    if workspace_root != cwd {
+        let ws_candidate = workspace_root.join("node_modules/.bin").join(first);
+        if ws_candidate.is_file() {
+            return Some(ws_candidate);
+        }
+    }
+
+    // 3. Active Node.js version manager bin dir
+    if let Some(version) = resolve_node_version(workspace_root) {
+        if let Some(vm_bin) = find_version_manager_bin(&version) {
+            let candidate = vm_bin.join(first);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 4. System PATH
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(first);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
