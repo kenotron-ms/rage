@@ -19,11 +19,28 @@ pub struct SandboxConfig {
     pub default: SandboxMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct CacheConfig {
+    pub backend: String,
+    pub dir: Option<std::path::PathBuf>,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            backend: "local".to_string(),
+            dir: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default)]
 pub struct RageConfig {
     pub plugins: Vec<String>,
     pub sandbox: SandboxConfig,
+    pub cache: CacheConfig,
 }
 
 /// Load `rage.json` from the workspace root. Returns `None` if absent.
@@ -94,5 +111,25 @@ mod tests {
         let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
         f.write_all(b"{ not json").unwrap();
         assert!(load_config(&d).is_err());
+    }
+
+    #[test]
+    fn parses_cache_section() {
+        let d = tmpdir();
+        let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
+        f.write_all(br#"{"cache": {"backend": "local", "dir": "/tmp/rage-cache"}}"#).unwrap();
+        let cfg = load_config(&d).unwrap().unwrap();
+        assert_eq!(cfg.cache.backend, "local");
+        assert_eq!(cfg.cache.dir, Some(std::path::PathBuf::from("/tmp/rage-cache")));
+    }
+
+    #[test]
+    fn cache_section_has_defaults() {
+        let d = tmpdir();
+        let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
+        f.write_all(b"{}").unwrap();
+        let cfg = load_config(&d).unwrap().unwrap();
+        assert_eq!(cfg.cache.backend, "local");
+        assert_eq!(cfg.cache.dir, None);
     }
 }
