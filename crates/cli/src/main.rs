@@ -95,6 +95,19 @@ enum Command {
         /// Positional workspace path (overrides --workspace).
         workspace_pos: Option<PathBuf>,
     },
+
+    /// Diagnose why a task missed the cache — diff the two most recent runs.
+    WhyMiss {
+        /// Package name, e.g. `@lage-run/core`.
+        package: String,
+        /// Script name, e.g. `build`.
+        script: String,
+        /// Workspace root (defaults to cwd). Used to locate the cache directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Positional workspace path (overrides --workspace).
+        workspace_pos: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -148,6 +161,15 @@ async fn main() -> Result<()> {
         } => {
             let root = resolve_workspace(workspace_pos, workspace);
             cmd_open(&root)
+        }
+        Command::WhyMiss {
+            package,
+            script,
+            workspace,
+            workspace_pos,
+        } => {
+            let root = resolve_workspace(workspace_pos, workspace);
+            cmd_why_miss(&root, &package, &script)
         }
     }
 }
@@ -363,4 +385,153 @@ async fn cmd_run(
 
     eprintln!("Done.");
     Ok(())
+}
+fn cmd_why_miss(root: &Path, pkg: &str, script: &str) -> Result<()> {
+    let cache_dir = resolve_cache_dir(root);
+
+    match cache::why_miss::read_snapshots(&cache_dir, pkg, script) {
+        None => {
+            eprintln!("[rage why-miss] no snapshots found for {pkg}#{script}",);
+            eprintln!("  (run 'rage run {script}' at least twice to generate history)");
+            Ok(())
+        }
+        Some((old, new)) => {
+            eprintln!(
+                "[rage why-miss] {}#{} — comparing run 2 vs run 1",
+                new.pkg, new.script
+            );
+            eprintln!();
+            print_why_miss_diff(&old, &new);
+            Ok(())
+        }
+    }
+}
+
+fn resolve_cache_dir(root: &Path) -> std::path::PathBuf {
+    // Load rage.json to get custom cache dir, else use default ~/.rage/cache
+    let config = pipeline_config::load_config(root)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    match &config.cache.dir {
+        Some(d) => d.clone(),
+        None => {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+            home.join(".rage").join("cache")
+        }
+    }
+}
+
+fn print_why_miss_diff(
+    old: &cache::why_miss::WhyMissSnapshot,
+    new: &cache::why_miss::WhyMissSnapshot,
+) {
+    use std::collections::HashMap;
+
+    let mut any_change = false;
+
+    // ── Command ─────────────────────────────────────────────────────────
+    if old.command != new.command {
+        any_change = true;
+        eprintln!("  COMMAND CHANGED");
+        eprintln!("    was: {}", old.command);
+        eprintln!("    now: {}", new.command);
+        eprintln!();
+    }
+
+    // ── Tool binary ──────────────────────────────────────────────────────
+    if old.tool_hash != new.tool_hash {
+        any_change = true;
+        eprintln!("  TOOL BINARY CHANGED");
+        eprintln!("    path:  {}", new.tool_path);
+        eprintln!(
+            "    was:   {}",
+            &old.tool_hash[..8.min(old.tool_hash.len())]
+        );
+        eprintln!(
+            "    now:   {}",
+            &new.tool_hash[..8.min(new.tool_hash.len())]
+        );
+        eprintln!();
+    }
+
+    // ── Input files ──────────────────────────────────────────────────────
+    let old_map: HashMap<_, _> = old.inputs.iter().map(|e| (&e.path, &e.hash)).collect();
+    let new_map: HashMap<_, _> = new.inputs.iter().map(|e| (&e.path, &e.hash)).collect();
+
+    let mut changed_files: Vec<_> = new_map
+        .iter()
+        .filter(|(path, hash)| {
+            old_map
+                .get(*path)
+                .map(|h| h.as_str() != hash.as_str())
+                .unwrap_or(false)
+        })
+        .map(|(p, _)| p)
+        .collect();
+    changed_files.sort();
+
+    let mut added_files: Vec<_> = new_map
+        .keys()
+        .filter(|p| !old_map.contains_key(*p))
+        .collect();
+    added_files.sort();
+
+    let mut removed_files: Vec<_> = old_map
+        .keys()
+        .filter(|p| !new_map.contains_key(*p))
+        .collect();
+    removed_files.sort();
+
+    if !changed_files.is_empty() || !added_files.is_empty() || !removed_files.is_empty() {
+        any_change = true;
+        eprintln!("  CHANGED INPUT FILES");
+        for path in &changed_files {
+            let old_hash = old_map[*path];
+            let new_hash = new_map[*path];
+            eprintln!("    modified: {}", path.display());
+            eprintln!("      was: {}", &old_hash[..8.min(old_hash.len())]);
+            eprintln!("      now: {}", &new_hash[..8.min(new_hash.len())]);
+        }
+        for path in &added_files {
+            eprintln!("    added:    {}", path.display());
+        }
+        for path in &removed_files {
+            eprintln!("    removed:  {}", path.display());
+        }
+        eprintln!();
+    }
+
+    // ── Dep ABI fingerprints ─────────────────────────────────────────────
+    let old_abi: HashMap<_, _> = old.dep_abi_fps.iter().map(|(k, v)| (k, v)).collect();
+    let new_abi: HashMap<_, _> = new.dep_abi_fps.iter().map(|(k, v)| (k, v)).collect();
+    let mut abi_changes: Vec<_> = new_abi
+        .iter()
+        .filter(|(k, v)| {
+            old_abi
+                .get(*k)
+                .map(|ov| ov.as_str() != v.as_str())
+                .unwrap_or(false)
+        })
+        .map(|(k, _)| k.as_str())
+        .collect();
+    abi_changes.sort();
+
+    if !abi_changes.is_empty() {
+        any_change = true;
+        eprintln!("  DEP API CHANGED (upstream .d.ts signature changed)");
+        for dep in &abi_changes {
+            eprintln!("    {dep}");
+        }
+        eprintln!();
+    }
+
+    // ── Summary ──────────────────────────────────────────────────────────
+    if !any_change {
+        eprintln!("  (no differences found between the two snapshots)");
+        eprintln!("  Note: the cache miss may be due to pathset changes (sandbox-observed reads)");
+    }
 }

@@ -91,6 +91,17 @@ fn resolve_globs(pkg_dir: &Path, globs: &[String]) -> Vec<(std::path::PathBuf, S
 ///   sorted("input:" || rel_path || ":" || content_hash || "\n" for each matched file),
 ///   sorted("env:" || key || "=" || value || "\n" for each env pair),
 /// )
+/// Resolve  relative to  and return (rel_path, blake3_hex) pairs.
+///
+/// Public entry point used by  to collect the snapshot of declared
+/// input files for the  diagnostic.
+pub fn resolve_globs_for_snapshot(
+    pkg_dir: &Path,
+    globs: &[String],
+) -> Vec<(std::path::PathBuf, String)> {
+    resolve_globs(pkg_dir, globs)
+}
+
 pub fn compute_weak_fingerprint(inputs: &WeakFpInputs) -> String {
     let mut hasher = blake3::Hasher::new();
 

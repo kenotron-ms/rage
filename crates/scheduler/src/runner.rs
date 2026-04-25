@@ -501,6 +501,34 @@ async fn run_single_task_two_phase(
         dep_abi_fingerprints: &dep_abi_fps,
     };
 
+    // ── Record why-miss snapshot ──────────────────────────────────────────
+    // Capture a snapshot of the WF inputs so  can diff runs.
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let resolved =
+            cache::weak_fp::resolve_globs_for_snapshot(&task.cwd, &task.declared_input_globs);
+        let tool_hash_str = cache::tool_hash::hash_tool_binary(&tool_path)
+            .unwrap_or_else(|| "<missing>".to_string());
+        let snap = cache::why_miss::WhyMissSnapshot {
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            pkg: task.package_name.clone(),
+            script: task.script_name.clone(),
+            command: task.command.clone(),
+            tool_path: tool_path.to_string_lossy().into_owned(),
+            tool_hash: tool_hash_str,
+            inputs: resolved
+                .into_iter()
+                .map(|(p, h)| cache::why_miss::InputEntry { path: p, hash: h })
+                .collect(),
+            env: vec![],
+            dep_abi_fps: dep_abi_fps.clone(),
+        };
+        cache::why_miss::record_snapshot(cache.dir(), snap);
+    }
+
     // Phase 1: cache lookup
     if cache.lookup(&inputs).is_some() {
         eprintln!(
