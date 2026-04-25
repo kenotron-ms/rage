@@ -114,6 +114,42 @@ impl EcosystemPlugin for TypeScriptPlugin {
         globs
     }
 
+    fn infer_root_tasks(&self, workspace_root: &Path) -> Vec<plugin::RootTask> {
+        // Detect the JS package manager from lockfile presence.
+        // Priority: pnpm > yarn > npm. Returning at most one root task —
+        // the "install" step for the detected manager.
+        let pnpm_lock = workspace_root.join("pnpm-lock.yaml");
+        if pnpm_lock.is_file() {
+            return vec![plugin::RootTask {
+                name: "install".to_string(),
+                command: "pnpm install".to_string(),
+                input_paths: vec![pnpm_lock],
+            }];
+        }
+
+        let yarn_lock = workspace_root.join("yarn.lock");
+        if yarn_lock.is_file() {
+            return vec![plugin::RootTask {
+                name: "install".to_string(),
+                command: "yarn install".to_string(),
+                input_paths: vec![yarn_lock],
+            }];
+        }
+
+        let npm_lock = workspace_root.join("package-lock.json");
+        if npm_lock.is_file() {
+            return vec![plugin::RootTask {
+                name: "install".to_string(),
+                command: "npm install".to_string(),
+                input_paths: vec![npm_lock],
+            }];
+        }
+
+        // No lockfile found — no install task. (A future heuristic could
+        // fall back to package.json#packageManager; that's out of scope.)
+        Vec::new()
+    }
+
     fn abi_fingerprint(&self, outputs: &[OutputFile]) -> Option<String> {
         let mut dts_paths: Vec<&std::path::Path> = outputs
             .iter()
@@ -342,5 +378,73 @@ mod tests {
         let tc = plugin_config_from_pipeline(pc);
         assert!(tc.extend_input_globs.is_empty());
         assert!(tc.exclude_input_globs.is_empty());
+    }
+
+    // ── infer_root_tasks tests ────────────────────────────────────────────────
+
+    #[test]
+    fn infer_root_tasks_detects_pnpm_lockfile() {
+        use plugin::RootTask;
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), b"lockfileVersion: 6\n").unwrap();
+        let p = TypeScriptPlugin::new();
+        let tasks = p.infer_root_tasks(dir.path());
+        assert_eq!(tasks.len(), 1, "exactly one install task for pnpm");
+        let t = &tasks[0];
+        assert_eq!(t.name, "install");
+        assert_eq!(t.command, "pnpm install");
+        assert_eq!(t.input_paths, vec![dir.path().join("pnpm-lock.yaml")]);
+        // Confirm the type round-trips
+        let _: RootTask = t.clone();
+    }
+
+    #[test]
+    fn infer_root_tasks_detects_yarn_lockfile() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("yarn.lock"), b"# yarn lockfile v1\n").unwrap();
+        let p = TypeScriptPlugin::new();
+        let tasks = p.infer_root_tasks(dir.path());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "install");
+        assert_eq!(tasks[0].command, "yarn install");
+        assert_eq!(tasks[0].input_paths, vec![dir.path().join("yarn.lock")]);
+    }
+
+    #[test]
+    fn infer_root_tasks_detects_npm_package_lock() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package-lock.json"),
+            br#"{"lockfileVersion":3,"requires":true,"packages":{}}"#,
+        )
+        .unwrap();
+        let p = TypeScriptPlugin::new();
+        let tasks = p.infer_root_tasks(dir.path());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "install");
+        assert_eq!(tasks[0].command, "npm install");
+        assert_eq!(tasks[0].input_paths, vec![dir.path().join("package-lock.json")]);
+    }
+
+    #[test]
+    fn infer_root_tasks_returns_empty_when_no_lockfile() {
+        let dir = tempdir().unwrap();
+        // Empty workspace — no lockfile of any kind.
+        let p = TypeScriptPlugin::new();
+        let tasks = p.infer_root_tasks(dir.path());
+        assert!(tasks.is_empty(), "no lockfile must yield no root tasks");
+    }
+
+    #[test]
+    fn infer_root_tasks_prefers_pnpm_over_yarn_over_npm() {
+        // If multiple lockfiles are present (rare, but possible during a migration),
+        // pnpm wins, then yarn, then npm.
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("pnpm-lock.yaml"), b"v: 6\n").unwrap();
+        std::fs::write(dir.path().join("yarn.lock"), b"v1\n").unwrap();
+        std::fs::write(dir.path().join("package-lock.json"), b"{}").unwrap();
+        let tasks = TypeScriptPlugin::new().infer_root_tasks(dir.path());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].command, "pnpm install");
     }
 }
