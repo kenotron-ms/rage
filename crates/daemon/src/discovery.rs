@@ -27,8 +27,7 @@ pub fn daemons_dir() -> Result<PathBuf> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .context("HOME or USERPROFILE not set")?;
     let dir = PathBuf::from(home).join(".rage").join("daemons");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -81,8 +80,7 @@ pub fn delete_discovery(workspace: &Path) -> Result<()> {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(e)
-                .with_context(|| format!("deleting socket file {}", sock_path.display()))
+            return Err(e).with_context(|| format!("deleting socket file {}", sock_path.display()))
         }
     }
 

@@ -16,8 +16,7 @@ pub mod futures_response_box {
 }
 
 /// Type alias for a handler that can be shared across tasks.
-pub type Handler =
-    Arc<dyn Fn(DaemonMessage) -> futures_response_box::Boxed + Send + Sync>;
+pub type Handler = Arc<dyn Fn(DaemonMessage) -> futures_response_box::Boxed + Send + Sync>;
 
 /// Unix socket server that accepts connections and dispatches newline-delimited
 /// JSON `DaemonMessage` requests to a handler, writing `DaemonResponse` back.
@@ -32,8 +31,8 @@ impl UnixSocketServer {
         if path.exists() {
             std::fs::remove_file(path).ok();
         }
-        let listener = UnixListener::bind(path)
-            .with_context(|| format!("binding {}", path.display()))?;
+        let listener =
+            UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
         Ok(Self {
             socket_path: path.to_path_buf(),
             listener,
@@ -52,8 +51,9 @@ impl UnixSocketServer {
         loop {
             let (stream, _addr) = self.listener.accept().await?;
             let h = handler.clone();
-            let join =
-                tokio::spawn(async move { let _ = handle_client(stream, h.as_ref()).await; });
+            let join = tokio::spawn(async move {
+                let _ = handle_client(stream, h.as_ref()).await;
+            });
             pending.lock().await.push(join);
         }
     }

@@ -2,8 +2,10 @@ use crate::discovery::{self, DiscoveryFile};
 use crate::messages::{DaemonMessage, DaemonResponse};
 use crate::reconciler::{self, ReconcilerHandle};
 use crate::socket::UnixSocketServer;
+use crate::watcher::FileWatcher;
 use anyhow::Result;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub struct Daemon {
     pub workspace: PathBuf,
@@ -12,7 +14,10 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace, idle_timeout: std::time::Duration::from_secs(3 * 60 * 60) }
+        Self {
+            workspace,
+            idle_timeout: std::time::Duration::from_secs(3 * 60 * 60),
+        }
     }
 
     pub async fn run(self) -> Result<()> {
@@ -31,27 +36,49 @@ impl Daemon {
         ctrlc_cleanup(ws_for_cleanup);
         let handle: ReconcilerHandle = reconciler::spawn();
         let last_activity = std::sync::Arc::new(tokio::sync::Mutex::new(std::time::Instant::now()));
-        spawn_idle_monitor(last_activity.clone(), self.idle_timeout, self.workspace.clone());
-        server.serve({
-            let handle = handle.clone();
-            let activity = last_activity.clone();
-            move |msg: DaemonMessage| {
-                let handle = handle.clone();
-                let activity = activity.clone();
-                async move {
-                    *activity.lock().await = std::time::Instant::now();
-                    match msg {
-                        DaemonMessage::SetDesiredState(d) => handle.set_desired(d),
-                        DaemonMessage::RetryTask { package, script } => handle.retry_task(package, script),
-                        DaemonMessage::Shutdown => { std::process::exit(0); }
-                        DaemonMessage::GetState => {}
-                    }
-                    let arc = handle.state();
-                    let s = arc.lock().await;
-                    DaemonResponse { state: s.state.kind, tasks: s.tasks.clone() }
+        spawn_idle_monitor(
+            last_activity.clone(),
+            self.idle_timeout,
+            self.workspace.clone(),
+        );
+        // Wire file-change events → reconciler so builds re-converge on edits.
+        if let Ok(mut watcher) = FileWatcher::start(&self.workspace, Duration::from_millis(300)) {
+            let watcher_handle = handle.clone();
+            tokio::spawn(async move {
+                while let Some(_ev) = watcher.events.recv().await {
+                    watcher_handle.on_files_changed();
                 }
-            }
-        }).await
+            });
+        }
+        server
+            .serve({
+                let handle = handle.clone();
+                let activity = last_activity.clone();
+                move |msg: DaemonMessage| {
+                    let handle = handle.clone();
+                    let activity = activity.clone();
+                    async move {
+                        *activity.lock().await = std::time::Instant::now();
+                        match msg {
+                            DaemonMessage::SetDesiredState(d) => handle.set_desired(d),
+                            DaemonMessage::RetryTask { package, script } => {
+                                handle.retry_task(package, script)
+                            }
+                            DaemonMessage::Shutdown => {
+                                std::process::exit(0);
+                            }
+                            DaemonMessage::GetState => {}
+                        }
+                        let arc = handle.state();
+                        let s = arc.lock().await;
+                        DaemonResponse {
+                            state: s.state.kind,
+                            tasks: s.tasks.clone(),
+                        }
+                    }
+                }
+            })
+            .await
     }
 }
 

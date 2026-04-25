@@ -237,7 +237,6 @@ async fn cmd_run(
     since: Option<&str>,
     affected: bool,
 ) -> Result<()> {
-
     if since.is_some() && affected {
         anyhow::bail!("--since and --affected are mutually exclusive");
     }
@@ -274,8 +273,8 @@ async fn cmd_run(
         );
         Some(aff)
     } else if affected {
-        let dirty_files = scoping::git_dirty_files(root)
-            .context("computing uncommitted changed files")?;
+        let dirty_files =
+            scoping::git_dirty_files(root).context("computing uncommitted changed files")?;
         let aff = scoping::affected_packages(&resolved, &dag, &dirty_files);
         eprintln!(
             "Scoping to packages with uncommitted changes: {} affected ({} scoped out)",

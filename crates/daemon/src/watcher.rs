@@ -18,13 +18,11 @@ impl FileWatcher {
     /// Watch root recursively. Debounces bursts of events to one event per debounce window.
     pub fn start(root: &Path, debounce: Duration) -> Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel::<ChangeEvent>();
-        let (raw_tx, mut raw_rx) =
-            mpsc::unbounded_channel::<notify::Result<notify::Event>>();
-        let mut watcher: RecommendedWatcher =
-            notify::recommended_watcher(move |res| {
-                let _ = raw_tx.send(res);
-            })
-            .context("creating notify watcher")?;
+        let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+        let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+            let _ = raw_tx.send(res);
+        })
+        .context("creating notify watcher")?;
         watcher
             .watch(root, RecursiveMode::Recursive)
             .with_context(|| format!("watching {}", root.display()))?;
@@ -64,8 +62,8 @@ mod tests {
     #[tokio::test]
     async fn write_triggers_event() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut watcher = FileWatcher::start(dir.path(), Duration::from_millis(50))
-            .expect("start watcher");
+        let mut watcher =
+            FileWatcher::start(dir.path(), Duration::from_millis(50)).expect("start watcher");
 
         // Write a file into the temp directory
         std::fs::write(dir.path().join("test_file.txt"), b"hello").expect("write file");
@@ -74,6 +72,9 @@ mod tests {
         let event = result
             .expect("timed out waiting for event")
             .expect("channel closed");
-        assert!(!event.paths.is_empty(), "expected non-empty paths in ChangeEvent");
+        assert!(
+            !event.paths.is_empty(),
+            "expected non-empty paths in ChangeEvent"
+        );
     }
 }

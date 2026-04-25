@@ -617,7 +617,11 @@ fn rage_run_loads_rage_json_cache_dir() {
         .arg(workspace.path())
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Cache should have been written into rage.json's cache.dir, not ~/.rage/cache
     let entries: Vec<_> = std::fs::read_dir(cache_dir.path()).unwrap().collect();
@@ -703,8 +707,16 @@ fn rage_dev_starts_daemon_and_returns_quickly() {
     // Minimal pnpm workspace fixture
     let workspace = tempdir().unwrap();
     let ws = workspace.path();
-    std::fs::write(ws.join("pnpm-workspace.yaml"), b"packages:\n  - 'packages/*'\n").unwrap();
-    std::fs::write(ws.join("package.json"), br#"{"name":"root","private":true}"#).unwrap();
+    std::fs::write(
+        ws.join("pnpm-workspace.yaml"),
+        b"packages:\n  - 'packages/*'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("package.json"),
+        br#"{"name":"root","private":true}"#,
+    )
+    .unwrap();
     let pkg = ws.join("packages/a");
     std::fs::create_dir_all(&pkg).unwrap();
     std::fs::write(
