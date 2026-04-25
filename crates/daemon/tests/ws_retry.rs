@@ -11,7 +11,9 @@ async fn websocket_pushes_initial_state_and_accepts_retry() {
     let ws_root = tempfile::tempdir().unwrap();
     let mut d = Daemon::new(ws_root.path().to_path_buf());
     d.idle_timeout = std::time::Duration::from_secs(3);
-    let task = tokio::spawn(async move { let _ = d.run().await; });
+    let task = tokio::spawn(async move {
+        let _ = d.run().await;
+    });
     let mut disc = None;
     for _ in 0..50 {
         if let Ok(Some(x)) = daemon::discovery::read_discovery(ws_root.path()) {
@@ -35,8 +37,7 @@ async fn websocket_pushes_initial_state_and_accepts_retry() {
         ))
         .await
         .unwrap();
-    let next =
-        tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
+    let next = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
     assert!(next.is_ok());
     task.abort();
 }

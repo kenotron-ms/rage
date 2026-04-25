@@ -225,7 +225,10 @@ mod tests {
         std::fs::write(&src, b"export const a = 2;").unwrap();
         let h2 = compute_weak_fingerprint(&inputs);
 
-        assert_ne!(h1, h2, "changed input file content must change the fingerprint");
+        assert_ne!(
+            h1, h2,
+            "changed input file content must change the fingerprint"
+        );
     }
 
     // ── test 5 ────────────────────────────────────────────────────────────────
@@ -252,7 +255,10 @@ mod tests {
         std::fs::write(dir.path().join("README.md"), b"# docs").unwrap();
         let h2 = compute_weak_fingerprint(&inputs);
 
-        assert_eq!(h1, h2, "a file outside the glob pattern must not affect the fingerprint");
+        assert_eq!(
+            h1, h2,
+            "a file outside the glob pattern must not affect the fingerprint"
+        );
     }
 
     // ── test 6 ────────────────────────────────────────────────────────────────
@@ -279,7 +285,10 @@ mod tests {
             tracked_env: &env2,
         });
 
-        assert_ne!(h1, h2, "different env var values must change the fingerprint");
+        assert_ne!(
+            h1, h2,
+            "different env var values must change the fingerprint"
+        );
     }
 
     // ── test 7 ────────────────────────────────────────────────────────────────

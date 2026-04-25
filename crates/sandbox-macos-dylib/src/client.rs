@@ -47,9 +47,7 @@ pub(crate) fn send_event(op: &str, path: &str) {
     // JSON-escape op similarly.
     let escaped_op = op.replace('\\', "\\\\").replace('"', "\\\"");
 
-    let msg = format!(
-        "{{\"op\":\"{escaped_op}\",\"path\":\"{escaped_path}\",\"pid\":{pid}}}\n"
-    );
+    let msg = format!("{{\"op\":\"{escaped_op}\",\"path\":\"{escaped_path}\",\"pid\":{pid}}}\n");
 
     let _ = stream.write_all(msg.as_bytes());
 }

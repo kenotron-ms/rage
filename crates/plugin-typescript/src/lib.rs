@@ -205,7 +205,8 @@ mod tests {
     #[test]
     fn typecheck_has_tsc_noemit() {
         let p = TypeScriptPlugin::new();
-        let tc = p.infer_tasks(std::path::Path::new("/x"))
+        let tc = p
+            .infer_tasks(std::path::Path::new("/x"))
             .into_iter()
             .find(|t| t.name == "typecheck")
             .unwrap();
@@ -217,7 +218,8 @@ mod tests {
     #[test]
     fn build_has_dist_outputs() {
         let p = TypeScriptPlugin::new();
-        let b = p.infer_tasks(std::path::Path::new("/x"))
+        let b = p
+            .infer_tasks(std::path::Path::new("/x"))
             .into_iter()
             .find(|t| t.name == "build")
             .unwrap();
@@ -279,7 +281,10 @@ mod tests {
     fn unknown_task_returns_generic_globs() {
         let p = TypeScriptPlugin::new();
         let g = p.declared_input_globs("custom-task", &PluginConfig::default());
-        assert!(!g.is_empty(), "should return at least a generic ts/tsx glob");
+        assert!(
+            !g.is_empty(),
+            "should return at least a generic ts/tsx glob"
+        );
     }
 
     #[test]
@@ -423,7 +428,10 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].name, "install");
         assert_eq!(tasks[0].command, "npm install");
-        assert_eq!(tasks[0].input_paths, vec![dir.path().join("package-lock.json")]);
+        assert_eq!(
+            tasks[0].input_paths,
+            vec![dir.path().join("package-lock.json")]
+        );
     }
 
     #[test]

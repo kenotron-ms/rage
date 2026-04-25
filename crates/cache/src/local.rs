@@ -138,8 +138,14 @@ mod tests {
         // Just verifying construction doesn't fail; cleanup not strictly necessary.
         let _ = cache;
         let home = std::env::var("HOME").unwrap();
-        assert!(std::path::PathBuf::from(home).join(".rage-test-tilde-expansion").exists());
-        std::fs::remove_dir_all(std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".rage-test-tilde-expansion")).ok();
+        assert!(std::path::PathBuf::from(home)
+            .join(".rage-test-tilde-expansion")
+            .exists());
+        std::fs::remove_dir_all(
+            std::path::PathBuf::from(std::env::var("HOME").unwrap())
+                .join(".rage-test-tilde-expansion"),
+        )
+        .ok();
     }
 
     #[test]

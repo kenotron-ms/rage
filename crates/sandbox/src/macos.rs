@@ -75,11 +75,7 @@ fn resolve_shell() -> String {
 ///   developer-signed without library validation) can be fully observed.
 /// - Children that re-exec to a hardened binary lose interposition for that
 ///   subtree.
-pub async fn run_sandboxed(
-    cmd: &str,
-    cwd: &Path,
-    env: &[(String, String)],
-) -> Result<RunResult> {
+pub async fn run_sandboxed(cmd: &str, cwd: &Path, env: &[(String, String)]) -> Result<RunResult> {
     let dylib = dylib_path()?;
     if !dylib.exists() {
         anyhow::bail!(
@@ -116,7 +112,10 @@ pub async fn run_sandboxed(
     let events = server.drain().await;
     let path_set = PathSet::from_events(&events);
 
-    Ok(RunResult { exit_code, path_set })
+    Ok(RunResult {
+        exit_code,
+        path_set,
+    })
 }
 
 #[cfg(test)]
@@ -143,7 +142,10 @@ mod tests {
                 .args(["build", "-p", "sandbox-macos-dylib"])
                 .status()
                 .expect("failed to run cargo build -p sandbox-macos-dylib");
-            assert!(status.success(), "cargo build -p sandbox-macos-dylib failed");
+            assert!(
+                status.success(),
+                "cargo build -p sandbox-macos-dylib failed"
+            );
         }
 
         // Use a shell conditional that calls lstat("/etc/passwd") within the
@@ -155,9 +157,11 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.path_set.reads.iter().any(|p| p
-                .to_string_lossy()
-                .ends_with("passwd")),
+            result
+                .path_set
+                .reads
+                .iter()
+                .any(|p| p.to_string_lossy().ends_with("passwd")),
             "expected a path ending with 'passwd' in reads, got: {:?}",
             result.path_set.reads
         );
@@ -173,19 +177,18 @@ mod tests {
                 .args(["build", "-p", "sandbox-macos-dylib"])
                 .status()
                 .expect("failed to run cargo build -p sandbox-macos-dylib");
-            assert!(status.success(), "cargo build -p sandbox-macos-dylib failed");
+            assert!(
+                status.success(),
+                "cargo build -p sandbox-macos-dylib failed"
+            );
         }
 
         // Use a shell file-descriptor redirect so the open() call happens
         // inside the shell process (which has the dylib loaded).  On macOS
         // 26+, system binaries like /bin/cat strip DYLD_INSERT_LIBRARIES.
-        let result = run_sandboxed(
-            "exec 3< /etc/hosts; exec 3>&-",
-            Path::new("/tmp"),
-            &[],
-        )
-        .await
-        .unwrap();
+        let result = run_sandboxed("exec 3< /etc/hosts; exec 3>&-", Path::new("/tmp"), &[])
+            .await
+            .unwrap();
 
         assert_eq!(result.exit_code, 0);
         assert!(
@@ -215,7 +218,10 @@ mod tests {
                 .args(["build", "-p", "sandbox-macos-dylib"])
                 .status()
                 .expect("failed to run cargo build -p sandbox-macos-dylib");
-            assert!(status.success(), "cargo build -p sandbox-macos-dylib failed");
+            assert!(
+                status.success(),
+                "cargo build -p sandbox-macos-dylib failed"
+            );
         }
 
         let dir = tempfile::tempdir().expect("create tempdir");
@@ -225,14 +231,14 @@ mod tests {
         // DYLD_INSERT_LIBRARIES, so we avoid them here.
         let cmd = format!("> '{}/a.txt'", dir.path().display());
 
-        let result = run_sandboxed(&cmd, Path::new("/tmp"), &[])
-            .await
-            .unwrap();
+        let result = run_sandboxed(&cmd, Path::new("/tmp"), &[]).await.unwrap();
 
         assert!(
-            result.path_set.writes.iter().any(|p| p
-                .to_string_lossy()
-                .ends_with("a.txt")),
+            result
+                .path_set
+                .writes
+                .iter()
+                .any(|p| p.to_string_lossy().ends_with("a.txt")),
             "expected a path ending with 'a.txt' in writes, got: {:?}",
             result.path_set.writes
         );

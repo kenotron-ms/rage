@@ -13,6 +13,6 @@ pub mod watcher;
 
 pub use daemon::Daemon;
 pub use discovery::{discovery_path, workspace_hash, DiscoveryFile};
-pub use http::{AppState, StateSnapshot, bind_dynamic};
+pub use http::{bind_dynamic, AppState, StateSnapshot};
 pub use messages::{DaemonMessage, DaemonResponse, TaskStatusMsg};
 pub use state::{BuildState, DaemonState, TaskStatus};

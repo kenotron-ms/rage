@@ -94,8 +94,7 @@ impl TwoPhaseCache {
     fn write_entry(&self, sf: &str, entry: &CacheEntry) -> Result<()> {
         let path = self.entry_path(sf);
         let json = serde_json::to_string_pretty(entry).context("serializing entry")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("writing {}", path.display()))?;
+        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 }
@@ -161,7 +160,10 @@ mod tests {
             declared_input_globs: &[],
             tracked_env: &[],
         };
-        let ps = StoredPathset { reads: vec![f.clone()], writes: vec![] };
+        let ps = StoredPathset {
+            reads: vec![f.clone()],
+            writes: vec![],
+        };
         cache.record(&inputs, ps, entry_template("tsc")).unwrap();
 
         let hit = cache.lookup(&inputs).unwrap();
@@ -185,7 +187,10 @@ mod tests {
             declared_input_globs: &[],
             tracked_env: &[],
         };
-        let ps = StoredPathset { reads: vec![f.clone()], writes: vec![] };
+        let ps = StoredPathset {
+            reads: vec![f.clone()],
+            writes: vec![],
+        };
         cache.record(&inputs, ps, entry_template("tsc")).unwrap();
 
         // change pathset file content
@@ -213,7 +218,10 @@ mod tests {
             declared_input_globs: &globs,
             tracked_env: &[],
         };
-        let ps = StoredPathset { reads: vec![], writes: vec![] };
+        let ps = StoredPathset {
+            reads: vec![],
+            writes: vec![],
+        };
         cache.record(&inputs, ps, entry_template("tsc")).unwrap();
 
         // changing declared input → WF changes → no pathsets → miss
@@ -236,7 +244,10 @@ mod tests {
             declared_input_globs: &[],
             tracked_env: &[],
         };
-        let inputs_b = WeakFpInputs { command: "cmd-b", ..inputs_a };
+        let inputs_b = WeakFpInputs {
+            command: "cmd-b",
+            ..inputs_a
+        };
         cache
             .record(&inputs_a, StoredPathset::default(), entry_template("a"))
             .unwrap();

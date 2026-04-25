@@ -701,7 +701,10 @@ fn rage_open_errors_when_no_daemon() {
         .unwrap();
     assert!(!out.status.success(), "open should fail when no daemon");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("no daemon"), "expected 'no daemon' message, got: {err}");
+    assert!(
+        err.contains("no daemon"),
+        "expected 'no daemon' message, got: {err}"
+    );
 }
 
 // ── daemon / dev / status integration tests ──────────────────────────────────
@@ -951,8 +954,7 @@ fn run_pnpm_install_is_cached_on_second_run() {
     let log = std::fs::read_to_string(bin.path().join("pnpm.log")).unwrap();
     let invocations = log.matches("FAKE-PNPM install").count();
     assert_eq!(
-        invocations,
-        1,
+        invocations, 1,
         "pnpm should run exactly once across both rage invocations; log:\n{log}"
     );
 }

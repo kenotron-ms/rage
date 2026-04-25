@@ -233,7 +233,10 @@ async fn cmd_status(root: &Path) -> Result<()> {
 fn cmd_open(root: &Path) -> Result<()> {
     let disc = daemon::discovery::read_discovery(root)?;
     let Some(d) = disc else {
-        anyhow::bail!("no daemon running for {} — run `rage dev` first", root.display());
+        anyhow::bail!(
+            "no daemon running for {} — run `rage dev` first",
+            root.display()
+        );
     };
     let url = format!("http://127.0.0.1:{}/", d.http_port);
     eprintln!("opening {url}");

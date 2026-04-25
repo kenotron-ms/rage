@@ -247,7 +247,9 @@ mod tests {
 
         let cfg = RageConfig {
             plugins: vec![],
-            sandbox: SandboxConfig { default: SandboxMode::Observed },
+            sandbox: SandboxConfig {
+                default: SandboxMode::Observed,
+            },
             cache: CacheConfig::default(),
             policies: vec![Policy {
                 selector: "packages/core/**".to_string(),
@@ -258,8 +260,14 @@ mod tests {
 
         let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
         let tasks = build_task_list_with_config(&dag, "build", &root, &plugins, &cfg).unwrap();
-        let core = tasks.iter().find(|t| t.package_name == "@fixture/core").unwrap();
-        let utils = tasks.iter().find(|t| t.package_name == "@fixture/utils").unwrap();
+        let core = tasks
+            .iter()
+            .find(|t| t.package_name == "@fixture/core")
+            .unwrap();
+        let utils = tasks
+            .iter()
+            .find(|t| t.package_name == "@fixture/utils")
+            .unwrap();
         assert_eq!(core.sandbox_mode, SandboxMode::Strict);
         assert_eq!(utils.sandbox_mode, SandboxMode::Observed);
     }
@@ -317,7 +325,10 @@ mod tests {
         assert_eq!(tasks[0].script_name, "install");
         assert_eq!(tasks[0].command, "pnpm install");
         assert_eq!(tasks[0].cwd, work.path());
-        assert_eq!(tasks[0].input_paths, vec![work.path().join("pnpm-lock.yaml")]);
+        assert_eq!(
+            tasks[0].input_paths,
+            vec![work.path().join("pnpm-lock.yaml")]
+        );
 
         // Followed by 4 package build tasks, none flagged is_root.
         assert_eq!(tasks.len(), 5, "1 install + 4 package builds");

@@ -91,6 +91,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let p = write_file(&dir, "empty.txt", b"");
         let sf_empty = compute_strong_fingerprint("wf-abc", &[p]);
-        assert_ne!(sf, sf_empty, "Different paths → different SFs even if both empty");
+        assert_ne!(
+            sf, sf_empty,
+            "Different paths → different SFs even if both empty"
+        );
     }
 }

@@ -277,10 +277,7 @@ async fn run_root_task_legacy(
         }
     }
 
-    eprintln!(
-        "[rage] {}#{} starting",
-        task.package_name, task.script_name
-    );
+    eprintln!("[rage] {}#{} starting", task.package_name, task.script_name);
     let start = Instant::now();
     let status = Command::new("sh")
         .arg("-c")
@@ -409,8 +406,8 @@ async fn run_single_task_two_phase(
         return run_root_task_two_phase(task, cache).await;
     }
 
-    use cache::{CacheEntry, WeakFpInputs};
     use cache::pathset_store::StoredPathset;
+    use cache::{CacheEntry, WeakFpInputs};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let tool_path = which_first(&task.command).unwrap_or_else(|| PathBuf::from("sh"));
@@ -535,10 +532,7 @@ async fn run_root_task_two_phase(
         return Ok(());
     }
 
-    eprintln!(
-        "[rage] {}#{} starting",
-        task.package_name, task.script_name
-    );
+    eprintln!("[rage] {}#{} starting", task.package_name, task.script_name);
     let start = Instant::now();
     let status = Command::new("sh")
         .arg("-c")
@@ -753,7 +747,11 @@ mod tests {
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
         let dag = build_dag(packages).unwrap();
         let levels = compute_task_levels(&dag, &tasks);
-        assert_eq!(levels.len(), 1, "two independent packages, no root → 1 wave");
+        assert_eq!(
+            levels.len(),
+            1,
+            "two independent packages, no root → 1 wave"
+        );
         assert_eq!(levels[0].len(), 2);
     }
 
@@ -930,13 +928,33 @@ mod tests {
         let pkg = mk_pkg("pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
 
-        run_tasks_two_phase(&dag, vec![task.clone()], two_phase.clone()).await.unwrap();
+        run_tasks_two_phase(&dag, vec![task.clone()], two_phase.clone())
+            .await
+            .unwrap();
 
         let entries: Vec<_> = std::fs::read_dir(cache_dir.path()).unwrap().collect();
-        assert!(entries.iter().any(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("wf-")), "expected wf-*.pathsets file");
-        assert!(entries.iter().any(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("sf-")), "expected sf-*.entry file");
+        assert!(
+            entries.iter().any(|e| e
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("wf-")),
+            "expected wf-*.pathsets file"
+        );
+        assert!(
+            entries.iter().any(|e| e
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("sf-")),
+            "expected sf-*.entry file"
+        );
 
-        run_tasks_two_phase(&dag, vec![task], two_phase).await.unwrap();
+        run_tasks_two_phase(&dag, vec![task], two_phase)
+            .await
+            .unwrap();
     }
 
     // ── root task fingerprint tests ───────────────────────────────────────────
@@ -969,7 +987,10 @@ mod tests {
         assert_ne!(fp_a, fp_b, "fingerprint must change with lockfile contents");
 
         // Different command → different fingerprint.
-        let task_c = Task { command: "yarn install".to_string(), ..task_a.clone() };
+        let task_c = Task {
+            command: "yarn install".to_string(),
+            ..task_a.clone()
+        };
         let fp_c = root_task_fingerprint(&task_c);
         assert_ne!(fp_b, fp_c);
     }
@@ -989,7 +1010,10 @@ mod tests {
         };
         let fp1 = root_task_fingerprint(&task);
         let fp2 = root_task_fingerprint(&task);
-        assert_eq!(fp1, fp2, "missing-file fingerprint must still be deterministic");
+        assert_eq!(
+            fp1, fp2,
+            "missing-file fingerprint must still be deterministic"
+        );
         assert!(!fp1.is_empty());
     }
 }
