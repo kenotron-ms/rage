@@ -34,6 +34,10 @@ enum Command {
 
         /// Positional workspace path (overrides --workspace).
         workspace_pos: Option<PathBuf>,
+
+        /// Disable the local cache — always re-execute tasks.
+        #[arg(long)]
+        no_cache: bool,
     },
 }
 
@@ -52,9 +56,10 @@ async fn main() -> Result<()> {
             script,
             workspace,
             workspace_pos,
+            no_cache,
         } => {
             let root = resolve_workspace(workspace_pos, workspace);
-            cmd_run(&root, &script).await
+            cmd_run(&root, &script, no_cache).await
         }
     }
 }
@@ -83,7 +88,10 @@ fn cmd_graph(root: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_run(root: &Path, script: &str) -> Result<()> {
+async fn cmd_run(root: &Path, script: &str, no_cache: bool) -> Result<()> {
+    use cache::LocalCache;
+    use std::sync::Arc;
+
     let pm = workspace_tools::detect_package_manager(root).with_context(|| {
         format!("{} is not a recognized JS workspace", root.display())
     })?;
@@ -102,7 +110,19 @@ async fn cmd_run(root: &Path, script: &str) -> Result<()> {
 
     eprintln!("Running '{}' across {} packages", script, tasks.len());
 
-    scheduler::run_tasks(&dag, tasks, None)
+    let cache: Option<Arc<dyn cache::CacheProvider>> = if no_cache {
+        None
+    } else {
+        match LocalCache::new() {
+            Ok(lc) => Some(Arc::new(lc)),
+            Err(e) => {
+                eprintln!("[rage] warning: cache unavailable: {e}");
+                None
+            }
+        }
+    };
+
+    scheduler::run_tasks(&dag, tasks, cache)
         .await
         .with_context(|| format!("'{script}' run failed"))?;
 

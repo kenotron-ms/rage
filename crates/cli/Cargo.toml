@@ -20,4 +20,8 @@ build-graph = { path = "../build-graph" }
 pipeline-config = { path = "../pipeline-config" }
 workspace-tools = { path = "../workspace-tools" }
 scheduler = { path = "../scheduler" }
+cache = { path = "../cache" }
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"

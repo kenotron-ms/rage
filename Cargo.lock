@@ -465,9 +465,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "build-graph",
+ "cache",
  "clap",
  "pipeline-config",
  "scheduler",
+ "tempfile",
  "tokio",
  "workspace-tools",
 ]

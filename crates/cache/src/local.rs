@@ -16,7 +16,13 @@ pub struct LocalCache {
 impl LocalCache {
     /// Create a LocalCache using the default directory (`~/.rage/cache/`).
     /// Creates the directory if it does not exist.
+    ///
+    /// The `RAGE_CACHE_DIR` environment variable can override the default location.
     pub fn new() -> Result<Self> {
+        // Allow tests (and power users) to override the cache directory
+        if let Ok(dir) = std::env::var("RAGE_CACHE_DIR") {
+            return Self::with_dir(PathBuf::from(dir));
+        }
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .context("HOME or USERPROFILE env var not set")?;

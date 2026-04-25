@@ -174,3 +174,59 @@ fn run_unknown_script_exits_nonzero() {
         "rage run nonexistent-script should exit nonzero"
     );
 }
+
+// ── cache integration tests ──────────────────────────────────────────────
+
+#[test]
+fn no_cache_flag_accepted() {
+    // Verify --no-cache is a recognized flag (doesn't error with "unexpected argument")
+    let bin = env!("CARGO_BIN_EXE_rage");
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("fixtures");
+    let output = std::process::Command::new(bin)
+        .args(["run", "build", "--no-cache"])
+        .arg(fixtures_dir.join("js-pnpm"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "rage run build --no-cache should succeed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Done."));
+}
+
+#[test]
+fn second_run_uses_cache() {
+    use tempfile::tempdir;
+    // Use RAGE_CACHE_DIR env var to isolate cache per test run
+    // (We use a temp dir so tests don't pollute ~/.rage/cache/ and are repeatable)
+    let cache_dir = tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_rage");
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("fixtures");
+
+    let run = |extra_args: &[&str]| {
+        std::process::Command::new(bin)
+            .args(["run", "build"])
+            .arg(fixtures_dir.join("js-pnpm"))
+            .args(extra_args)
+            .env("RAGE_CACHE_DIR", cache_dir.path())
+            .output()
+            .unwrap()
+    };
+
+    // First run — cold cache
+    let first = run(&[]);
+    assert!(first.status.success());
+
+    // Second run — warm cache
+    let second = run(&[]);
+    assert!(second.status.success());
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("(cached)"),
+        "second run should show cached tasks, got:\n{stderr}"
+    );
+}
