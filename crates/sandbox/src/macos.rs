@@ -136,4 +136,37 @@ mod tests {
             result.path_set.reads
         );
     }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore]
+    async fn write_operations_recorded() {
+        let dylib = dylib_path().expect("dylib_path() should succeed");
+        if !dylib.exists() {
+            let status = std::process::Command::new("cargo")
+                .args(["build", "-p", "sandbox-macos-dylib"])
+                .status()
+                .expect("failed to run cargo build -p sandbox-macos-dylib");
+            assert!(status.success(), "cargo build -p sandbox-macos-dylib failed");
+        }
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let cmd = format!(
+            "touch '{}/a.txt' && rm '{}/a.txt'",
+            dir.path().display(),
+            dir.path().display()
+        );
+
+        let result = run_sandboxed(&cmd, Path::new("/tmp"), &[])
+            .await
+            .unwrap();
+
+        assert!(
+            result.path_set.writes.iter().any(|p| p
+                .to_string_lossy()
+                .ends_with("a.txt")),
+            "expected a path ending with 'a.txt' in writes, got: {:?}",
+            result.path_set.writes
+        );
+    }
 }

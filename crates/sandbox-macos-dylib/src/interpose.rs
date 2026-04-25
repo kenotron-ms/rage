@@ -142,3 +142,81 @@ static INTERPOSE_LSTAT: InterposeEntry = InterposeEntry {
     replacement: rage_lstat as *const c_void,
     original: libc::lstat as *const c_void,
 };
+
+/// Interposed replacement for libc's `rename(2)`.
+///
+/// # Safety
+///
+/// `old` and `new` may be null; we guard with explicit null-checks.  When
+/// non-null they must point to valid, NUL-terminated C strings — the contract
+/// imposed by the POSIX `rename` ABI.  Both paths are recorded as write events
+/// because the old path is removed and the new path is created/replaced.
+unsafe extern "C" fn rage_rename(old: *const c_char, new: *const c_char) -> c_int {
+    if !old.is_null() {
+        if let Ok(s) = CStr::from_ptr(old).to_str() {
+            send_event("write", s);
+        }
+    }
+    if !new.is_null() {
+        if let Ok(s) = CStr::from_ptr(new).to_str() {
+            send_event("write", s);
+        }
+    }
+
+    libc::rename(old, new)
+}
+
+#[link_section = "__DATA,__interpose"]
+#[used]
+static INTERPOSE_RENAME: InterposeEntry = InterposeEntry {
+    replacement: rage_rename as *const c_void,
+    original: libc::rename as *const c_void,
+};
+
+/// Interposed replacement for libc's `unlink(2)`.
+///
+/// # Safety
+///
+/// `path` may be null; we guard with an explicit null-check.  When non-null it
+/// must point to a valid, NUL-terminated C string — the contract imposed by the
+/// POSIX `unlink` ABI.  Deleting a file is a write (mutation) event.
+unsafe extern "C" fn rage_unlink(path: *const c_char) -> c_int {
+    if !path.is_null() {
+        if let Ok(s) = CStr::from_ptr(path).to_str() {
+            send_event("write", s);
+        }
+    }
+
+    libc::unlink(path)
+}
+
+#[link_section = "__DATA,__interpose"]
+#[used]
+static INTERPOSE_UNLINK: InterposeEntry = InterposeEntry {
+    replacement: rage_unlink as *const c_void,
+    original: libc::unlink as *const c_void,
+};
+
+/// Interposed replacement for libc's `mkdir(2)`.
+///
+/// # Safety
+///
+/// `path` may be null; we guard with an explicit null-check.  When non-null it
+/// must point to a valid, NUL-terminated C string — the contract imposed by the
+/// POSIX `mkdir` ABI.  Creating a directory is a write (mutation) event.
+unsafe extern "C" fn rage_mkdir(path: *const c_char, mode: mode_t) -> c_int {
+    if !path.is_null() {
+        if let Ok(s) = CStr::from_ptr(path).to_str() {
+            send_event("write", s);
+        }
+    }
+
+    libc::mkdir(path, mode)
+}
+
+#[link_section = "__DATA,__interpose"]
+#[used]
+static INTERPOSE_MKDIR: InterposeEntry = InterposeEntry {
+    replacement: rage_mkdir as *const c_void,
+    original: libc::mkdir as *const c_void,
+};
