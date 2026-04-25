@@ -46,7 +46,7 @@ mod tests {
     fn deterministic_for_same_inputs() {
         let dir = TempDir::new().unwrap();
         let p = write_file(&dir, "a.txt", b"hello");
-        let sf1 = compute_strong_fingerprint("wf-abc", &[p.clone()]);
+        let sf1 = compute_strong_fingerprint("wf-abc", std::slice::from_ref(&p));
         let sf2 = compute_strong_fingerprint("wf-abc", &[p]);
         assert_eq!(sf1, sf2);
         assert_eq!(sf1.len(), 64);
@@ -56,7 +56,7 @@ mod tests {
     fn changes_when_file_content_changes() {
         let dir = TempDir::new().unwrap();
         let p = write_file(&dir, "b.txt", b"version1");
-        let sf1 = compute_strong_fingerprint("wf-abc", &[p.clone()]);
+        let sf1 = compute_strong_fingerprint("wf-abc", std::slice::from_ref(&p));
 
         std::fs::write(&p, b"version2").unwrap();
         let sf2 = compute_strong_fingerprint("wf-abc", &[p]);
@@ -67,7 +67,7 @@ mod tests {
     fn different_wf_yields_different_sf() {
         let dir = TempDir::new().unwrap();
         let p = write_file(&dir, "c.txt", b"same content");
-        let sf1 = compute_strong_fingerprint("wf-111", &[p.clone()]);
+        let sf1 = compute_strong_fingerprint("wf-111", std::slice::from_ref(&p));
         let sf2 = compute_strong_fingerprint("wf-222", &[p]);
         assert_ne!(sf1, sf2);
     }
