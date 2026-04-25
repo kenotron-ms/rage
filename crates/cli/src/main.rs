@@ -313,12 +313,20 @@ async fn cmd_run(
         None
     };
 
-    let mut tasks = scheduler::task::build_task_list_with_config(&dag, script, root, &config)
-        .with_context(|| format!("no packages have a '{script}' script"))?;
+    // Active ecosystem plugins. For Phase 12 the TypeScript plugin is the
+    // only one, but the type signature already supports a heterogeneous
+    // mix (e.g. JS + Python).
+    let ts_plugin = plugin_typescript::TypeScriptPlugin::new();
+    let plugins: Vec<&dyn plugin::EcosystemPlugin> = vec![&ts_plugin];
+
+    let mut tasks =
+        scheduler::task::build_task_list_with_config(&dag, script, root, &plugins, &config)
+            .with_context(|| format!("no packages have a '{script}' script"))?;
 
     // Filter tasks by scope if --since or --affected was given
     if let Some(ref scope_set) = scope {
-        tasks.retain(|t| scope_set.contains(&t.package_name));
+        // Root tasks (workspace#install etc.) are never package-scoped — always retain.
+        tasks.retain(|t| t.is_root || scope_set.contains(&t.package_name));
         if tasks.is_empty() {
             eprintln!("No affected packages have a '{script}' script. Nothing to do.");
             return Ok(());

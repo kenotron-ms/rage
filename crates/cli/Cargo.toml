@@ -18,6 +18,8 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 build-graph = { path = "../build-graph" }
 pipeline-config = { path = "../pipeline-config" }
+plugin = { path = "../plugin" }
+plugin-typescript = { path = "../plugin-typescript" }
 workspace-tools = { path = "../workspace-tools" }
 scheduler = { path = "../scheduler" }
 cache = { path = "../cache" }

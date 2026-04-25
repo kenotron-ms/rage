@@ -158,8 +158,11 @@ async fn run_build(d: &DesiredState) -> Result<Vec<TaskRecord>> {
     let resolved = workspace_tools::build_package_graph(raw)?;
     let dag = build_graph::dag::build_dag(resolved)?;
     let cfg = pipeline_config::load_config(&d.workspace)?.unwrap_or_default();
+    // The daemon uses an empty plugin slice — it does not run workspace-level
+    // install tasks (those are handled by the CLI's `rage run` invocation).
+    let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
     let mut tasks =
-        scheduler::task::build_task_list_with_config(&dag, &d.script, &d.workspace, &cfg)?;
+        scheduler::task::build_task_list_with_config(&dag, &d.script, &d.workspace, &plugins, &cfg)?;
     if let Some(targets) = &d.targets {
         let set: std::collections::HashSet<&str> = targets.iter().map(String::as_str).collect();
         tasks.retain(|t| set.contains(t.package_name.as_str()));
