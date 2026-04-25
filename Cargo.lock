@@ -480,6 +480,7 @@ name = "plugin-typescript"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "pipeline-config",
  "plugin",
  "tempfile",
 ]

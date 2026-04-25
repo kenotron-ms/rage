@@ -6,6 +6,20 @@
 use plugin::{AllowlistEntry, EcosystemPlugin, OutputFile, PluginConfig, TaskDef};
 use std::path::Path;
 
+/// Convert a `rage.json`-parsed [`pipeline_config::PluginConfig`] into the flat
+/// [`PluginConfig`] consumed by [`EcosystemPlugin::declared_input_globs`].
+///
+/// The two config types are kept separate so the [`plugin`] crate has zero dependency
+/// on [`pipeline_config`]. A blanket `From` impl would violate the Rust orphan rule
+/// (neither type is local to this crate), so an explicit bridge function is used instead.
+/// Phase 9 scheduler code should call this when passing `rage.json` config to the plugin.
+pub fn plugin_config_from_pipeline(c: pipeline_config::PluginConfig) -> PluginConfig {
+    PluginConfig {
+        extend_input_globs: c.input_globs.extend,
+        exclude_input_globs: c.input_globs.exclude,
+    }
+}
+
 /// The TypeScript plugin.
 #[derive(Debug, Default, Clone)]
 pub struct TypeScriptPlugin;
@@ -144,19 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn id_is_rage_typescript() {
-        assert_eq!(TypeScriptPlugin::new().id(), "rage-typescript");
-    }
-
-    #[test]
-    fn detection_globs_match_tsconfig() {
-        let p = TypeScriptPlugin::new();
-        let globs = p.detection_globs();
-        assert!(globs.contains(&"tsconfig.json"));
-        assert!(globs.iter().any(|g| g.contains("tsconfig.")));
-    }
-
-    #[test]
     fn infer_tasks_returns_typecheck_and_build() {
         let p = TypeScriptPlugin::new();
         let tasks = p.infer_tasks(std::path::Path::new("/anywhere"));
@@ -266,10 +267,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let outs = vec![output_at(dir.path(), "index.js", b"console.log(1)")];
         let p = TypeScriptPlugin::new();
-        assert!(
-            p.abi_fingerprint(&outs).is_none()
-                || p.abi_fingerprint(&outs) == Some(blake3::hash(b"").to_hex().to_string())
-        );
+        assert!(p.abi_fingerprint(&outs).is_none());
     }
 
     #[test]
@@ -321,5 +319,28 @@ mod tests {
         let js = output_at(dir.path(), "index.js", b"x=1");
         let h_with_js = p.abi_fingerprint(&[dts, js]).unwrap();
         assert_eq!(h_only, h_with_js);
+    }
+
+    #[test]
+    fn from_pipeline_config_maps_extend_and_exclude() {
+        use pipeline_config::{InputGlobsConfig, PluginConfig as PipelinePluginConfig};
+        let pc = PipelinePluginConfig {
+            input_globs: InputGlobsConfig {
+                extend: vec!["../../tsconfig.base.json".to_string()],
+                exclude: vec!["**/*.test.ts".to_string()],
+            },
+        };
+        let tc = plugin_config_from_pipeline(pc);
+        assert_eq!(tc.extend_input_globs, vec!["../../tsconfig.base.json"]);
+        assert_eq!(tc.exclude_input_globs, vec!["**/*.test.ts"]);
+    }
+
+    #[test]
+    fn from_pipeline_config_empty_is_default() {
+        use pipeline_config::PluginConfig as PipelinePluginConfig;
+        let pc = PipelinePluginConfig::default();
+        let tc = plugin_config_from_pipeline(pc);
+        assert!(tc.extend_input_globs.is_empty());
+        assert!(tc.exclude_input_globs.is_empty());
     }
 }

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 plugin = { path = "../plugin" }
+pipeline-config = { path = "../pipeline-config" }
 blake3 = "1"
 
 [dev-dependencies]
