@@ -78,8 +78,57 @@ pub fn resolve_node_version(workspace_root: &Path) -> Option<String> {
 ///
 /// `version` is taken verbatim except a single leading `v` is stripped before
 /// constructing the candidate paths (so `"v18.20.4"` and `"18.20.4"` both work).
-pub fn find_version_manager_bin(_version: &str) -> Option<PathBuf> {
-    None // intentionally unimplemented — see Task 4
+pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
+    let v_no_prefix = version.strip_prefix('v').unwrap_or(version);
+    let v_with_prefix = format!("v{v_no_prefix}");
+
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+
+    // 1. fnm — honor $FNM_DIR, fall back to ~/.local/share/fnm
+    let fnm_root = std::env::var_os("FNM_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".local/share/fnm")));
+    if let Some(root) = fnm_root {
+        let candidate = root
+            .join("node-versions")
+            .join(&v_with_prefix)
+            .join("installation/bin");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+
+    // 2. nvm — honor $NVM_DIR, fall back to ~/.nvm
+    let nvm_root = std::env::var_os("NVM_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".nvm")));
+    if let Some(root) = nvm_root {
+        let candidate = root.join("versions/node").join(&v_with_prefix).join("bin");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+
+    // 3. asdf — ~/.asdf/installs/nodejs/{ver}/bin (no leading 'v')
+    if let Some(h) = &home {
+        let candidate = h.join(".asdf/installs/nodejs").join(v_no_prefix).join("bin");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+
+    // 4. mise — ~/.local/share/mise/installs/node/{ver}/bin (no leading 'v')
+    if let Some(h) = &home {
+        let candidate = h
+            .join(".local/share/mise/installs/node")
+            .join(v_no_prefix)
+            .join("bin");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 /// Build the PATH value for a JS task spawn (see module docs).
@@ -89,12 +138,41 @@ pub fn find_version_manager_bin(_version: &str) -> Option<PathBuf> {
 ///
 /// Only directories that exist on disk are added — non-existent prepends would
 /// just be noise.
-pub fn build_node_path(
-    _task_cwd: &Path,
-    _workspace_root: &Path,
-    _system_path: &str,
-) -> String {
-    String::new() // intentionally unimplemented — see Task 4
+pub fn build_node_path(task_cwd: &Path, workspace_root: &Path, system_path: &str) -> String {
+    #[cfg(unix)]
+    const SEP: char = ':';
+    #[cfg(windows)]
+    const SEP: char = ';';
+
+    let mut prepend: Vec<PathBuf> = Vec::new();
+
+    // 1. {task_cwd}/node_modules/.bin
+    let pkg_bin = task_cwd.join("node_modules/.bin");
+    if pkg_bin.is_dir() {
+        prepend.push(pkg_bin.clone());
+    }
+
+    // 2. {workspace_root}/node_modules/.bin (skip if same as #1)
+    let ws_bin = workspace_root.join("node_modules/.bin");
+    if ws_bin != pkg_bin && ws_bin.is_dir() {
+        prepend.push(ws_bin);
+    }
+
+    // 3. Active Node.js version manager bin dir
+    if let Some(version) = resolve_node_version(workspace_root) {
+        if let Some(vm_bin) = find_version_manager_bin(&version) {
+            prepend.push(vm_bin);
+        }
+    }
+
+    // Concatenate: prepended dirs + system PATH.
+    let mut out = String::new();
+    for dir in &prepend {
+        out.push_str(&dir.to_string_lossy());
+        out.push(SEP);
+    }
+    out.push_str(system_path);
+    out
 }
 
 /// Resolve the tool path from the first whitespace-separated token of `command`.
