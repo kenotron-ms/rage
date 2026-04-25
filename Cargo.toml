@@ -8,6 +8,8 @@ members = [
     "crates/cache",
     "crates/scoping",
     "crates/cli",
+    "crates/sandbox",
+    "crates/sandbox-macos-dylib",
 ]
 
 [workspace.package]
