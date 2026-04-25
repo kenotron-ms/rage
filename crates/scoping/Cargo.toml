@@ -12,6 +12,7 @@
     [dependencies]
     workspace-tools = { path = "../workspace-tools" }
     build-graph = { path = "../build-graph" }
+    petgraph = "0.6"
     anyhow = "1"
     thiserror = "2"
 
