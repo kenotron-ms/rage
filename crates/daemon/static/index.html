@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>rage</title>
+  <style>
+    :root {
+      --bg: #0d0d10;
+      --fg: #e8e8eb;
+      --muted: #888;
+      --ok: #4caf50;
+      --warn: #ffb74d;
+      --err: #ef5350;
+      --converging: #64b5f6;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, "Apple SD Gothic Neo", "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    header {
+      font-size: 1.4rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      margin-bottom: 16px;
+    }
+
+    #ws-status {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    /* State indicator */
+    .state {
+      display: inline-block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 4px;
+      margin-bottom: 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      background: rgba(255,255,255,0.06);
+      color: var(--muted);
+    }
+
+    .state.idle {
+      color: var(--muted);
+    }
+
+    .state.converging {
+      color: var(--converging);
+    }
+
+    .state.ready {
+      color: var(--ok);
+    }
+
+    .state.blocked {
+      color: var(--err);
+    }
+
+    /* Task list */
+    #tasks {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .task {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: rgba(255,255,255,0.04);
+      border-left: 3px solid var(--muted);
+    }
+
+    .task.waiting {
+      border-left-color: var(--muted);
+    }
+
+    .task.running {
+      border-left-color: var(--converging);
+    }
+
+    .task.ok {
+      border-left-color: var(--ok);
+    }
+
+    .task.failed {
+      border-left-color: var(--err);
+    }
+
+    .task .name {
+      font-family: "SFMono-Regular", "Cascadia Code", "Fira Mono", Consolas, monospace;
+      font-size: 0.88rem;
+      flex: 1;
+    }
+
+    .task .meta {
+      font-size: 0.8rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Buttons */
+    button {
+      background: #2c2c33;
+      color: var(--fg);
+      border: none;
+      border-radius: 4px;
+      padding: 3px 10px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    button:hover {
+      background: #3a3a42;
+    }
+  </style>
+</head>
+<body>
+  <header>rage</header>
+  <div id="ws-status">connecting…</div>
+  <div id="state" class="state idle">idle</div>
+  <div id="tasks"></div>
+
+  <script>
+    "use strict";
+
+    var stateEl  = document.querySelector("#state");
+    var tasksEl  = document.querySelector("#tasks");
+    var wsStatus = document.querySelector("#ws-status");
+
+    var socket;
+
+    function connect() {
+      var proto = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(proto + "//" + location.host + "/ws");
+
+      socket.onopen = function () {
+        wsStatus.textContent = "connected";
+      };
+
+      socket.onclose = function () {
+        wsStatus.textContent = "disconnected — retrying…";
+        setTimeout(connect, 1000);
+      };
+
+      socket.onerror = function () {
+        wsStatus.textContent = "error";
+      };
+
+      socket.onmessage = function (ev) {
+        try {
+          var snap = JSON.parse(ev.data);
+          render(snap);
+        } catch (err) {
+          console.error("Failed to parse message", err);
+        }
+      };
+    }
+
+    function render(snap) {
+      stateEl.className = "state " + (snap.state || "idle");
+      stateEl.textContent = snap.state || "idle";
+
+      tasksEl.innerHTML = "";
+      if (Array.isArray(snap.tasks)) {
+        snap.tasks.forEach(function (t) {
+          tasksEl.appendChild(renderTask(t));
+        });
+      }
+    }
+
+    function renderTask(t) {
+      // Derive status: either a plain string or the first key of a status object
+      var status;
+      if (typeof t.status === "string") {
+        status = t.status;
+      } else if (t.status && typeof t.status === "object") {
+        status = Object.keys(t.status)[0];
+      } else {
+        status = "waiting";
+      }
+
+      var div = document.createElement("div");
+      div.className = "task " + status;
+
+      var nameSpan = document.createElement("span");
+      nameSpan.className = "name";
+      nameSpan.textContent = t.package + "#" + t.script;
+      div.appendChild(nameSpan);
+
+      var metaSpan = document.createElement("span");
+      metaSpan.className = "meta";
+
+      if (typeof t.status === "object" && t.status !== null) {
+        if ("ok" in t.status) {
+          var duration_ms = t.status.ok && t.status.ok.duration_ms != null
+            ? t.status.ok.duration_ms
+            : 0;
+          metaSpan.textContent = (duration_ms / 1000).toFixed(2) + "s";
+        } else if ("failed" in t.status) {
+          var exit_code = t.status.failed && t.status.failed.exit_code != null
+            ? t.status.failed.exit_code
+            : "?";
+          metaSpan.textContent = "exit " + exit_code + " ";
+
+          var pkg    = t.package;
+          var script = t.script;
+          var btn    = document.createElement("button");
+          btn.textContent = "retry";
+          btn.onclick = function () { retry(pkg, script); };
+          metaSpan.appendChild(btn);
+        } else {
+          metaSpan.textContent = status;
+        }
+      } else {
+        metaSpan.textContent = status;
+      }
+
+      div.appendChild(metaSpan);
+      return div;
+    }
+
+    function retry(pkg, script) {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "RetryTask", package: pkg, script: script }));
+      }
+    }
+
+    connect();
+  </script>
+</body>
+</html>
