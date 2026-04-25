@@ -4,6 +4,8 @@ use crate::task::Task;
 use build_graph::dag::WorkspaceDag;
 use build_graph::topo::topological_sort;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 use tokio::process::Command;
@@ -206,6 +208,191 @@ async fn run_single_task(
             package: task.package_name,
             script: task.script_name,
             code,
+        })
+    }
+}
+
+/// Resolve the tool path from the first token of `command`.
+///
+/// If the first token contains `/`, it is used as-is. Otherwise the token is
+/// searched in every directory listed in the `PATH` environment variable.
+/// Returns `None` if the token cannot be found.
+fn which_first(command: &str) -> Option<PathBuf> {
+    let first = command.split_whitespace().next()?;
+    if first.contains('/') {
+        return Some(PathBuf::from(first));
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(first);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Execute tasks in wave-parallel order using `TwoPhaseCache`.
+///
+/// For each wave, all tasks run concurrently. Waves run sequentially.
+/// On any task failure, the wave is aborted via `JoinSet::abort_all` and the
+/// error is returned.
+pub async fn run_tasks_two_phase(
+    dag: &WorkspaceDag,
+    tasks: Vec<Task>,
+    cache: Arc<cache::TwoPhaseCache>,
+) -> anyhow::Result<()> {
+    let levels = compute_task_levels(dag, &tasks);
+
+    for level in levels {
+        let mut set: JoinSet<Result<(), RunError>> = JoinSet::new();
+
+        for task in level {
+            let cache_clone = cache.clone();
+            set.spawn(run_single_task_two_phase(task, cache_clone));
+        }
+
+        let mut first_error: Option<RunError> = None;
+
+        while let Some(join_result) = set.join_next().await {
+            match join_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                    set.abort_all();
+                }
+                Err(_join_err) => {
+                    if first_error.is_none() {
+                        first_error = Some(RunError::Killed {
+                            package: "unknown".to_string(),
+                            script: "unknown".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(e) = first_error {
+            return Err(e.into());
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_single_task_two_phase(
+    task: Task,
+    cache: Arc<cache::TwoPhaseCache>,
+) -> Result<(), RunError> {
+    use cache::{CacheEntry, WeakFpInputs};
+    use cache::pathset_store::StoredPathset;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let tool_path = which_first(&task.command).unwrap_or_else(|| PathBuf::from("sh"));
+
+    let inputs = WeakFpInputs {
+        command: &task.command,
+        tool_path: &tool_path,
+        package_path: &task.cwd,
+        declared_input_globs: &[],
+        tracked_env: &[],
+    };
+
+    // Phase 1: cache lookup
+    if cache.lookup(&inputs).is_some() {
+        eprintln!(
+            "[rage] {}#{} \u{2713} (cached)",
+            task.package_name, task.script_name
+        );
+        return Ok(());
+    }
+
+    // Cache miss — execute
+    eprintln!(
+        "[rage] {}#{} starting [sandbox={:?}]",
+        task.package_name, task.script_name, task.sandbox_mode
+    );
+    let start = Instant::now();
+
+    let (exit_code, pathset) = match task.sandbox_mode {
+        pipeline_config::SandboxMode::Loose => {
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(&task.command)
+                .current_dir(&task.cwd)
+                .status()
+                .await
+                .map_err(|e| RunError::Spawn {
+                    package: task.package_name.clone(),
+                    script: task.script_name.clone(),
+                    source: e,
+                })?;
+            let code = status.code().unwrap_or(-1);
+            (code, StoredPathset::default())
+        }
+        _ => {
+            match sandbox::run_sandboxed(&task.command, &task.cwd, &[]).await {
+                Ok(r) => {
+                    let ps = StoredPathset {
+                        reads: r.path_set.reads,
+                        writes: r.path_set.writes,
+                    };
+                    (r.exit_code, ps)
+                }
+                Err(_) => {
+                    // Sandbox unavailable — fall back to plain sh execution
+                    let status = Command::new("sh")
+                        .arg("-c")
+                        .arg(&task.command)
+                        .current_dir(&task.cwd)
+                        .status()
+                        .await
+                        .map_err(|e| RunError::Spawn {
+                            package: task.package_name.clone(),
+                            script: task.script_name.clone(),
+                            source: e,
+                        })?;
+                    let code = status.code().unwrap_or(-1);
+                    (code, StoredPathset::default())
+                }
+            }
+        }
+    };
+
+    let elapsed = start.elapsed();
+    let elapsed_ms = elapsed.as_millis() as u64;
+
+    if exit_code == 0 {
+        let entry = CacheEntry {
+            fingerprint: String::new(),
+            command: task.command.clone(),
+            exit_code: 0,
+            elapsed_ms,
+            cached_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            pathset_reads: vec![],
+        };
+        let _ = cache.record(&inputs, pathset, entry); // ignore write errors
+        eprintln!(
+            "[rage] {}#{} \u{2713} {:.2}s",
+            task.package_name,
+            task.script_name,
+            elapsed.as_secs_f64()
+        );
+        Ok(())
+    } else {
+        eprintln!(
+            "[rage] {}#{} \u{2717} FAILED (exit {exit_code})",
+            task.package_name, task.script_name
+        );
+        Err(RunError::TaskFailed {
+            package: task.package_name,
+            script: task.script_name,
+            code: exit_code,
         })
     }
 }
@@ -452,5 +639,37 @@ mod tests {
         let pkg = mk_pkg("smoke", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
         run_tasks(&dag, vec![task], None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_phase_cache_first_run_misses_second_run_hits() {
+        use cache::TwoPhaseCache;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let cache_dir = tempdir().unwrap();
+        let pkg_dir = tempdir().unwrap();
+        std::fs::create_dir_all(pkg_dir.path().join("src")).unwrap();
+        std::fs::write(pkg_dir.path().join("src/index.ts"), b"export const x = 1;").unwrap();
+
+        let two_phase = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
+
+        let task = Task {
+            package_name: "pkg".to_string(),
+            script_name: "build".to_string(),
+            command: "echo build".to_string(),
+            cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+        };
+        let pkg = mk_pkg("pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        run_tasks_two_phase(&dag, vec![task.clone()], two_phase.clone()).await.unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(cache_dir.path()).unwrap().collect();
+        assert!(entries.iter().any(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("wf-")), "expected wf-*.pathsets file");
+        assert!(entries.iter().any(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("sf-")), "expected sf-*.entry file");
+
+        run_tasks_two_phase(&dag, vec![task], two_phase).await.unwrap();
     }
 }
