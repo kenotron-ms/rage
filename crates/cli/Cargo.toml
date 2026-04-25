@@ -19,3 +19,5 @@ anyhow = "1"
 build-graph = { path = "../build-graph" }
 pipeline-config = { path = "../pipeline-config" }
 workspace-tools = { path = "../workspace-tools" }
+scheduler = { path = "../scheduler" }
+tokio = { version = "1", features = ["full"] }

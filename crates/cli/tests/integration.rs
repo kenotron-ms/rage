@@ -127,3 +127,50 @@ fn positional_overrides_workspace_flag() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(stderr.trim(), "Found 4 packages (pnpm workspace)");
 }
+
+// ── rage run tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn run_build_pnpm_exits_zero() {
+    let output = rage()
+        .args(["run", "build"])
+        .arg(fixtures_dir().join("js-pnpm"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "rage run build should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Found 4 packages"), "should report package count");
+    assert!(stderr.contains("Done."), "should report completion");
+}
+
+#[test]
+fn run_build_shows_all_packages() {
+    let output = rage()
+        .args(["run", "build"])
+        .arg(fixtures_dir().join("js-pnpm"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("@fixture/core"), "core should run");
+    assert!(stderr.contains("@fixture/utils"), "utils should run");
+    assert!(stderr.contains("@fixture/ui"), "ui should run");
+    assert!(stderr.contains("@fixture/app"), "app should run");
+}
+
+#[test]
+fn run_unknown_script_exits_nonzero() {
+    let output = rage()
+        .args(["run", "nonexistent-script"])
+        .arg(fixtures_dir().join("js-pnpm"))
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "rage run nonexistent-script should exit nonzero"
+    );
+}
