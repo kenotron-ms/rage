@@ -501,32 +501,45 @@ async fn run_single_task_two_phase(
         dep_abi_fingerprints: &dep_abi_fps,
     };
 
-    // ── Record why-miss snapshot ──────────────────────────────────────────
-    // Capture a snapshot of the WF inputs so  can diff runs.
+    // ── Record why-miss snapshot (fire-and-forget in background) ────────
+    // All file I/O is moved to spawn_blocking so we never block the tokio
+    // worker thread on disk reads.  The snapshot is best-effort; failures
+    // are silently ignored.
     {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let resolved =
-            cache::weak_fp::resolve_globs_for_snapshot(&task.cwd, &task.declared_input_globs);
-        let tool_hash_str = cache::tool_hash::hash_tool_binary(&tool_path)
-            .unwrap_or_else(|| "<missing>".to_string());
-        let snap = cache::why_miss::WhyMissSnapshot {
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            pkg: task.package_name.clone(),
-            script: task.script_name.clone(),
-            command: task.command.clone(),
-            tool_path: tool_path.to_string_lossy().into_owned(),
-            tool_hash: tool_hash_str,
-            inputs: resolved
-                .into_iter()
-                .map(|(p, h)| cache::why_miss::InputEntry { path: p, hash: h })
-                .collect(),
-            env: vec![],
-            dep_abi_fps: dep_abi_fps.clone(),
-        };
-        cache::why_miss::record_snapshot(cache.dir(), snap);
+        let cache_dir = cache.dir().to_path_buf();
+        let cwd_snap = task.cwd.clone();
+        let globs_snap = task.declared_input_globs.clone();
+        let pkg_snap = task.package_name.clone();
+        let script_snap = task.script_name.clone();
+        let cmd_snap = task.command.clone();
+        let tp_snap = tool_path.clone();
+        let dep_fps_snap = dep_abi_fps.clone();
+        // Fire-and-forget: don't await.
+        tokio::task::spawn_blocking(move || {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let resolved =
+                cache::weak_fp::resolve_globs_for_snapshot(&cwd_snap, &globs_snap);
+            let tool_hash_str = cache::tool_hash::hash_tool_binary(&tp_snap)
+                .unwrap_or_else(|| "<missing>".to_string());
+            let snap = cache::why_miss::WhyMissSnapshot {
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                pkg: pkg_snap,
+                script: script_snap,
+                command: cmd_snap,
+                tool_path: tp_snap.to_string_lossy().into_owned(),
+                tool_hash: tool_hash_str,
+                inputs: resolved
+                    .into_iter()
+                    .map(|(p, h)| cache::why_miss::InputEntry { path: p, hash: h })
+                    .collect(),
+                env: vec![],
+                dep_abi_fps: dep_fps_snap,
+            };
+            cache::why_miss::record_snapshot(&cache_dir, snap);
+        });
     }
 
     // Phase 1: cache lookup
