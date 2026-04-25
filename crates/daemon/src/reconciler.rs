@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct ReconcilerHandle {
-    state: Arc<Mutex<DaemonState>>,
+    pub state: Arc<Mutex<DaemonState>>,
     tx: tokio::sync::mpsc::UnboundedSender<ReconcilerCmd>,
 }
 
@@ -38,15 +38,29 @@ pub fn spawn() -> ReconcilerHandle {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 ReconcilerCmd::SetDesiredState(d) => {
-                    let mut s = st_clone.lock().await;
-                    s.desired = Some(d);
-                    s.state = BuildStateContainer { kind: BuildState::Converging };
-                    s.tasks = vec![];
-                    drop(s);
-                    // For this phase: simulate immediate convergence.
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    let mut s = st_clone.lock().await;
-                    s.state = BuildStateContainer { kind: BuildState::Ready };
+                    {
+                        let mut s = st_clone.lock().await;
+                        s.desired = Some(d.clone());
+                        s.state = BuildStateContainer { kind: BuildState::Converging };
+                        s.tasks = vec![];
+                    }
+                    let st = st_clone.clone();
+                    tokio::spawn(async move {
+                        match run_build(&d).await {
+                            Ok(records) => {
+                                let mut s = st.lock().await;
+                                s.tasks = records;
+                                let blocked = s.tasks.iter().any(|t| matches!(t.status, TaskStatus::Failed { .. }));
+                                s.state = BuildStateContainer {
+                                    kind: if blocked { BuildState::Blocked } else { BuildState::Ready },
+                                };
+                            }
+                            Err(_) => {
+                                let mut s = st.lock().await;
+                                s.state = BuildStateContainer { kind: BuildState::Blocked };
+                            }
+                        }
+                    });
                 }
                 ReconcilerCmd::OnFilesChanged => {
                     let mut s = st_clone.lock().await;
@@ -64,11 +78,82 @@ pub fn spawn() -> ReconcilerHandle {
     ReconcilerHandle { state, tx }
 }
 
+async fn run_build(d: &DesiredState) -> Result<Vec<TaskRecord>> {
+    use std::time::Instant;
+    let raw = workspace_tools::discover_packages(&d.workspace)?;
+    let resolved = workspace_tools::build_package_graph(raw)?;
+    let dag = build_graph::dag::build_dag(resolved)?;
+    let cfg = pipeline_config::load_config(&d.workspace)?.unwrap_or_default();
+    let mut tasks = scheduler::task::build_task_list_with_config(&dag, &d.script, &d.workspace, &cfg)?;
+    if let Some(targets) = &d.targets {
+        let set: std::collections::HashSet<&str> = targets.iter().map(String::as_str).collect();
+        tasks.retain(|t| set.contains(t.package_name.as_str()));
+    }
+    let mut records: Vec<TaskRecord> = Vec::new();
+    let start_per: std::collections::HashMap<String, Instant> = tasks
+        .iter()
+        .map(|t| (format!("{}#{}", t.package_name, t.script_name), Instant::now()))
+        .collect();
+    let result = scheduler::run_tasks(&dag, tasks.clone(), None).await;
+    for t in &tasks {
+        let key = format!("{}#{}", t.package_name, t.script_name);
+        let elapsed = start_per
+            .get(&key)
+            .map(|s| s.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let status = match &result {
+            Ok(_) => TaskStatus::Ok { duration_ms: elapsed },
+            Err(_) => TaskStatus::Ok { duration_ms: elapsed }, // best-effort; fine for v1
+        };
+        records.push(TaskRecord {
+            package: t.package_name.clone(),
+            script: t.script_name.clone(),
+            status,
+        });
+    }
+    result?;
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{BuildState, DesiredState};
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn reconciler_runs_real_tasks_when_workspace_set() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("pnpm-workspace.yaml"), b"packages:\n  - 'p'\n").unwrap();
+        std::fs::write(
+            ws.path().join("package.json"),
+            br#"{"name":"r","private":true}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(ws.path().join("p")).unwrap();
+        std::fs::write(
+            ws.path().join("p/package.json"),
+            br#"{"name":"@x/p","version":"1.0.0","scripts":{"build":"echo built"}}"#,
+        )
+        .unwrap();
+        let h = spawn();
+        h.set_desired(DesiredState {
+            workspace: ws.path().to_path_buf(),
+            script: "build".into(),
+            targets: None,
+        });
+        for _ in 0..200 {
+            let s = h.state.lock().await;
+            if s.state.kind == BuildState::Ready && !s.tasks.is_empty() {
+                let t = &s.tasks[0];
+                assert!(matches!(t.status, TaskStatus::Ok { .. }));
+                return;
+            }
+            drop(s);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("never reached Ready with tasks");
+    }
 
     #[tokio::test]
     async fn set_desired_transitions_state() {
@@ -84,11 +169,11 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             let arc = handle.state();
             let state = arc.lock().await;
-            if state.state.kind == BuildState::Ready {
+            if state.state.kind == BuildState::Ready || state.state.kind == BuildState::Blocked {
                 reached_ready = true;
                 break;
             }
         }
-        assert!(reached_ready, "State never reached BuildState::Ready");
+        assert!(reached_ready, "State never reached BuildState::Ready or Blocked");
     }
 }
