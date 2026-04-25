@@ -30,10 +30,14 @@ fn matches_policy(policy: &Policy, path: &str) -> Option<SandboxMode> {
     let glob = globset::Glob::new(&policy.selector).ok()?;
     let matcher = glob.compile_matcher();
     if matcher.is_match(path) {
-        policy.sandbox.clone()
-    } else {
-        None
+        return policy.sandbox.clone();
     }
+    // Also try with a trailing slash so that selectors like "packages/foo/**"
+    // match the directory path "packages/foo" itself (not just its children).
+    if !path.ends_with('/') && matcher.is_match(&format!("{}/", path)) {
+        return policy.sandbox.clone();
+    }
+    None
 }
 
 #[cfg(test)]

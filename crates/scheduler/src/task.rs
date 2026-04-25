@@ -76,6 +76,28 @@ pub fn build_task_list(dag: &WorkspaceDag, script_name: &str) -> Result<Vec<Task
     Ok(tasks)
 }
 
+/// Build a task list with sandbox modes resolved against `RageConfig` policies.
+///
+/// `workspace_root` is used to compute each package's path relative to the
+/// workspace for glob policy matching.
+pub fn build_task_list_with_config(
+    dag: &build_graph::dag::WorkspaceDag,
+    script_name: &str,
+    workspace_root: &std::path::Path,
+    config: &pipeline_config::RageConfig,
+) -> Result<Vec<Task>, TaskError> {
+    let mut tasks = build_task_list(dag, script_name)?;
+    for task in &mut tasks {
+        let rel = task
+            .cwd
+            .strip_prefix(workspace_root)
+            .unwrap_or(&task.cwd)
+            .to_path_buf();
+        task.sandbox_mode = pipeline_config::resolve_sandbox_mode(config, &rel);
+    }
+    Ok(tasks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +177,35 @@ mod tests {
             sandbox_mode: pipeline_config::SandboxMode::Strict,
         };
         assert_eq!(t.sandbox_mode, pipeline_config::SandboxMode::Strict);
+    }
+
+    #[test]
+    fn task_list_with_config_resolves_sandbox_per_policy() {
+        use pipeline_config::{CacheConfig, Policy, RageConfig, SandboxConfig, SandboxMode};
+        use std::collections::HashMap;
+        use workspace_tools::{build_package_graph, discover_packages};
+
+        let root = fixtures_dir().join("js-pnpm");
+        let raw = discover_packages(&root).unwrap();
+        let resolved = build_package_graph(raw).unwrap();
+        let dag = build_dag(resolved).unwrap();
+
+        let cfg = RageConfig {
+            plugins: vec![],
+            sandbox: SandboxConfig { default: SandboxMode::Observed },
+            cache: CacheConfig::default(),
+            policies: vec![Policy {
+                selector: "packages/core/**".to_string(),
+                sandbox: Some(SandboxMode::Strict),
+            }],
+            plugins_config: HashMap::new(),
+        };
+
+        let tasks = build_task_list_with_config(&dag, "build", &root, &cfg).unwrap();
+        let core = tasks.iter().find(|t| t.package_name == "@fixture/core").unwrap();
+        let utils = tasks.iter().find(|t| t.package_name == "@fixture/utils").unwrap();
+        assert_eq!(core.sandbox_mode, SandboxMode::Strict);
+        assert_eq!(utils.sandbox_mode, SandboxMode::Observed);
     }
 
     #[test]
