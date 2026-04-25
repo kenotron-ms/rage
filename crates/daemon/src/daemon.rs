@@ -3,7 +3,7 @@ use crate::messages::{DaemonMessage, DaemonResponse};
 use crate::reconciler::{self, ReconcilerHandle};
 use crate::socket::UnixSocketServer;
 use crate::watcher::FileWatcher;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,10 +23,13 @@ impl Daemon {
     pub async fn run(self) -> Result<()> {
         let socket_path = discovery::socket_path(&self.workspace)?;
         let server = UnixSocketServer::bind(&socket_path)?;
+        let (http_listener, http_port) = crate::http::bind_dynamic()
+            .await
+            .context("binding HTTP listener")?;
         let discovery_file = DiscoveryFile {
             pid: std::process::id(),
             unix_socket: socket_path.clone(),
-            http_port: 0, // wired in Phase 11
+            http_port,
             start_time: chrono::Utc::now().to_rfc3339(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             workspace: self.workspace.clone(),
@@ -35,6 +38,38 @@ impl Daemon {
         let ws_for_cleanup = self.workspace.clone();
         ctrlc_cleanup(ws_for_cleanup);
         let handle: ReconcilerHandle = reconciler::spawn();
+        let (snap_tx, _) = tokio::sync::broadcast::channel::<crate::http::StateSnapshot>(64);
+        let snap_tx_clone = snap_tx.clone();
+        let handle_clone = handle.clone();
+        let mut sub = handle.subscribe();
+        tokio::spawn(async move {
+            // Initial broadcast
+            {
+                let arc = handle_clone.state();
+                let s = arc.lock().await;
+                let _ = snap_tx_clone.send(crate::http::StateSnapshot {
+                    state: s.state.kind,
+                    tasks: s.tasks.clone(),
+                });
+            }
+            while sub.recv().await.is_ok() {
+                let arc = handle_clone.state();
+                let s = arc.lock().await;
+                let _ = snap_tx_clone.send(crate::http::StateSnapshot {
+                    state: s.state.kind,
+                    tasks: s.tasks.clone(),
+                });
+            }
+        });
+
+        let app = crate::http::AppState {
+            reconciler: handle.clone(),
+            broadcast_tx: snap_tx,
+        };
+        tokio::spawn(async move {
+            let _ = crate::http::serve(http_listener, app).await;
+        });
+
         let last_activity = std::sync::Arc::new(tokio::sync::Mutex::new(std::time::Instant::now()));
         spawn_idle_monitor(
             last_activity.clone(),
@@ -147,5 +182,31 @@ mod tests {
         // Access pub fields directly
         let _ = d.workspace;
         let _ = d.idle_timeout;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_writes_http_port_to_discovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let ws = tempfile::tempdir().unwrap();
+        let mut d = Daemon::new(ws.path().to_path_buf());
+        d.idle_timeout = std::time::Duration::from_secs(2);
+        let task = tokio::spawn(async move { let _ = d.run().await; });
+        let mut disc = None;
+        for _ in 0..50 {
+            if let Ok(Some(d)) = crate::discovery::read_discovery(ws.path()) {
+                disc = Some(d);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let disc = disc.expect("discovery file written");
+        assert!(disc.http_port > 0, "http_port must be a real port, got {}", disc.http_port);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let url = format!("http://127.0.0.1:{}/api/state", disc.http_port);
+        let out = std::process::Command::new("curl").args(["-s", &url]).output().unwrap();
+        let body = String::from_utf8_lossy(&out.stdout);
+        assert!(body.contains("state"), "body: {body}");
+        task.abort();
     }
 }
