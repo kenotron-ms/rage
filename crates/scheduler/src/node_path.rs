@@ -485,4 +485,63 @@ mod tests {
             );
         });
     }
+
+    // ── which_first ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn which_first_returns_path_token_verbatim() {
+        let dir = tempdir().unwrap();
+        let result = which_first("/bin/sh -c foo", dir.path(), dir.path());
+        assert_eq!(result, Some(PathBuf::from("/bin/sh")));
+    }
+
+    #[test]
+    fn which_first_finds_in_pkg_node_modules_bin() {
+        let ws = tempdir().unwrap();
+        let pkg = ws.path().join("pkg");
+        let bin = pkg.join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let tsc = bin.join("tsc");
+        std::fs::write(&tsc, b"#!/bin/sh\n").unwrap();
+
+        let result = which_first("tsc --noEmit", &pkg, ws.path());
+        assert_eq!(result, Some(tsc));
+    }
+
+    #[test]
+    fn which_first_falls_back_to_workspace_node_modules_bin() {
+        let ws = tempdir().unwrap();
+        let pkg = ws.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let ws_bin = ws.path().join("node_modules/.bin");
+        std::fs::create_dir_all(&ws_bin).unwrap();
+        let yarn = ws_bin.join("yarn");
+        std::fs::write(&yarn, b"#!/bin/sh\n").unwrap();
+
+        let result = which_first("yarn install", &pkg, ws.path());
+        assert_eq!(result, Some(yarn));
+    }
+
+    #[test]
+    fn which_first_falls_back_to_version_manager_bin() {
+        let home = tempdir().unwrap();
+        let vm_bin = fake_fnm(home.path(), "18.20.4");
+        let yarn = vm_bin.join("yarn");
+        std::fs::write(&yarn, b"#!/bin/sh\n").unwrap();
+
+        let ws = tempdir().unwrap();
+        std::fs::write(ws.path().join(".node-version"), "18.20.4\n").unwrap();
+
+        with_home(home.path(), || {
+            let result = which_first("yarn install", ws.path(), ws.path());
+            assert_eq!(result, Some(yarn.clone()));
+        });
+    }
+
+    #[test]
+    fn which_first_returns_none_when_token_not_found() {
+        let dir = tempdir().unwrap();
+        let result = which_first("definitely_not_a_real_tool_xyz", dir.path(), dir.path());
+        assert_eq!(result, None);
+    }
 }
