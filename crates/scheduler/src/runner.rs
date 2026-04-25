@@ -303,7 +303,7 @@ async fn run_single_task_two_phase(
     // Phase 1: cache lookup
     if cache.lookup(&inputs).is_some() {
         eprintln!(
-            "[rage] {}#{} \u{2713} (cached)",
+            "[rage] {}#{} \u{2713} (cached, two-phase)",
             task.package_name, task.script_name
         );
         return Ok(());

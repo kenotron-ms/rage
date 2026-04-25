@@ -109,8 +109,6 @@ async fn cmd_run(
     since: Option<&str>,
     affected: bool,
 ) -> Result<()> {
-    use cache::LocalCache;
-    use std::sync::Arc;
 
     if since.is_some() && affected {
         anyhow::bail!("--since and --affected are mutually exclusive");
@@ -175,26 +173,28 @@ async fn cmd_run(
 
     eprintln!("Running '{}' across {} packages", script, tasks.len());
 
-    let cache: Option<Arc<dyn cache::CacheProvider>> = if no_cache {
-        None
+    if no_cache {
+        scheduler::run_tasks(&dag, tasks, None)
+            .await
+            .with_context(|| format!("'{script}' run failed"))?;
     } else {
-        // Resolve cache dir: CLI flag > rage.json > RAGE_CACHE_DIR > ~/.rage/cache.
-        let cache_result = match &config.cache.dir {
-            Some(d) => LocalCache::with_dir(d.clone()),
-            None => LocalCache::new(),
-        };
-        match cache_result {
-            Ok(lc) => Some(Arc::new(lc)),
-            Err(e) => {
-                eprintln!("[rage] warning: cache unavailable: {e}");
-                None
+        let cache_dir = match &config.cache.dir {
+            Some(d) => d.clone(),
+            None => {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+                home.join(".rage").join("cache")
             }
-        }
-    };
-
-    scheduler::run_tasks(&dag, tasks, cache)
-        .await
-        .with_context(|| format!("'{script}' run failed"))?;
+        };
+        let two_phase = std::sync::Arc::new(
+            cache::TwoPhaseCache::with_dir(cache_dir).context("opening two-phase cache")?,
+        );
+        scheduler::run_tasks_two_phase(&dag, tasks, two_phase)
+            .await
+            .with_context(|| format!("'{script}' run failed"))?;
+    }
 
     eprintln!("Done.");
     Ok(())

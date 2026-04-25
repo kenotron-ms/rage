@@ -238,38 +238,55 @@ fn no_cache_flag_accepted() {
 #[test]
 fn second_run_uses_cache() {
     use tempfile::tempdir;
-    // Use RAGE_CACHE_DIR env var to isolate cache per test run
-    // (We use a temp dir so tests don't pollute ~/.rage/cache/ and are repeatable)
+    // Use a rage.json-specified cache dir to isolate this test run from
+    // ~/.rage/cache and guarantee repeatability. The default code path (no
+    // --no-cache) now uses TwoPhaseCache, so the second run prints
+    // "(cached, two-phase)" instead of the old "(cached)".
+
+    let workspace = tempdir().unwrap();
     let cache_dir = tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_rage");
-    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("fixtures");
 
-    let run = |extra_args: &[&str]| {
+    // Copy the js-pnpm fixture into the isolated workspace so we can add a
+    // rage.json that points the cache at our temp dir.
+    let pnpm_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("fixtures")
+        .join("js-pnpm");
+    copy_dir_recursive(&pnpm_fixture, workspace.path());
+
+    // Write rage.json to redirect the cache to our temp dir.
+    std::fs::write(
+        workspace.path().join("rage.json"),
+        format!(
+            r#"{{ "cache": {{ "backend": "local", "dir": "{}" }} }}"#,
+            cache_dir.path().to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let run = || {
         std::process::Command::new(bin)
             .args(["run", "build"])
-            .arg(fixtures_dir.join("js-pnpm"))
-            .args(extra_args)
-            .env("RAGE_CACHE_DIR", cache_dir.path())
+            .arg(workspace.path())
             .output()
             .unwrap()
     };
 
     // First run — cold cache
-    let first = run(&[]);
+    let first = run();
     assert!(first.status.success());
 
-    // Second run — warm cache
-    let second = run(&[]);
+    // Second run — warm TwoPhaseCache
+    let second = run();
     assert!(second.status.success());
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(
-        stderr.contains("(cached)"),
-        "second run should show cached tasks, got:\n{stderr}"
+        stderr.contains("(cached, two-phase)"),
+        "second run should show two-phase cached tasks, got:\n{stderr}"
     );
 }
 
@@ -393,6 +410,79 @@ fn affected_flag_scopes_to_dirty_packages() {
     assert!(
         stderr.contains("Scoping to packages with uncommitted changes"),
         "scoping message should appear\n{stderr}"
+    );
+}
+
+// ── TwoPhaseCache integration test ─────────────────────────────────────────
+
+/// Verify the default (no --no-cache) code path creates TwoPhaseCache-specific
+/// files (`wf-*.pathsets`) in the rage.json-specified cache directory.
+/// This test fails with LocalCache (which writes `{fingerprint}.json` files)
+/// and passes only when TwoPhaseCache is the default.
+#[test]
+fn default_run_uses_two_phase_cache() {
+    use std::process::Command;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let cache_dir = tempfile::tempdir().unwrap();
+
+    // Minimal pnpm workspace with one package
+    std::fs::write(
+        workspace.path().join("pnpm-workspace.yaml"),
+        b"packages:\n  - 'packages/*'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.path().join("package.json"),
+        br#"{"name":"root","private":true}"#,
+    )
+    .unwrap();
+    let pkg = workspace.path().join("packages/p");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        br#"{"name":"@x/p","version":"1.0.0","scripts":{"build":"echo hi"}}"#,
+    )
+    .unwrap();
+
+    // rage.json points cache.dir at our temp dir
+    std::fs::write(
+        workspace.path().join("rage.json"),
+        format!(
+            r#"{{ "cache": {{ "backend": "local", "dir": "{}" }} }}"#,
+            cache_dir.path().to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_rage");
+    let out = Command::new(bin)
+        .args(["run", "build"])
+        .arg(workspace.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "rage run build should succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // TwoPhaseCache writes `wf-*.pathsets` files (LocalCache writes `{fp}.json`).
+    // The presence of a wf-* file proves TwoPhaseCache was used.
+    let entries: Vec<_> = std::fs::read_dir(cache_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.file_name().to_string_lossy().starts_with("wf-")),
+        "expected TwoPhaseCache wf-*.pathsets file in {}; found: {:?}",
+        cache_dir.path().display(),
+        entries
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
     );
 }
 
