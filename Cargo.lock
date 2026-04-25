@@ -397,6 +397,8 @@ dependencies = [
  "build-graph",
  "clap",
  "pipeline-config",
+ "scheduler",
+ "tokio",
  "workspace-tools",
 ]
 
