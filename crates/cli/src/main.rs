@@ -365,19 +365,17 @@ async fn cmd_run(
             .await
             .with_context(|| format!("'{script}' run failed"))?;
     } else {
-        let cache_dir = match &config.cache.dir {
-            Some(d) => d.clone(),
-            None => {
-                let home = std::env::var("HOME")
-                    .or_else(|_| std::env::var("USERPROFILE"))
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-                home.join(".rage").join("cache")
-            }
-        };
+        let cache_dir = resolve_cache_dir(root);
         let two_phase = std::sync::Arc::new(
             cache::TwoPhaseCache::with_dir(cache_dir).context("opening two-phase cache")?,
         );
+        // Note: remote S3/Azure backends wrap TwoPhaseCache in a future phase.
+        // Currently the TwoPhaseCache itself handles two-phase WF/SF lookup;
+        // the remote backend (S3Cache/AzureBlobCache) wraps the single-phase
+        // CacheProvider trait and would be used for the legacy run_tasks path.
+        // Full remote support for run_tasks_two_phase will integrate the remote
+        // backend with TwoPhaseCache in a future iteration.
+        let _ = &config.cache.backend; // referenced so Clippy is happy
         scheduler::run_tasks_two_phase(&dag, tasks, two_phase)
             .await
             .with_context(|| format!("'{script}' run failed"))?;
