@@ -316,7 +316,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let dts = output_at(dir.path(), "index.d.ts", b"declare const x: 1");
         let p = TypeScriptPlugin::new();
-        let h_only = p.abi_fingerprint(&[dts.clone()]).unwrap();
+        let h_only = p.abi_fingerprint(std::slice::from_ref(&dts)).unwrap();
         // adding a .js file must not affect the fingerprint
         let js = output_at(dir.path(), "index.js", b"x=1");
         let h_with_js = p.abi_fingerprint(&[dts, js]).unwrap();
