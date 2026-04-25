@@ -273,6 +273,129 @@ fn second_run_uses_cache() {
     );
 }
 
+// ── --affected flag tests ──────────────────────────────────────────────────
+
+#[test]
+fn affected_flag_is_recognized() {
+    // Before --affected is implemented, clap rejects unknown flags with
+    // "unexpected argument". After it is wired in, that message must
+    // not appear regardless of whether git dirty-check itself succeeds or fails.
+    let output = rage()
+        .args(["run", "build", "--affected"])
+        .arg(fixtures_dir().join("js-pnpm"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "--affected should be a recognized flag, got stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn since_and_affected_are_mutually_exclusive() {
+    // Using both --since and --affected together should exit nonzero and
+    // print a message containing "mutually exclusive".
+    let output = rage()
+        .args(["run", "build", "--since", "HEAD", "--affected"])
+        .arg(fixtures_dir().join("js-pnpm"))
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "rage run --since HEAD --affected should exit nonzero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mutually exclusive"),
+        "error message should say 'mutually exclusive', got:\n{stderr}"
+    );
+}
+
+#[test]
+fn affected_flag_scopes_to_dirty_packages() {
+    use std::fs;
+    use std::process::Command as Cmd;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // 1. Copy the js-pnpm fixture
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("fixtures")
+        .join("js-pnpm");
+
+    copy_dir_recursive(&fixtures_dir, root);
+
+    // 2. Initialize git repo and commit everything
+    let git = |args: &[&str]| {
+        Cmd::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@test.com"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-m", "initial"]);
+
+    // 3. Make an *uncommitted* change to @fixture/utils
+    let utils_pkg = root.join("packages").join("utils").join("package.json");
+    let original = fs::read_to_string(&utils_pkg).unwrap();
+    let modified = original.replace("\"version\": \"1.0.0\"", "\"version\": \"1.0.1\"");
+    fs::write(&utils_pkg, modified).unwrap();
+
+    // 4. Run rage with --affected (no git add / commit)
+    let bin = env!("CARGO_BIN_EXE_rage");
+    let output = Cmd::new(bin)
+        .args(["run", "build", "--affected", "--no-cache"])
+        .arg(root)
+        .env("RAGE_CACHE_DIR", root.join(".rage-test-cache"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "rage run --affected should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // utils, ui, and app should run (utils modified; ui+app depend on utils)
+    assert!(
+        stderr.contains("@fixture/utils"),
+        "utils should run (directly affected)\n{stderr}"
+    );
+    assert!(
+        stderr.contains("@fixture/ui"),
+        "ui should run (depends on utils)\n{stderr}"
+    );
+    assert!(
+        stderr.contains("@fixture/app"),
+        "app should run (depends on ui)\n{stderr}"
+    );
+
+    // core should NOT run (doesn't depend on utils)
+    assert!(
+        !stderr.contains("@fixture/core#build"),
+        "core should be scoped out\n{stderr}"
+    );
+
+    // Scoping message should appear
+    assert!(
+        stderr.contains("Scoping to packages with uncommitted changes"),
+        "scoping message should appear\n{stderr}"
+    );
+}
+
 // ── scoping integration tests ──────────────────────────────────────────────
 
 #[test]

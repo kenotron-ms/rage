@@ -43,6 +43,11 @@ enum Command {
         /// Example: `--since HEAD~1` or `--since origin/main`.
         #[arg(long)]
         since: Option<String>,
+
+        /// Scope to packages with uncommitted changes (staged, unstaged, untracked).
+        /// Cannot be combined with --since.
+        #[arg(long)]
+        affected: bool,
     },
 }
 
@@ -63,9 +68,10 @@ async fn main() -> Result<()> {
             workspace_pos,
             no_cache,
             since,
+            affected,
         } => {
             let root = resolve_workspace(workspace_pos, workspace);
-            cmd_run(&root, &script, no_cache, since.as_deref()).await
+            cmd_run(&root, &script, no_cache, since.as_deref(), affected).await
         }
     }
 }
@@ -96,9 +102,19 @@ fn cmd_graph(root: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_run(root: &Path, script: &str, no_cache: bool, since: Option<&str>) -> Result<()> {
+async fn cmd_run(
+    root: &Path,
+    script: &str,
+    no_cache: bool,
+    since: Option<&str>,
+    affected: bool,
+) -> Result<()> {
     use cache::LocalCache;
     use std::sync::Arc;
+
+    if since.is_some() && affected {
+        anyhow::bail!("--since and --affected are mutually exclusive");
+    }
 
     let pm = workspace_tools::detect_package_manager(root)
         .with_context(|| format!("{} is not a recognized JS workspace", root.display()))?;
@@ -115,17 +131,27 @@ async fn cmd_run(root: &Path, script: &str, no_cache: bool, since: Option<&str>)
 
     let dag = build_graph::dag::build_dag(resolved.clone()).context("building package DAG")?;
 
-    // Compute scope (if --since was given)
+    // Compute scope (if --since or --affected was given)
     let scope: Option<std::collections::HashSet<String>> = if let Some(base_ref) = since {
         let changed_files = scoping::git_changed_files(root, base_ref)
             .with_context(|| format!("computing changed files since {base_ref}"))?;
-        let affected = scoping::affected_packages(&resolved, &dag, &changed_files);
+        let aff = scoping::affected_packages(&resolved, &dag, &changed_files);
         eprintln!(
             "Scoping to packages affected since {base_ref}: {} affected ({} scoped out)",
-            affected.len(),
-            resolved.len().saturating_sub(affected.len())
+            aff.len(),
+            resolved.len().saturating_sub(aff.len())
         );
-        Some(affected)
+        Some(aff)
+    } else if affected {
+        let dirty_files = scoping::git_dirty_files(root)
+            .context("computing uncommitted changed files")?;
+        let aff = scoping::affected_packages(&resolved, &dag, &dirty_files);
+        eprintln!(
+            "Scoping to packages with uncommitted changes: {} affected ({} scoped out)",
+            aff.len(),
+            resolved.len().saturating_sub(aff.len())
+        );
+        Some(aff)
     } else {
         None
     };
