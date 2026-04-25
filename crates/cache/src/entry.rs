@@ -20,6 +20,13 @@ pub struct CacheEntry {
     /// with entries written by single-phase cache.
     #[serde(default)]
     pub pathset_reads: Vec<std::path::PathBuf>,
+    /// ABI fingerprint of the output files produced by this task.
+    /// Only set for build tasks with a matching ecosystem plugin that supports
+    /// ABI fingerprinting (e.g. TypeScript hashes its `.d.ts` outputs).
+    /// Downstream tasks can use this for early-cutoff: if the ABI fingerprint
+    /// of all upstream dependencies is unchanged, the downstream WF is unchanged.
+    #[serde(default)]
+    pub abi_fingerprint: Option<String>,
 }
 
 #[cfg(test)]
@@ -35,6 +42,7 @@ mod tests {
             elapsed_ms: 42,
             cached_at: 1_700_000_000,
             pathset_reads: vec![],
+            abi_fingerprint: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let decoded: CacheEntry = serde_json::from_str(&json).unwrap();
@@ -50,6 +58,7 @@ mod tests {
             elapsed_ms: 100,
             cached_at: 0,
             pathset_reads: vec![],
+            abi_fingerprint: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"fingerprint\""));
@@ -70,6 +79,7 @@ mod tests {
                 std::path::PathBuf::from("/a"),
                 std::path::PathBuf::from("/b"),
             ],
+            abi_fingerprint: None,
         };
         let s = serde_json::to_string(&e).unwrap();
         let back: CacheEntry = serde_json::from_str(&s).unwrap();
@@ -84,5 +94,30 @@ mod tests {
             r#"{"fingerprint":"fp","command":"cmd","exit_code":0,"elapsed_ms":1,"cached_at":0}"#;
         let e: CacheEntry = serde_json::from_str(old).unwrap();
         assert!(e.pathset_reads.is_empty());
+    }
+
+    #[test]
+    fn abi_fingerprint_roundtrips_in_entry() {
+        let e = CacheEntry {
+            fingerprint: "fp".into(),
+            command: "tsc".into(),
+            exit_code: 0,
+            elapsed_ms: 100,
+            cached_at: 0,
+            pathset_reads: vec![],
+            abi_fingerprint: Some("abi-abc123".to_string()),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: CacheEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.abi_fingerprint, Some("abi-abc123".to_string()));
+    }
+
+    #[test]
+    fn abi_fingerprint_back_compat_missing_is_none() {
+        // Old cache entries don't have abi_fingerprint — must default to None.
+        let old =
+            r#"{"fingerprint":"fp","command":"cmd","exit_code":0,"elapsed_ms":1,"cached_at":0}"#;
+        let e: CacheEntry = serde_json::from_str(old).unwrap();
+        assert!(e.abi_fingerprint.is_none());
     }
 }

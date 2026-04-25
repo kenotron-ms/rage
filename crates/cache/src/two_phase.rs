@@ -97,6 +97,41 @@ impl TwoPhaseCache {
         std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
+
+    // ── ABI fingerprint persistence ──────────────────────────────────────────
+
+    /// Convert a package name to a safe filename component.
+    ///
+    /// Replaces `/` and `@` with safe chars: `@lage-run/core` → `_at_lage-run__core`.
+    fn pkg_name_to_filename(name: &str) -> String {
+        name.replace('@', "_at_").replace('/', "__")
+    }
+
+    /// Read the stored ABI fingerprint for `pkg_name`.
+    ///
+    /// Returns `None` if no fingerprint has been stored yet (e.g. first run or
+    /// the package's plugin doesn't support ABI fingerprinting).
+    pub fn get_pkg_abi_fp(&self, pkg_name: &str) -> Option<String> {
+        let path = self
+            .dir
+            .join("pkg-abi")
+            .join(Self::pkg_name_to_filename(pkg_name));
+        std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Persist the ABI fingerprint for `pkg_name`.
+    ///
+    /// Errors are silently ignored — ABI fingerprint storage is best-effort;
+    /// a write failure must never break a build.
+    pub fn set_pkg_abi_fp(&self, pkg_name: &str, abi_fp: &str) {
+        let dir = self.dir.join("pkg-abi");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(Self::pkg_name_to_filename(pkg_name));
+        let _ = std::fs::write(&path, abi_fp);
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +159,7 @@ mod tests {
             elapsed_ms: 1,
             cached_at: 0,
             pathset_reads: vec![],
+            abi_fingerprint: None,
         }
     }
 
@@ -140,6 +176,7 @@ mod tests {
             package_path: pkg.path(),
             declared_input_globs: &[],
             tracked_env: &[],
+            dep_abi_fingerprints: &[],
         };
         assert!(cache.lookup(&inputs).is_none());
     }
@@ -159,6 +196,7 @@ mod tests {
             package_path: pkg.path(),
             declared_input_globs: &[],
             tracked_env: &[],
+            dep_abi_fingerprints: &[],
         };
         let ps = StoredPathset {
             reads: vec![f.clone()],
@@ -186,6 +224,7 @@ mod tests {
             package_path: pkg.path(),
             declared_input_globs: &[],
             tracked_env: &[],
+            dep_abi_fingerprints: &[],
         };
         let ps = StoredPathset {
             reads: vec![f.clone()],
@@ -217,6 +256,7 @@ mod tests {
             package_path: pkg.path(),
             declared_input_globs: &globs,
             tracked_env: &[],
+            dep_abi_fingerprints: &[],
         };
         let ps = StoredPathset {
             reads: vec![],
@@ -243,6 +283,7 @@ mod tests {
             package_path: pkg.path(),
             declared_input_globs: &[],
             tracked_env: &[],
+            dep_abi_fingerprints: &[],
         };
         let inputs_b = WeakFpInputs {
             command: "cmd-b",

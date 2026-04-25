@@ -14,6 +14,14 @@ pub struct WeakFpInputs<'a> {
     pub package_path: &'a Path,
     pub declared_input_globs: &'a [String],
     pub tracked_env: &'a [(String, String)],
+    /// ABI fingerprints of immediate upstream dependencies.
+    ///
+    /// Each entry is `(package_name, abi_hex)`. Including upstream ABI
+    /// fingerprints in the WF means: if a dependency's ABI changes (new `.d.ts`
+    /// signatures), downstream tasks' WF changes → cache miss → rebuild.
+    /// Conversely, if only implementation changes (same `.d.ts`), WF stays
+    /// the same → cache hit for downstream (early-cutoff).
+    pub dep_abi_fingerprints: &'a [(String, String)],
 }
 
 /// Resolve `globs` relative to `pkg_dir`, skipping common generated/vcs dirs.
@@ -127,7 +135,18 @@ pub fn compute_weak_fingerprint(inputs: &WeakFpInputs) -> String {
         hasher.update(b"\n");
     }
 
-    // 6. finalize
+    // 6. dep ABI fingerprints (sorted by dep name for determinism)
+    let mut dep_sorted: Vec<&(String, String)> = inputs.dep_abi_fingerprints.iter().collect();
+    dep_sorted.sort_by_key(|(dep, _)| dep.as_str());
+    for (dep, afp) in &dep_sorted {
+        hasher.update(b"dep_abi:");
+        hasher.update(dep.as_bytes());
+        hasher.update(b"=");
+        hasher.update(afp.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    // 7. finalize
     hasher.finalize().to_hex().to_string()
 }
 
@@ -156,6 +175,7 @@ mod tests {
             package_path,
             declared_input_globs: &[],
             tracked_env: &[],
+            dep_abi_fingerprints: &[],
         }
     }
 
@@ -217,6 +237,7 @@ mod tests {
             package_path: dir.path(),
             declared_input_globs: &globs,
             tracked_env: &[],
+            dep_abi_fingerprints: &[],
         };
 
         let h1 = compute_weak_fingerprint(&inputs);
@@ -247,6 +268,7 @@ mod tests {
             package_path: dir.path(),
             declared_input_globs: &globs,
             tracked_env: &[],
+            dep_abi_fingerprints: &[],
         };
 
         let h1 = compute_weak_fingerprint(&inputs);
@@ -276,6 +298,7 @@ mod tests {
             package_path: dir.path(),
             declared_input_globs: &[],
             tracked_env: &env1,
+            dep_abi_fingerprints: &[],
         });
         let h2 = compute_weak_fingerprint(&WeakFpInputs {
             command: "build",
@@ -283,12 +306,68 @@ mod tests {
             package_path: dir.path(),
             declared_input_globs: &[],
             tracked_env: &env2,
+            dep_abi_fingerprints: &[],
         });
 
         assert_ne!(
             h1, h2,
             "different env var values must change the fingerprint"
         );
+    }
+
+    // ── test: dep_abi_fingerprints invalidates WF ────────────────────────────
+    #[test]
+    fn dep_abi_change_invalidates_wf() {
+        let dir = tempdir().unwrap();
+        let tool = make_tool(dir.path(), b"tool");
+        let fp1 = compute_weak_fingerprint(&WeakFpInputs {
+            command: "tsc",
+            tool_path: &tool,
+            package_path: dir.path(),
+            declared_input_globs: &[],
+            tracked_env: &[],
+            dep_abi_fingerprints: &[("core".to_string(), "abi-v1".to_string())],
+        });
+        let fp2 = compute_weak_fingerprint(&WeakFpInputs {
+            command: "tsc",
+            tool_path: &tool,
+            package_path: dir.path(),
+            declared_input_globs: &[],
+            tracked_env: &[],
+            dep_abi_fingerprints: &[("core".to_string(), "abi-v2".to_string())],
+        });
+        assert_ne!(fp1, fp2, "changing dep ABI must change WF");
+    }
+
+    #[test]
+    fn dep_abi_order_does_not_matter() {
+        let dir = tempdir().unwrap();
+        let tool = make_tool(dir.path(), b"tool");
+        let deps_ab = vec![
+            ("a".to_string(), "fp-a".to_string()),
+            ("b".to_string(), "fp-b".to_string()),
+        ];
+        let deps_ba = vec![
+            ("b".to_string(), "fp-b".to_string()),
+            ("a".to_string(), "fp-a".to_string()),
+        ];
+        let fp1 = compute_weak_fingerprint(&WeakFpInputs {
+            command: "tsc",
+            tool_path: &tool,
+            package_path: dir.path(),
+            declared_input_globs: &[],
+            tracked_env: &[],
+            dep_abi_fingerprints: &deps_ab,
+        });
+        let fp2 = compute_weak_fingerprint(&WeakFpInputs {
+            command: "tsc",
+            tool_path: &tool,
+            package_path: dir.path(),
+            declared_input_globs: &[],
+            tracked_env: &[],
+            dep_abi_fingerprints: &deps_ba,
+        });
+        assert_eq!(fp1, fp2, "dep ABI order must not matter");
     }
 
     // ── test 7 ────────────────────────────────────────────────────────────────
@@ -312,6 +391,7 @@ mod tests {
             package_path: dir.path(),
             declared_input_globs: &[],
             tracked_env: &env_a,
+            dep_abi_fingerprints: &[],
         });
         let h2 = compute_weak_fingerprint(&WeakFpInputs {
             command: "build",
@@ -319,6 +399,7 @@ mod tests {
             package_path: dir.path(),
             declared_input_globs: &[],
             tracked_env: &env_b,
+            dep_abi_fingerprints: &[],
         });
 
         assert_eq!(h1, h2, "env var order must not affect the fingerprint");
