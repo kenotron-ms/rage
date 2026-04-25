@@ -7,6 +7,7 @@
 pub mod entry;
 pub mod fingerprint; // legacy single-phase, kept for back-compat
 pub mod local;
+pub mod output_store;
 pub mod pathset_store;
 pub mod provider;
 pub mod strong_fp;
