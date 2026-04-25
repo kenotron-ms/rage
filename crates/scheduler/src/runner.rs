@@ -30,7 +30,6 @@ pub enum RunError {
     },
 }
 
-
 /// Compute a content-addressed fingerprint for a root task.
 ///
 /// Hashes the command plus the contents of every path in `task.input_paths`.
@@ -350,7 +349,6 @@ async fn run_root_task_legacy(
     }
 }
 
-
 /// Execute tasks in wave-parallel order using `TwoPhaseCache`.
 ///
 /// For each wave, all tasks run concurrently. Waves run sequentially.
@@ -448,8 +446,7 @@ async fn run_single_task_two_phase(
         // Fire-and-forget: don't await.
         tokio::task::spawn_blocking(move || {
             use std::time::{SystemTime, UNIX_EPOCH};
-            let resolved =
-                cache::weak_fp::resolve_globs_for_snapshot(&cwd_snap, &globs_snap);
+            let resolved = cache::weak_fp::resolve_globs_for_snapshot(&cwd_snap, &globs_snap);
             let tool_hash_str = cache::tool_hash::hash_tool_binary(&tp_snap)
                 .unwrap_or_else(|| "<missing>".to_string());
             let snap = cache::why_miss::WhyMissSnapshot {
@@ -499,7 +496,8 @@ async fn run_single_task_two_phase(
     let (exit_code, pathset) = match task.sandbox_mode {
         pipeline_config::SandboxMode::Loose => {
             let system_path = std::env::var("PATH").unwrap_or_default();
-            let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
+            let new_path =
+                crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
             let builder = {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c")
@@ -522,7 +520,8 @@ async fn run_single_task_two_phase(
         }
         _ => {
             let system_path = std::env::var("PATH").unwrap_or_default();
-            let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
+            let new_path =
+                crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
             let env_pairs = vec![("PATH".to_string(), new_path.clone())];
             match sandbox::run_sandboxed(&task.command, &task.cwd, &env_pairs).await {
                 Ok(r) => {
@@ -535,7 +534,11 @@ async fn run_single_task_two_phase(
                 Err(_) => {
                     // Sandbox unavailable — fall back to plain sh execution
                     let system_path2 = std::env::var("PATH").unwrap_or_default();
-                    let new_path2 = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path2);
+                    let new_path2 = crate::node_path::build_node_path(
+                        &task.cwd,
+                        &task.workspace_root,
+                        &system_path2,
+                    );
                     let builder2 = {
                         let mut cmd = Command::new("sh");
                         cmd.arg("-c")
@@ -1400,38 +1403,42 @@ mod tests {
     }
 
     #[test]
-        fn root_task_fingerprint_changes_with_env_hash_inputs() {
-            use std::path::PathBuf;
-            let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("yarn.lock"), b"v1\n").unwrap();
-            let mk = |env: Vec<(String, String)>| Task {
-                package_name: "workspace".to_string(),
-                script_name: "install".to_string(),
-                command: "yarn install".to_string(),
-                cwd: dir.path().to_path_buf(),
-                sandbox_mode: pipeline_config::SandboxMode::Loose,
-                is_root: true,
-                input_paths: vec![dir.path().join("yarn.lock")],
-                workspace_root: dir.path().to_path_buf(),
-                declared_input_globs: Vec::new(),
-                dep_package_names: Vec::new(),
-                output_globs: Vec::new(),
-                env_hash_inputs: env,
-            };
-            let fp_none = root_task_fingerprint(&mk(Vec::new()));
-            let fp_v18 = root_task_fingerprint(&mk(vec![(
-                "NODE_VERSION".to_string(),
-                "18.20.4".to_string(),
-            )]));
-            let fp_v20 = root_task_fingerprint(&mk(vec![(
-                "NODE_VERSION".to_string(),
-                "20.11.0".to_string(),
-            )]));
-            assert_ne!(fp_none, fp_v18, "adding NODE_VERSION must change fingerprint");
-            assert_ne!(fp_v18, fp_v20, "different NODE_VERSION must change fingerprint");
-        }
+    fn root_task_fingerprint_changes_with_env_hash_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("yarn.lock"), b"v1\n").unwrap();
+        let mk = |env: Vec<(String, String)>| Task {
+            package_name: "workspace".to_string(),
+            script_name: "install".to_string(),
+            command: "yarn install".to_string(),
+            cwd: dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: true,
+            input_paths: vec![dir.path().join("yarn.lock")],
+            workspace_root: dir.path().to_path_buf(),
+            declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+            env_hash_inputs: env,
+        };
+        let fp_none = root_task_fingerprint(&mk(Vec::new()));
+        let fp_v18 = root_task_fingerprint(&mk(vec![(
+            "NODE_VERSION".to_string(),
+            "18.20.4".to_string(),
+        )]));
+        let fp_v20 = root_task_fingerprint(&mk(vec![(
+            "NODE_VERSION".to_string(),
+            "20.11.0".to_string(),
+        )]));
+        assert_ne!(
+            fp_none, fp_v18,
+            "adding NODE_VERSION must change fingerprint"
+        );
+        assert_ne!(
+            fp_v18, fp_v20,
+            "different NODE_VERSION must change fingerprint"
+        );
+    }
 
-    
     // ── PATH injection integration test ─────────────────────────────────────
 
     #[tokio::test]

@@ -958,3 +958,73 @@ fn run_pnpm_install_is_cached_on_second_run() {
         "pnpm should run exactly once across both rage invocations; log:\n{log}"
     );
 }
+
+// ── node PATH injection unit test ─────────────────────────────────────────────
+
+#[test]
+fn js_task_path_includes_node_modules_bin() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    // Build a minimal yarn workspace with one package whose `build` script
+    // resolves a tool that ONLY exists at workspace_root/node_modules/.bin.
+    let work = tempdir().unwrap();
+    let root = work.path();
+    fs::write(
+        root.join("package.json"),
+        br#"{"name":"r","private":true,"workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    fs::write(root.join("yarn.lock"), b"# yarn lockfile v1\n").unwrap();
+
+    // Create both workspace root and package node_modules/.bin dirs.
+    let ws_bin = root.join("node_modules/.bin");
+    fs::create_dir_all(&ws_bin).unwrap();
+    let stub = ws_bin.join("my-stub-tool");
+    fs::write(&stub, b"#!/bin/sh\necho FOUND\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub, perms).unwrap();
+    }
+
+    // One package with a build script that just runs the stub.
+    let pkg = root.join("packages/p");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::write(
+        pkg.join("package.json"),
+        br#"{"name":"p","version":"0.0.0","scripts":{"build":"my-stub-tool"}}"#,
+    )
+    .unwrap();
+
+    // Create the package-level node_modules/.bin so it's included in PATH.
+    let pkg_bin = pkg.join("node_modules/.bin");
+    fs::create_dir_all(&pkg_bin).unwrap();
+
+    // Verify PATH injection via the public API.
+    use scheduler::node_path::build_node_path;
+
+    let path = build_node_path(&pkg, root, "/usr/bin:/bin");
+    assert!(
+        path.contains(&format!("{}/node_modules/.bin", pkg.display())),
+        "package node_modules/.bin missing from PATH: {path}"
+    );
+    assert!(
+        path.contains(&format!("{}/node_modules/.bin", root.display())),
+        "workspace node_modules/.bin missing from PATH: {path}"
+    );
+
+    // Verify that NODE_VERSION flows into the install task's env_hash_inputs.
+    fs::write(root.join(".node-version"), "18.20.4\n").unwrap();
+    use plugin::EcosystemPlugin;
+    use plugin_typescript::TypeScriptPlugin;
+    let ts = TypeScriptPlugin::new();
+    let rts = ts.infer_root_tasks(root);
+    assert_eq!(rts.len(), 1);
+    assert_eq!(
+        rts[0].env_hash_inputs,
+        vec![("NODE_VERSION".to_string(), "18.20.4".to_string())]
+    );
+}

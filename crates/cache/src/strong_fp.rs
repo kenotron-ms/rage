@@ -32,9 +32,8 @@ pub fn compute_strong_fingerprint(weak_fp: &str, pathset_reads: &[PathBuf]) -> S
         .map(|p| p.as_path())
         // Skip files inside node_modules — they're pinned by the lockfile.
         .filter(|p| {
-            !p.components().any(|c| {
-                c.as_os_str() == std::ffi::OsStr::new("node_modules")
-            })
+            !p.components()
+                .any(|c| c.as_os_str() == std::ffi::OsStr::new("node_modules"))
         })
         .collect();
     sorted.sort();

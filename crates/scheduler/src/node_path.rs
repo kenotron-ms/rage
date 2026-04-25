@@ -70,9 +70,9 @@ pub fn resolve_node_version(workspace_root: &Path) -> Option<String> {
 ///
 /// Check order:
 ///   1. fnm  — `$FNM_DIR/node-versions/v{ver}/installation/bin`
-///             (defaults to `~/.local/share/fnm`)
+///      (defaults to `~/.local/share/fnm`)
 ///   2. nvm  — `$NVM_DIR/versions/node/v{ver}/bin`
-///             (defaults to `~/.nvm`)
+///      (defaults to `~/.nvm`)
 ///   3. asdf — `~/.asdf/installs/nodejs/{ver}/bin`
 ///   4. mise — `~/.local/share/mise/installs/node/{ver}/bin`
 ///
@@ -111,7 +111,10 @@ pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
 
     // 3. asdf — ~/.asdf/installs/nodejs/{ver}/bin (no leading 'v')
     if let Some(h) = &home {
-        let candidate = h.join(".asdf/installs/nodejs").join(v_no_prefix).join("bin");
+        let candidate = h
+            .join(".asdf/installs/nodejs")
+            .join(v_no_prefix)
+            .join("bin");
         if candidate.is_dir() {
             return Some(candidate);
         }
