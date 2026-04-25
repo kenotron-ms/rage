@@ -754,7 +754,7 @@ fn rage_dev_starts_daemon_and_returns_quickly() {
     if let Ok(entries) = std::fs::read_dir(&daemons_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.extension().map_or(false, |e| e == "sock") {
+            if p.extension().is_some_and(|e| e == "sock") {
                 if let Ok(mut stream) = UnixStream::connect(&p) {
                     let _ = stream.write_all(b"{\"type\":\"Shutdown\"}\n");
                     let mut buf = String::new();
