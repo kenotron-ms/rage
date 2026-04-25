@@ -22,7 +22,7 @@ impl EcosystemPlugin for TypeScriptPlugin {
     }
 
     fn detection_globs(&self) -> Vec<&'static str> {
-        Vec::new()
+        vec!["tsconfig.json", "tsconfig.*.json"]
     }
 
     fn infer_tasks(&self, _root: &Path) -> Vec<TaskDef> {
@@ -55,9 +55,23 @@ mod tests {
     }
 
     #[test]
-    fn detection_globs_returns_empty() {
+    fn detection_globs_returns_tsconfig_patterns() {
         let p = TypeScriptPlugin::new();
-        assert!(p.detection_globs().is_empty());
+        let globs = p.detection_globs();
+        assert_eq!(globs, vec!["tsconfig.json", "tsconfig.*.json"]);
+    }
+
+    #[test]
+    fn id_is_rage_typescript() {
+        assert_eq!(TypeScriptPlugin::new().id(), "rage-typescript");
+    }
+
+    #[test]
+    fn detection_globs_match_tsconfig() {
+        let p = TypeScriptPlugin::new();
+        let globs = p.detection_globs();
+        assert!(globs.contains(&"tsconfig.json"));
+        assert!(globs.iter().any(|g| g.contains("tsconfig.")));
     }
 
     #[test]
