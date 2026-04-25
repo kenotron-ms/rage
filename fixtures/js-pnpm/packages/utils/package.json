@@ -1,7 +1,11 @@
 {
-  "name": "@fixture/utils",
-  "version": "1.0.0",
-  "dependencies": {
-    "@fixture/core": "workspace:*"
-  }
-}
+      "name": "@fixture/utils",
+      "version": "1.0.0",
+      "scripts": {
+        "build": "echo 'building @fixture/utils'"
+      },
+      "dependencies": {
+        "@fixture/core": "workspace:*"
+      }
+    }
+    

@@ -1,4 +1,8 @@
 {
-  "name": "@yarn-fixture/core",
-  "version": "1.0.0"
-}
+      "name": "@yarn-fixture/core",
+      "version": "1.0.0",
+      "scripts": {
+        "build": "echo 'building @yarn-fixture/core'"
+      }
+    }
+    
