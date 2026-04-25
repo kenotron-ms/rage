@@ -7,6 +7,7 @@ members = [
     "crates/scheduler",
     "crates/cache",
     "crates/scoping",
+    "crates/daemon",
     "crates/cli",
     "crates/sandbox",
     "crates/sandbox-macos-dylib",
