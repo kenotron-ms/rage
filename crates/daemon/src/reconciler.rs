@@ -133,6 +133,10 @@ pub fn spawn() -> ReconcilerHandle {
                     }
                 }
                 ReconcilerCmd::RetryTask { package, script } => {
+                    // Phase 11 intentional: clear the failed task from UI state and
+                    // broadcast so the task card disappears immediately.  Re-dispatching
+                    // a build is deferred to a later phase; the user can save a file
+                    // (triggering OnFilesChanged) to force a rebuild in the interim.
                     let mut s = st_clone.lock().await;
                     s.tasks
                         .retain(|t| !(t.package == package && t.script == script));

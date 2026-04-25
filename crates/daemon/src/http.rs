@@ -14,7 +14,6 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -128,7 +127,7 @@ async fn ws_session(socket: WebSocket, app: Arc<AppState>) {
 pub async fn serve(listener: TcpListener, app: AppState) -> anyhow::Result<()> {
     axum::serve(
         listener,
-        router(app).into_make_service_with_connect_info::<SocketAddr>(),
+        router(app).into_make_service(),
     )
     .await?;
     Ok(())

@@ -89,8 +89,10 @@ enum Command {
 
     /// Open the rage status page in the default browser.
     Open {
+        /// Workspace root (defaults to cwd).
         #[arg(long)]
         workspace: Option<PathBuf>,
+        /// Positional workspace path (overrides --workspace).
         workspace_pos: Option<PathBuf>,
     },
 }

@@ -20,9 +20,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6" }
 futures-util = "0.3"
-tokio-stream = "0.1"
 
 build-graph = { path = "../build-graph" }
 workspace-tools = { path = "../workspace-tools" }

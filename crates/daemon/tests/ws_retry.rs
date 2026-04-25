@@ -4,6 +4,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
 async fn websocket_pushes_initial_state_and_accepts_retry() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("HOME", tmp.path());

@@ -145,14 +145,14 @@
   <script>
     "use strict";
 
-    var stateEl  = document.querySelector("#state");
-    var tasksEl  = document.querySelector("#tasks");
-    var wsStatus = document.querySelector("#ws-status");
+    const stateEl  = document.querySelector("#state");
+    const tasksEl  = document.querySelector("#tasks");
+    const wsStatus = document.querySelector("#ws-status");
 
-    var socket;
+    let socket;
 
     function connect() {
-      var proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(proto + "//" + location.host + "/ws");
 
       socket.onopen = function () {
@@ -170,7 +170,7 @@
 
       socket.onmessage = function (ev) {
         try {
-          var snap = JSON.parse(ev.data);
+          const snap = JSON.parse(ev.data);
           render(snap);
         } catch (err) {
           console.error("Failed to parse message", err);
@@ -192,7 +192,7 @@
 
     function renderTask(t) {
       // Derive status: either a plain string or the first key of a status object
-      var status;
+      let status;
       if (typeof t.status === "string") {
         status = t.status;
       } else if (t.status && typeof t.status === "object") {
@@ -201,32 +201,32 @@
         status = "waiting";
       }
 
-      var div = document.createElement("div");
+      const div = document.createElement("div");
       div.className = "task " + status;
 
-      var nameSpan = document.createElement("span");
+      const nameSpan = document.createElement("span");
       nameSpan.className = "name";
       nameSpan.textContent = t.package + "#" + t.script;
       div.appendChild(nameSpan);
 
-      var metaSpan = document.createElement("span");
+      const metaSpan = document.createElement("span");
       metaSpan.className = "meta";
 
       if (typeof t.status === "object" && t.status !== null) {
         if ("ok" in t.status) {
-          var duration_ms = t.status.ok && t.status.ok.duration_ms != null
+          const duration_ms = t.status.ok && t.status.ok.duration_ms != null
             ? t.status.ok.duration_ms
             : 0;
           metaSpan.textContent = (duration_ms / 1000).toFixed(2) + "s";
         } else if ("failed" in t.status) {
-          var exit_code = t.status.failed && t.status.failed.exit_code != null
+          const exit_code = t.status.failed && t.status.failed.exit_code != null
             ? t.status.failed.exit_code
             : "?";
           metaSpan.textContent = "exit " + exit_code + " ";
 
-          var pkg    = t.package;
-          var script = t.script;
-          var btn    = document.createElement("button");
+          const pkg    = t.package;
+          const script = t.script;
+          const btn    = document.createElement("button");
           btn.textContent = "retry";
           btn.onclick = function () { retry(pkg, script); };
           metaSpan.appendChild(btn);
