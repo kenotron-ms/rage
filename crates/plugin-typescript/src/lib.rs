@@ -26,7 +26,34 @@ impl EcosystemPlugin for TypeScriptPlugin {
     }
 
     fn infer_tasks(&self, _root: &Path) -> Vec<TaskDef> {
-        Vec::new()
+        vec![
+            TaskDef {
+                name: "typecheck".to_string(),
+                command_template: "tsc --noEmit".to_string(),
+                input_globs: vec![
+                    "src/**/*.ts".to_string(),
+                    "src/**/*.tsx".to_string(),
+                    "tsconfig*.json".to_string(),
+                    "package.json".to_string(),
+                ],
+                output_globs: vec![],
+            },
+            TaskDef {
+                name: "build".to_string(),
+                command_template: "tsc".to_string(),
+                input_globs: vec![
+                    "src/**/*.ts".to_string(),
+                    "src/**/*.tsx".to_string(),
+                    "tsconfig*.json".to_string(),
+                    "package.json".to_string(),
+                ],
+                output_globs: vec![
+                    "dist/**".to_string(),
+                    "lib/**".to_string(),
+                    "**/*.d.ts".to_string(),
+                ],
+            },
+        ]
     }
 
     fn toolchain_allowlist(&self) -> Vec<AllowlistEntry> {
@@ -46,7 +73,6 @@ impl EcosystemPlugin for TypeScriptPlugin {
 mod tests {
     use super::*;
     use plugin::{EcosystemPlugin, OutputFile, PluginConfig};
-    use std::path::Path;
 
     #[test]
     fn typescript_plugin_id_is_rage_typescript() {
@@ -75,9 +101,36 @@ mod tests {
     }
 
     #[test]
-    fn infer_tasks_returns_empty() {
+    fn infer_tasks_returns_typecheck_and_build() {
         let p = TypeScriptPlugin::new();
-        assert!(p.infer_tasks(Path::new("/tmp")).is_empty());
+        let tasks = p.infer_tasks(std::path::Path::new("/anywhere"));
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().any(|t| t.name == "typecheck"));
+        assert!(tasks.iter().any(|t| t.name == "build"));
+    }
+
+    #[test]
+    fn typecheck_has_tsc_noemit() {
+        let p = TypeScriptPlugin::new();
+        let tc = p.infer_tasks(std::path::Path::new("/x"))
+            .into_iter()
+            .find(|t| t.name == "typecheck")
+            .unwrap();
+        assert_eq!(tc.command_template, "tsc --noEmit");
+        assert!(tc.input_globs.iter().any(|g| g == "src/**/*.ts"));
+        assert!(tc.input_globs.iter().any(|g| g == "tsconfig*.json"));
+    }
+
+    #[test]
+    fn build_has_dist_outputs() {
+        let p = TypeScriptPlugin::new();
+        let b = p.infer_tasks(std::path::Path::new("/x"))
+            .into_iter()
+            .find(|t| t.name == "build")
+            .unwrap();
+        assert_eq!(b.command_template, "tsc");
+        assert!(b.output_globs.iter().any(|g| g == "dist/**"));
+        assert!(b.output_globs.iter().any(|g| g.contains("d.ts")));
     }
 
     #[test]
