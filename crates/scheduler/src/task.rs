@@ -29,12 +29,81 @@ pub struct Task {
     /// Workspace root directory — used to build `{workspace_root}/node_modules/.bin`
     /// PATH prefix so locally-installed tools are found.
     pub workspace_root: PathBuf,
+    /// Input globs (relative to package root) declared by the ecosystem plugin.
+    /// Fed into the weak fingerprint so source changes invalidate the WF hash.
+    /// Empty for root tasks (they use `input_paths` instead).
+    pub declared_input_globs: Vec<String>,
 }
 
 #[derive(Debug, Error)]
 pub enum TaskError {
     #[error("no packages have a '{0}' script in this workspace")]
     NoMatchingScript(String),
+}
+
+/// Check whether `plugin`'s detection globs match any direct child of `pkg_path`.
+///
+/// Uses simple direct-file-existence checks for globs without wildcards, and a
+/// manual scan + filename match for globs containing `*`. This avoids adding
+/// `globset` as a scheduler dependency.
+fn package_matches_plugin(
+    pkg_path: &std::path::Path,
+    plugin: &dyn plugin::EcosystemPlugin,
+) -> bool {
+    for glob_str in plugin.detection_globs() {
+        if glob_str.contains('*') {
+            // Wildcard glob: scan directory and check each entry
+            if let Ok(entries) = std::fs::read_dir(pkg_path) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if simple_glob_match(glob_str, name) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Literal filename: direct existence check
+            if pkg_path.join(glob_str).exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Minimal glob matcher: supports `*` as "zero or more non-separator chars".
+/// Sufficient for patterns like `tsconfig.*.json`.
+fn simple_glob_match(pattern: &str, name: &str) -> bool {
+    // Split pattern on '*' and do prefix/suffix/infix matching.
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == name;
+    }
+    let mut s = name;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            // Must be a prefix
+            if !s.starts_with(part) {
+                return false;
+            }
+            s = &s[part.len()..];
+        } else if i == parts.len() - 1 {
+            // Must be a suffix
+            return s.ends_with(part);
+        } else {
+            // Must appear somewhere in s
+            if let Some(pos) = s.find(part) {
+                s = &s[pos + part.len()..];
+            } else {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Build a task list for `script_name` from the workspace DAG.
@@ -72,6 +141,7 @@ pub fn build_task_list(
                 is_root: true,
                 input_paths: rt.input_paths,
                 workspace_root: workspace_root.to_path_buf(),
+                declared_input_globs: Vec::new(), // root tasks use input_paths, not globs
             });
         }
     }
@@ -99,6 +169,18 @@ pub fn build_task_list(
         };
 
         if let Some(cmd) = command {
+            // Collect input globs from all plugins that apply to this package.
+            let mut globs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for p in plugins {
+                if package_matches_plugin(&pkg.path, *p) {
+                    for g in p.declared_input_globs(script_name, &plugin::PluginConfig::default()) {
+                        globs.insert(g);
+                    }
+                }
+            }
+            let mut declared_input_globs: Vec<String> = globs.into_iter().collect();
+            declared_input_globs.sort(); // deterministic order
+
             tasks.push(Task {
                 package_name: pkg_name.clone(),
                 script_name: script_name.to_string(),
@@ -108,6 +190,7 @@ pub fn build_task_list(
                 is_root: false,
                 input_paths: Vec::new(),
                 workspace_root: workspace_root.to_path_buf(),
+                declared_input_globs,
             });
             package_tasks_added += 1;
         }
@@ -236,6 +319,7 @@ mod tests {
             is_root: false,
             input_paths: Vec::new(),
             workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
         };
         assert_eq!(t.sandbox_mode, pipeline_config::SandboxMode::Strict);
     }
