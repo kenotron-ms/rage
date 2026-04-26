@@ -146,96 +146,109 @@ fn lookup_yarn_classic_version(lock_text: &str, name: &str) -> Option<String> {
 }
 
 /// Extract package refs from flat node_modules layout (yarn/npm).
-/// Reads version from each package's own package.json — no lockfile parsing.
-/// Works for yarn classic, yarn berry (nodeLinker=node-modules), and npm.
+///
+/// Scans `workspace_root/node_modules` directly — no lockfile required and no
+/// dependency on what the sandbox observed.  This is intentional: for flat
+/// layouts (yarn berry node-modules linker, yarn classic, npm) the build
+/// sandbox typically only records the invocation of the tool binary itself
+/// (e.g. `node_modules/.bin/yarn`), never the deep file reads performed by
+/// the TypeScript compiler inside the subprocess.  Relying on pathset_reads
+/// would therefore always yield zero packages.
+///
+/// The `_pathset_reads` parameter is retained for API compatibility but is
+/// not used for package discovery.
+///
+/// Filtering rules (same as before):
+/// - dot-prefixed top-level dirs (`.bin`, `.cache`, `.pnpm`, …) are skipped
+/// - entries whose canonicalized path escapes `node_modules` (workspace
+///   package symlinks) are skipped
+/// - entries without a readable `package.json` are skipped
+/// - entries with a `workspaces` key in `package.json` are skipped
 pub fn extract_flat_from_node_modules(
-    pathset_reads: &[PathBuf],
+    _pathset_reads: &[PathBuf],
     workspace_root: &Path,
 ) -> Vec<PathsetPackageRef> {
     let nm_root = workspace_root.join("node_modules");
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let canonical_nm = match std::fs::canonicalize(&nm_root) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(), // node_modules doesn't exist yet
+    };
+
     let mut out: Vec<PathsetPackageRef> = Vec::new();
 
-    for p in pathset_reads {
-        // Must be under node_modules but not under .pnpm (that's handled by extract_pnpm_packages)
-        let Ok(rel) = p.strip_prefix(&nm_root) else {
-            continue;
-        };
-        let s = rel.to_string_lossy();
-        if s.contains(".pnpm") || s.contains("__pycache__") {
-            continue;
-        }
+    let top_entries = match std::fs::read_dir(&nm_root) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
 
-        // Extract package name from the first path segment(s)
-        let mut comps = rel.components();
-        let first = match comps.next() {
-            Some(c) => c.as_os_str().to_string_lossy().to_string(),
-            None => continue,
-        };
+    for entry in top_entries.flatten() {
+        let name_os = entry.file_name();
+        let name_str = name_os.to_string_lossy();
 
-        // Skip dot-prefixed entries like .cache, .bin, .pnpm
-        if first.starts_with('.') {
+        // Skip dot-prefixed entries (.bin, .cache, .pnpm, .yarn, …)
+        if name_str.starts_with('.') {
             continue;
         }
 
-        let name = if first.starts_with('@') {
-            // Scoped package: need the second component too
-            let Some(second) = comps.next() else {
-                continue;
-            };
-            format!("{}/{}", first, second.as_os_str().to_string_lossy())
+        if name_str.starts_with('@') {
+            // Scoped namespace: descend one more level to find the actual packages.
+            let scope = name_str.to_string();
+            let scope_dir = nm_root.join(&scope);
+            if let Ok(sub_entries) = std::fs::read_dir(&scope_dir) {
+                for sub in sub_entries.flatten() {
+                    let pkg_name = format!("{}/{}", scope, sub.file_name().to_string_lossy());
+                    if let Some(r) = read_flat_pkg(&nm_root, &canonical_nm, &pkg_name) {
+                        out.push(r);
+                    }
+                }
+            }
         } else {
-            first
-        };
-
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-
-        // Read version from the package's own package.json
-        let pkg_json_path = nm_root.join(&name).join("package.json");
-        let Ok(text) = std::fs::read_to_string(&pkg_json_path) else {
-            continue;
-        };
-
-        // Parse version field; skip workspace packages (those with a "workspaces" field)
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-
-        // Skip workspace packages (they have a "workspaces" field)
-        if value.get("workspaces").is_some() {
-            continue;
-        }
-
-        let Some(version) = value
-            .get("version")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-        else {
-            continue;
-        };
-
-        let package_root = nm_root.join(&name);
-
-        // Skip if package_root resolves outside node_modules (symlink to workspace source).
-        // Canonicalize both sides so macOS /private alias and other symlinks compare correctly.
-        if let (Ok(canonical_pkg), Ok(canonical_nm)) = (
-            std::fs::canonicalize(&package_root),
-            std::fs::canonicalize(&nm_root),
-        ) {
-            if !canonical_pkg.starts_with(&canonical_nm) {
-                continue;
+            let pkg_name = name_str.to_string();
+            if let Some(r) = read_flat_pkg(&nm_root, &canonical_nm, &pkg_name) {
+                out.push(r);
             }
         }
-
-        out.push(PathsetPackageRef {
-            name,
-            version,
-            package_root,
-        });
     }
+
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Read a single package entry from a flat `node_modules` layout.
+///
+/// Returns `None` when the entry should be skipped (symlink to workspace
+/// source, missing/invalid `package.json`, workspace root package, …).
+fn read_flat_pkg(nm_root: &Path, canonical_nm: &Path, name: &str) -> Option<PathsetPackageRef> {
+    let package_root = nm_root.join(name);
+
+    // Skip if this entry resolves outside node_modules — it is a symlink
+    // pointing at a workspace package's source directory, not a real dep.
+    if let Ok(canonical_pkg) = std::fs::canonicalize(&package_root) {
+        if !canonical_pkg.starts_with(canonical_nm) {
+            return None;
+        }
+    }
+
+    // Read version from the package's own package.json.
+    let pkg_json_path = package_root.join("package.json");
+    let text = std::fs::read_to_string(&pkg_json_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+
+    // Workspace root packages carry a "workspaces" field — skip them.
+    if value.get("workspaces").is_some() {
+        return None;
+    }
+
+    let version = value
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())?;
+
+    Some(PathsetPackageRef {
+        name: name.to_string(),
+        version,
+        package_root,
+    })
 }
 
 #[cfg(test)]
