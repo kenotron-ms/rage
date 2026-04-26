@@ -797,6 +797,132 @@ Phase C's claim is harder to summarize because it depends on what fraction of `n
 
 ---
 
+## Section 13B — Phase B Revised: Lockfile-Integrity-Hash Approach (Adopted)
+
+### What Changed (2026-04-26)
+
+After the initial "walk node_modules" implementation revealed performance and
+reliability problems (process-exit kills background capture, no tarballs stored
+so restore is impossible), we revised Phase B to use the **lockfile integrity
+hash** as the CAS key — the same approach Bazel/rules_js and BuildXL use.
+
+### The Key Insight
+
+Every modern lockfile already contains a cryptographically strong content hash
+for every external package:
+
+| Package manager | Lockfile | Hash field |
+|---|---|---|
+| pnpm | `pnpm-lock.yaml` | `integrity: sha512-...` |
+| yarn classic | `yarn.lock` | `resolved "…#sha1=…"` / `integrity sha512-…` |
+| yarn berry | `yarn.lock` | `checksum: sha512-…` |
+| npm | `package-lock.json` | `"integrity": "sha512-…"` |
+| Cargo | `Cargo.lock` | `checksum = "sha256-…"` |
+| Go | `go.sum` | `h1:sha256-…` |
+
+This hash IS the content address — no need to walk installed files and compute
+our own. Moreover, the package manager's local cache already holds the tarballs:
+
+| PM | Local tarball cache |
+|---|---|
+| pnpm | `~/.local/share/pnpm/store/v3/files/` |
+| yarn classic | `~/.yarn/cache/` |
+| yarn berry | `.yarn/cache/` in workspace |
+| npm | `~/.npm/_cacache/` |
+
+So capture = read lockfile → copy tarballs from PM cache → store in rage CAS.
+Restore = read lockfile → extract tarballs from rage CAS → node_modules.
+
+### Revised Plugin Interface
+
+```rust
+/// A package entry from a parsed lockfile.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LockfilePackage {
+    pub name: String,
+    pub version: String,
+    /// Raw integrity string from lockfile: "sha512-XXXX", "sha256-XXXX", "h1:XXXX"
+    pub integrity: String,
+    /// URL of the package tarball (optional — available in npm/yarn/pnpm lockfiles).
+    pub tarball_url: Option<String>,
+}
+
+pub trait EcosystemPlugin: Send + Sync {
+    // ... existing methods unchanged ...
+
+    /// Parse the lockfile and return all external packages with integrity hashes.
+    /// Returns None if this ecosystem has no lockfile (e.g., bare requirements.txt).
+    /// When None: rage skips CAS capture and always runs install.
+    fn parse_lockfile(&self, workspace_root: &Path) -> Option<Vec<LockfilePackage>> {
+        None
+    }
+
+    /// Path to this ecosystem's local package cache (where downloaded tarballs live).
+    /// Used as fast-path source during capture (copy instead of download).
+    /// Returns None if the PM cache path cannot be determined.
+    fn local_pm_cache(&self, workspace_root: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// Restore packages from rage CAS into the workspace.
+    /// Called when: install marker exists + verify_install_effects returns false + CAS has pkgs.
+    /// Default: no-op (falls through to full reinstall).
+    fn restore_from_cas(
+        &self,
+        packages: &[LockfilePackage],
+        workspace_root: &Path,
+        store: &dyn ArtifactStore,
+    ) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+}
+```
+
+### Revised Capture Flow
+
+```
+1. Install completes successfully
+2. plugin.parse_lockfile(workspace_root) → Vec<LockfilePackage>
+3. For each LockfilePackage:
+   a. CAS key = Blake3(integrity.as_bytes())  [fast, no file I/O]
+   b. if store.contains(key): skip (already captured)
+   c. Find tarball in plugin.local_pm_cache() by matching integrity hash
+   d. Copy tarball bytes → store.put_bytes(tarball_bytes)
+   e. Write per-package JSON file: {name, version, integrity, tarball_hash}
+4. Write root-{fp}.done marker AFTER capture completes
+```
+
+### Revised Restore Flow
+
+```
+1. root-{fp}.done exists (cache marker)
+2. plugin.verify_install_effects(workspace_root) → false (node_modules missing)
+3. plugin.parse_lockfile(workspace_root) → package list
+4. For each package: store.contains(blake3(integrity))? Pre-flight check
+5. All present → plugin.restore_from_cas(packages, workspace_root, store)
+   - For each package: store.get_bytes(hash) → write tarball → extract into node_modules/
+6. Log: "[rage] workspace#install ✓ (restored from artifact cache)"
+```
+
+### Why This Is Better Than Walking node_modules
+
+| Concern | Walk node_modules | Lockfile-based |
+|---|---|---|
+| Capture speed | O(files × hash time) — thousands of hashes | O(packages) — copy N tarballs |
+| Process-exit safety | Files written incrementally, final manifest may not exist | Each tarball captured atomically; per-pkg JSON written immediately |
+| Cross-machine validity | Content hashes computed by us | Integrity hashes from npm registry — same on every machine |
+| Symlink handling | pnpm virtual store symlinks must be captured | Tarball extraction recreates correct layout |
+| Fallback for no PM cache | Cannot capture without node_modules | Still works via full install (npm ci) |
+
+### Strict Mode (Future, Not Implemented Now)
+
+In a future "strict" mode, rage will warn/error when `parse_lockfile()` returns
+`None` — i.e., when an ecosystem has no lockfile to derive integrity hashes from.
+This encourages lockfile discipline. For now, `None` simply disables CAS capture
+and always runs the install command.
+
+---
+
 ## Section 13 — Open Questions
 
 1. **Hash function — sha256 or blake3?** sha256 aligns with npm/cargo/PyPI conventions and lets us reuse package-manager-computed hashes verbatim. blake3 is faster and aligns with existing rage hashes in `crates/cache`. The decision is a tradeoff between integration-friction and computational cost. Lean: sha256 for content hashes (interop), blake3 for the install_key (internal), explicitly document the boundary.

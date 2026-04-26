@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package rage.coordinator.v1;
+
+// Hub/spoke distributed build coordination protocol.
+//
+// Design: docs/plans/2026-04-24-rage-daemon-config-cache-design.md Section 4.
+//
+// The hub holds the task DAG and dispatches tasks to spokes as their dependencies
+// complete. Spokes subscribe with a streaming RPC and receive WorkItems as they
+// become available. Artifact routing goes through the remote cache, NOT the hub.
+// The hub is a scheduler and coordinator only — not a data plane.
+
+service Coordinator {
+  // Spoke subscribes — hub pushes WorkItems as the DAG unblocks them.
+  // The stream stays open until the build completes or the spoke disconnects.
+  rpc Subscribe(WorkerInfo) returns (stream WorkItem);
+
+  // Spoke reports completion (success or failure) for a previously received task.
+  rpc Complete(CompletionReport) returns (Ack);
+
+  // Hub client submits a task graph for execution.
+  // Returns a stream of status updates until all tasks complete.
+  rpc SubmitBuild(BuildRequest) returns (stream BuildEvent);
+
+  // Health check — CLI uses this to verify the hub is alive.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+// ─── Spoke ↔ Hub ────────────────────────────────────────────────────────────
+
+message WorkerInfo {
+  // Unique ID for this spoke instance (e.g. hostname + PID).
+  string worker_id = 1;
+  // Bearer token for authentication.
+  string token = 2;
+  // Number of tasks this spoke can run in parallel.
+  uint32 parallelism = 3;
+  // Platform descriptor, e.g. "linux/amd64" or "darwin/arm64".
+  string platform = 4;
+}
+
+message WorkItem {
+  // Unique task identifier — matches `TaskId` in the BuildRequest graph.
+  string task_id = 1;
+  // npm package name (e.g. "@lage-run/core").
+  string package_name = 2;
+  // Script name (e.g. "build", "test").
+  string script_name = 3;
+  // Shell command to execute (verbatim).
+  string command = 4;
+  // Absolute path to the workspace root on this spoke.
+  string workspace_root = 5;
+  // Package directory relative to workspace_root.
+  string package_path = 6;
+  // Strong-fingerprint cache keys the spoke must fetch before starting.
+  repeated CacheRef input_refs = 7;
+  // URL of the remote cache (e.g. "http://cache-server:8080" or "s3://bucket").
+  string cache_backend_url = 8;
+  // Additional environment variables to set for this task.
+  map<string, string> env = 9;
+}
+
+message CacheRef {
+  // Which prior task produced this artifact.
+  string task_id = 1;
+  // Strong fingerprint hash — look this up in the cache backend.
+  string sf_hash = 2;
+}
+
+message CompletionReport {
+  string task_id = 1;
+  string worker_id = 2;
+  bool success = 3;
+  int32 exit_code = 4;
+  // Last 2 KB of stdout (diagnostic only — not used for cache).
+  string stdout_tail = 5;
+  // Last 2 KB of stderr.
+  string stderr_tail = 6;
+  // SF hash of the uploaded outputs (empty if task failed or produced no outputs).
+  string output_sf_hash = 7;
+  // Wall-clock execution time in milliseconds.
+  uint64 duration_ms = 8;
+}
+
+message Ack {
+  bool accepted = 1;
+  // Rejection reason (non-empty only when accepted = false).
+  string reason = 2;
+}
+
+// ─── Build submission ────────────────────────────────────────────────────────
+
+message BuildRequest {
+  // Build identifier — used to correlate Subscribe streams with this build.
+  string build_id = 1;
+  // Bearer token — must match hub's configured token.
+  string token = 2;
+  // Ordered list of tasks. Dependencies reference task_ids in this list.
+  repeated TaskNode tasks = 3;
+  // Workspace root on spoke machines (must be same path on all spokes).
+  string workspace_root = 4;
+}
+
+message TaskNode {
+  string task_id = 1;
+  string package_name = 2;
+  string script_name = 3;
+  string command = 4;
+  string package_path = 5;
+  // task_ids this task depends on (must complete first).
+  repeated string depends_on = 6;
+}
+
+message BuildEvent {
+  oneof event {
+    TaskStarted task_started = 1;
+    TaskCompleted task_completed = 2;
+    BuildDone build_done = 3;
+    BuildFailed build_failed = 4;
+  }
+}
+
+message TaskStarted {
+  string task_id = 1;
+  string worker_id = 2;
+}
+
+message TaskCompleted {
+  string task_id = 1;
+  bool success = 2;
+  uint64 duration_ms = 3;
+}
+
+message BuildDone {
+  uint32 tasks_completed = 1;
+  uint64 total_duration_ms = 2;
+}
+
+message BuildFailed {
+  string failed_task_id = 1;
+  string error = 2;
+}
+
+// ─── Diagnostics ─────────────────────────────────────────────────────────────
+
+message PingRequest {}
+
+message PingResponse {
+  string version = 1;
+  uint32 connected_spokes = 2;
+  uint32 pending_tasks = 3;
+  string build_id = 4;  // empty if no active build
+}
