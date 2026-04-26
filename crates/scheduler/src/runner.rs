@@ -4,7 +4,7 @@ use crate::task::Task;
 use build_graph::dag::WorkspaceDag;
 use build_graph::topo::topological_sort;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
@@ -358,6 +358,8 @@ pub async fn run_tasks_two_phase(
     dag: &WorkspaceDag,
     tasks: Vec<Task>,
     cache: Arc<cache::TwoPhaseCache>,
+    plugin: Arc<dyn plugin::EcosystemPlugin>,
+    artifact_store: Arc<artifact_store::LocalArtifactStore>,
 ) -> anyhow::Result<()> {
     let levels = compute_task_levels(dag, &tasks);
 
@@ -366,7 +368,9 @@ pub async fn run_tasks_two_phase(
 
         for task in level {
             let cache_clone = cache.clone();
-            set.spawn(run_single_task_two_phase(task, cache_clone));
+            let plugin_clone = Arc::clone(&plugin);
+            let store_clone = Arc::clone(&artifact_store);
+            set.spawn(run_single_task_two_phase(task, cache_clone, plugin_clone, store_clone));
         }
 
         let mut first_error: Option<RunError> = None;
@@ -402,9 +406,11 @@ pub async fn run_tasks_two_phase(
 async fn run_single_task_two_phase(
     task: Task,
     cache: Arc<cache::TwoPhaseCache>,
+    plugin: Arc<dyn plugin::EcosystemPlugin>,
+    artifact_store: Arc<artifact_store::LocalArtifactStore>,
 ) -> Result<(), RunError> {
     if task.is_root {
-        return run_root_task_two_phase(task, cache).await;
+        return run_root_task_two_phase(task, cache, plugin.as_ref(), artifact_store).await;
     }
 
     use cache::pathset_store::StoredPathset;
@@ -593,6 +599,7 @@ async fn run_single_task_two_phase(
             pathset_reads: vec![],
             abi_fingerprint: abi_fp,
         };
+        let pathset_reads_for_capture = pathset.reads.clone();
         let sf = cache.record(&inputs, pathset, entry).unwrap_or_default();
 
         // Store captured output for later replay on cache hit.
@@ -606,6 +613,24 @@ async fn run_single_task_two_phase(
                     exit_code: 0,
                 },
             );
+        }
+
+        // ── Observation-driven CAS capture (fire-and-forget) ─────────────
+        if !pathset_reads_for_capture.is_empty() {
+            let install_fp = find_latest_install_fingerprint(cache.dir());
+            if let Some(fp) = install_fp {
+                let manifest_path = cache
+                    .dir()
+                    .join("artifact-packages")
+                    .join(format!("{fp}.json"));
+                crate::artifact_capture::schedule_capture(
+                    pathset_reads_for_capture,
+                    task.workspace_root.clone(),
+                    manifest_path,
+                    fp,
+                    Arc::clone(&artifact_store),
+                );
+            }
         }
 
         eprintln!(
@@ -631,16 +656,54 @@ async fn run_single_task_two_phase(
 async fn run_root_task_two_phase(
     task: Task,
     cache: Arc<cache::TwoPhaseCache>,
+    plugin: &dyn plugin::EcosystemPlugin,
+    artifact_store: Arc<artifact_store::LocalArtifactStore>,
 ) -> Result<(), RunError> {
     let fp = root_task_fingerprint(&task);
     let marker = cache.dir().join(format!("root-{fp}.done"));
 
     if marker.exists() {
-        eprintln!(
-            "[rage] {}#{} \u{2713} (cached)",
-            task.package_name, task.script_name
-        );
-        return Ok(());
+        // Verify the install task's on-disk effects are still present.
+        if plugin.verify_install_effects(&task.workspace_root) {
+            eprintln!(
+                "[rage] {}#{} \u{2713} (cached)",
+                task.package_name, task.script_name
+            );
+            return Ok(());
+        }
+        // Effects gone — try CAS restoration before falling through to re-run.
+        let manifest_path = cache
+            .dir()
+            .join("artifact-packages")
+            .join(format!("{fp}.json"));
+        match crate::artifact_restore::try_restore_from_cas(
+            &manifest_path,
+            &task.workspace_root,
+            artifact_store.as_ref(),
+        ) {
+            Ok(true) => {
+                eprintln!(
+                    "[rage] {}#{} \u{2713} (restored from artifact cache)",
+                    task.package_name, task.script_name
+                );
+                return Ok(());
+            }
+            Ok(false) => {
+                // CAS miss or partial — fall through and re-run install.
+                eprintln!(
+                    "[rage] {}#{} marker present but effects missing — re-running",
+                    task.package_name, task.script_name
+                );
+                let _ = std::fs::remove_file(&marker);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[rage] {}#{} CAS restore failed ({e}) — re-running",
+                    task.package_name, task.script_name
+                );
+                let _ = std::fs::remove_file(&marker);
+            }
+        }
     }
 
     eprintln!("[rage] {}#{} starting", task.package_name, task.script_name);
@@ -687,6 +750,27 @@ async fn run_root_task_two_phase(
 
 /// Resolve output globs for a task, returning matching file paths.
 /// Skips `node_modules`, `.git`, `target` directories (same as WF glob resolver).
+/// Find the most recent `root-{fp}.done` marker in `cache_dir` and return its `fp`.
+/// Used by the capture hook to key the manifest against the install fingerprint.
+fn find_latest_install_fingerprint(cache_dir: &Path) -> Option<String> {
+    use std::time::SystemTime;
+    let entries = std::fs::read_dir(cache_dir).ok()?;
+    let mut best: Option<(SystemTime, String)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name.strip_prefix("root-") else { continue };
+        let Some(fp) = rest.strip_suffix(".done") else { continue };
+        let mtime = entry.metadata().and_then(|m| m.modified()).ok()?;
+        match &best {
+            None => best = Some((mtime, fp.to_string())),
+            Some((old, _)) if mtime > *old => best = Some((mtime, fp.to_string())),
+            _ => {}
+        }
+    }
+    best.map(|(_, fp)| fp)
+}
+
 /// Spawn a command with piped stdout+stderr; tee to terminal in real time
 /// while also collecting into memory buffers.
 ///
@@ -900,6 +984,18 @@ mod tests {
     use build_graph::dag::build_dag;
     use std::path::PathBuf;
     use workspace_tools::Package;
+
+    /// Test helper: create a no-op plugin + throwaway store for tests that
+    /// don't care about the artifact-capture/restore behaviour.
+    fn test_plugin() -> Arc<dyn plugin::EcosystemPlugin> {
+        Arc::new(plugin_typescript::TypeScriptPlugin::new())
+    }
+
+    #[allow(deprecated)]
+    fn test_store() -> Arc<artifact_store::LocalArtifactStore> {
+        let dir = tempfile::tempdir().unwrap();
+        Arc::new(artifact_store::LocalArtifactStore::new(dir.into_path()))
+    }
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1305,7 +1401,7 @@ mod tests {
         let pkg = mk_pkg("pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
 
-        run_tasks_two_phase(&dag, vec![task.clone()], two_phase.clone())
+        run_tasks_two_phase(&dag, vec![task.clone()], two_phase.clone(), test_plugin(), test_store())
             .await
             .unwrap();
 
@@ -1329,7 +1425,7 @@ mod tests {
             "expected sf-*.entry file"
         );
 
-        run_tasks_two_phase(&dag, vec![task], two_phase)
+        run_tasks_two_phase(&dag, vec![task], two_phase, test_plugin(), test_store())
             .await
             .unwrap();
     }
@@ -1482,7 +1578,7 @@ mod tests {
         let cache = std::sync::Arc::new(
             cache::TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap(),
         );
-        run_tasks_two_phase(&dag, vec![task], cache).await.unwrap();
+        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store()).await.unwrap();
         assert!(
             sentinel.exists(),
             "fake-tsc must have been found via node_modules/.bin"
@@ -1523,7 +1619,7 @@ mod tests {
         let dag = build_dag(vec![pkg]).unwrap();
 
         // First run — cache miss, WF computed from src/index.ts content
-        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone())
+        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone(), test_plugin(), test_store())
             .await
             .unwrap();
 
@@ -1542,7 +1638,7 @@ mod tests {
         std::fs::write(&src_file, b"export const v = 2;").unwrap();
 
         // Second run — must MISS because WF changed (source file content changed)
-        run_tasks_two_phase(&dag, vec![task], cache).await.unwrap();
+        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store()).await.unwrap();
 
         let wf_files_after_second: Vec<_> = std::fs::read_dir(cache_dir.path())
             .unwrap()
@@ -1609,7 +1705,7 @@ mod tests {
         let dag = build_dag(vec![pkg_core, pkg_utils]).unwrap();
 
         // First run: utils runs (cache miss) — WF includes core's ABI fp
-        run_tasks_two_phase(&dag, vec![utils_task.clone()], cache.clone())
+        run_tasks_two_phase(&dag, vec![utils_task.clone()], cache.clone(), test_plugin(), test_store())
             .await
             .unwrap();
 
@@ -1623,7 +1719,7 @@ mod tests {
 
         // utils runs AGAIN with the same core ABI fingerprint →
         // same WF → cache HIT → printed as "(cached, two-phase)"
-        run_tasks_two_phase(&dag, vec![utils_task], cache.clone())
+        run_tasks_two_phase(&dag, vec![utils_task], cache.clone(), test_plugin(), test_store())
             .await
             .unwrap();
 
@@ -1683,7 +1779,7 @@ mod tests {
         let pkg = mk_pkg("ts-lib", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
 
-        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone())
+        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone(), test_plugin(), test_store())
             .await
             .unwrap();
 
@@ -1749,7 +1845,7 @@ mod tests {
         let dag = build_dag(vec![pkg]).unwrap();
 
         // First run — executes task, captures output.
-        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone())
+        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone(), test_plugin(), test_store())
             .await
             .unwrap();
 
@@ -1776,7 +1872,7 @@ mod tests {
         assert_eq!(stored.exit_code, 0);
 
         // Second run — should be a cache hit with replayed output.
-        run_tasks_two_phase(&dag, vec![task], cache.clone())
+        run_tasks_two_phase(&dag, vec![task], cache.clone(), test_plugin(), test_store())
             .await
             .unwrap();
     }

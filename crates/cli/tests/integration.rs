@@ -835,7 +835,7 @@ fn install_pnpm_shim(bin_dir: &std::path::Path) -> std::path::PathBuf {
     let shim = bin_dir.join("pnpm");
     let log = bin_dir.join("pnpm.log");
     let script = format!(
-        "#!/bin/sh\necho FAKE-PNPM \"$@\" >> '{}'\necho INSTALL-RAN\nexit 0\n",
+        "#!/bin/sh\necho FAKE-PNPM \"$@\" >> '{}'\n# Create a stub node_modules so verify_install_effects returns true\nmkdir -p \"${{PWD}}/node_modules/.bin\"\ntouch \"${{PWD}}/node_modules/.bin/.fake-install\"\necho INSTALL-RAN\nexit 0\n",
         log.display()
     );
     std::fs::write(&shim, script).unwrap();
@@ -1027,4 +1027,126 @@ fn js_task_path_includes_node_modules_bin() {
         rts[0].env_hash_inputs,
         vec![("NODE_VERSION".to_string(), "18.20.4".to_string())]
     );
+}
+
+// ── Observation-driven artifact cache — Plan B e2e integration tests ──────────
+// These tests require the real sandbox dylib + a real pnpm workspace at
+// /tmp/rage-symlink-poc/pnpm-test. They are marked #[ignore] and must be
+// run manually: cargo test --test integration --ignored --nocapture
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore]
+async fn pnpm_workspace_capture_writes_manifest() {
+    use std::process::Command;
+    let ws = std::path::Path::new("/tmp/rage-symlink-poc/pnpm-test");
+    if !ws.join("node_modules").exists() {
+        eprintln!("skip: pnpm fixture not present at {ws:?}");
+        return;
+    }
+    let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("target/debug/rage");
+    assert!(bin.exists(), "build rage first: cargo build -p rage-cli");
+    let status = Command::new(&bin)
+        .args(["run", "build"])
+        .current_dir(ws)
+        .status()
+        .unwrap();
+    assert!(status.success(), "rage run build failed");
+
+    let rage_home = std::env::var("RAGE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+                .join(".rage")
+        });
+    let cache_root = rage_home.join("cache");
+    let any = walkdir::WalkDir::new(&cache_root)
+        .into_iter()
+        .flatten()
+        .any(|e| {
+            let s = e.path().to_string_lossy().to_string();
+            s.contains("/artifact-packages/") && s.ends_with(".json")
+        });
+    assert!(any, "no artifact-packages/<fp>.json manifest written");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore]
+async fn pnpm_second_run_restores_from_cas_after_node_modules_wipe() {
+    use std::process::Command;
+    let ws = std::path::Path::new("/tmp/rage-symlink-poc/pnpm-test");
+    if !ws.join("node_modules").exists() {
+        eprintln!("skip: pnpm fixture not present at {ws:?}");
+        return;
+    }
+    let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("target/debug/rage");
+    assert!(bin.exists(), "build rage first");
+
+    // First run: populates the CAS + writes the manifest
+    let s1 = Command::new(&bin)
+        .args(["run", "build"])
+        .current_dir(ws)
+        .status()
+        .unwrap();
+    assert!(s1.success(), "first run failed");
+
+    // Wipe node_modules to simulate a fresh CI machine.
+    let nm = ws.join("node_modules");
+    let _ = std::fs::remove_dir_all(&nm);
+    assert!(!nm.exists());
+
+    // Second run: must restore via CAS, not re-run pnpm install.
+    let out = Command::new(&bin)
+        .args(["run", "build"])
+        .current_dir(ws)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    println!("--- second-run stderr ---\n{stderr}");
+    assert!(out.status.success(), "second run failed");
+
+    assert!(
+        stderr.contains("(restored from artifact cache)"),
+        "expected restoration log line, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("workspace#install starting"),
+        "install should not have been re-executed"
+    );
+
+    // node_modules should exist with at least one restored package
+    assert!(nm.exists(), "node_modules must be restored");
+    assert!(
+        std::fs::read_dir(&nm).unwrap().next().is_some(),
+        "node_modules must be non-empty"
+    );
+
+    // If the fixture has any scoped package, ensure its @scope/name layout is preserved.
+    let mut found_scoped = false;
+    for entry in std::fs::read_dir(&nm).unwrap().flatten() {
+        let name = entry.file_name();
+        let n = name.to_string_lossy();
+        if n.starts_with('@') {
+            for sub in std::fs::read_dir(entry.path()).unwrap().flatten() {
+                assert!(sub.path().is_dir(), "scoped pkg {sub:?} must be a directory");
+                found_scoped = true;
+            }
+        }
+    }
+    if !found_scoped {
+        eprintln!("note: pnpm fixture has no scoped packages — scoped layout assertion skipped");
+    }
 }

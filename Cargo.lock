@@ -2812,6 +2812,7 @@ name = "rage-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "artifact-store",
  "build-graph",
  "cache",
  "clap",
@@ -2824,6 +2825,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "walkdir",
  "webbrowser",
  "workspace-tools",
 ]
@@ -3182,6 +3184,7 @@ name = "scheduler"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "artifact-store",
  "blake3",
  "build-graph",
  "cache",
