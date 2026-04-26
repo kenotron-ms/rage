@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rage — Market Strategy Brief</title>
+  <style>
+    :root {
+      --bg:      #0b0b0b;
+      --bg2:     #131313;
+      --bg3:     #1a1a1a;
+      --border:  #222;
+      --border2: #2e2e2e;
+      --accent:  #e8622e;
+      --accent2: #f5a623;
+      --text:    #e4e4e4;
+      --muted:   #777;
+      --faint:   #3a3a3a;
+      --green:   #4ade80;
+      --yellow:  #fbbf24;
+      --red:     #f87171;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+    a { color: var(--accent); text-decoration: none; }
+
+    /* ─── LAYOUT ─────────────────────────────── */
+    .wrap {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 0 60px;
+    }
+    .section {
+      padding: 72px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .section:last-child { border-bottom: none; }
+    .label {
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: .22em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 20px;
+    }
+    h2 {
+      font-size: 36px;
+      font-weight: 900;
+      letter-spacing: -1.2px;
+      line-height: 1.15;
+      margin-bottom: 14px;
+    }
+    h3 {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .sub {
+      font-size: 15px;
+      color: var(--muted);
+      max-width: 600px;
+      line-height: 1.7;
+    }
+
+    /* ─── HEADER ─────────────────────────────── */
+    .header {
+      padding: 72px 0 56px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 40px;
+    }
+    .wordmark {
+      font-size: 80px;
+      font-weight: 900;
+      letter-spacing: -5px;
+      line-height: 1;
+      background: linear-gradient(128deg, var(--accent) 0%, var(--accent2) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .wordmark-sub {
+      font-size: 12px;
+      letter-spacing: .2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-top: 10px;
+    }
+    .header-meta {
+      text-align: right;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 2;
+    }
+    .badge {
+      display: inline-block;
+      background: var(--accent);
+      color: #fff;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      padding: 3px 9px;
+      border-radius: 3px;
+      margin-bottom: 10px;
+    }
+
+    /* ─── OPPORTUNITY ────────────────────────── */
+    .big-quote {
+      font-size: 30px;
+      font-weight: 800;
+      letter-spacing: -.8px;
+      line-height: 1.25;
+      max-width: 780px;
+      margin-bottom: 40px;
+    }
+    .big-quote em { color: var(--accent); font-style: normal; }
+
+    .three-up {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+    .insight-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 28px 24px;
+      position: relative;
+      overflow: hidden;
+    }
+    .insight-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+    }
+    .insight-num {
+      font-size: 52px;
+      font-weight: 900;
+      color: var(--faint);
+      line-height: 1;
+      margin-bottom: 16px;
+      letter-spacing: -3px;
+    }
+    .insight-card h3 { font-size: 15px; margin-bottom: 10px; }
+    .insight-card p { font-size: 13px; color: var(--muted); max-width: none; }
+
+    /* ─── MATRIX ─────────────────────────────── */
+    .matrix-layout {
+      display: flex;
+      gap: 48px;
+      align-items: flex-start;
+    }
+    .matrix-svg-wrap {
+      flex: 0 0 auto;
+    }
+    .matrix-side {
+      flex: 1;
+      padding-top: 12px;
+    }
+    .legend-list { list-style: none; margin-top: 24px; }
+    .legend-list li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .legend-list li:last-child { border-bottom: none; }
+    .legend-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .legend-dot.rage { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    .legend-dot.bazel  { background: #60a5fa; }
+    .legend-dot.buck2  { background: #818cf8; }
+    .legend-dot.aspect { background: #34d399; }
+    .legend-dot.nx     { background: #e879f9; }
+    .legend-dot.lage   { background: #94a3b8; }
+    .legend-dot.turbo  { background: #fb923c; }
+
+    .callout-box {
+      background: rgba(232, 98, 46, .08);
+      border: 1px solid rgba(232, 98, 46, .25);
+      border-radius: 8px;
+      padding: 20px;
+      margin-top: 28px;
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .callout-box strong { color: var(--accent); }
+
+    /* ─── COMPETITIVE TABLE ──────────────────── */
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    thead th {
+      background: var(--bg2);
+      padding: 12px 16px;
+      text-align: left;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    tbody td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: var(--bg2); }
+    .tool-cell { font-weight: 700; color: var(--text); font-size: 14px; }
+    .tool-cell small { display: block; font-weight: 400; font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .rage-row td { background: rgba(232, 98, 46, .05); }
+    .rage-row .tool-cell { color: var(--accent); }
+    .rage-row:hover td { background: rgba(232, 98, 46, .09) !important; }
+    .yes { color: var(--green); font-weight: 600; }
+    .no  { color: var(--red);   font-weight: 600; }
+    .partial { color: var(--yellow); font-weight: 600; }
+    .verdict {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .06em;
+      white-space: nowrap;
+    }
+    .verdict-threat   { background: rgba(248,113,113,.12); color: #f87171; }
+    .verdict-niche    { background: rgba(251,191,36,.10);  color: #fbbf24; }
+    .verdict-pain     { background: rgba(96,165,250,.10);  color: #60a5fa; }
+    .verdict-stalled  { background: rgba(129,140,248,.10); color: #818cf8; }
+    .verdict-wedge    { background: rgba(52,211,153,.10);  color: #34d399; }
+    .verdict-current  { background: rgba(148,163,184,.10); color: #94a3b8; }
+
+    /* ─── THREE PILLARS ──────────────────────── */
+    .pillars {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin-top: 36px;
+    }
+    .pillar {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 32px 28px;
+    }
+    .pillar-icon {
+      font-size: 28px;
+      margin-bottom: 20px;
+      display: block;
+    }
+    .pillar h3 {
+      font-size: 17px;
+      margin-bottom: 12px;
+      line-height: 1.3;
+    }
+    .pillar p { font-size: 13px; color: var(--muted); max-width: none; }
+    .pillar .counter {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+      color: var(--faint);
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+    .pillar .counter em { color: var(--yellow); font-style: normal; }
+
+    /* ─── HONEST SECTION ─────────────────────── */
+    .honest-cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 40px;
+      margin-top: 36px;
+    }
+    .honest-col {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .honest-col-head {
+      padding: 16px 24px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      border-bottom: 1px solid var(--border);
+    }
+    .honest-col-head.built  { color: var(--green);  background: rgba(74,222,128,.06); }
+    .honest-col-head.future { color: var(--yellow); background: rgba(251,191,36,.06); }
+    .honest-items { list-style: none; }
+    .honest-items li {
+      display: flex;
+      gap: 14px;
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      align-items: flex-start;
+    }
+    .honest-items li:last-child { border-bottom: none; }
+    .hi-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      margin-top: 5px;
+      flex-shrink: 0;
+    }
+    .hi-dot.g { background: var(--green); }
+    .hi-dot.y { background: var(--yellow); }
+    .hi-title { color: var(--text); font-weight: 600; margin-bottom: 2px; font-size: 13px; }
+    .hi-note  { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+    /* ─── GATES / ROADMAP ────────────────────── */
+    .gates-wrap {
+      margin-top: 48px;
+      position: relative;
+    }
+    .gates-track {
+      display: flex;
+      position: relative;
+    }
+    .gates-track::before {
+      content: '';
+      position: absolute;
+      top: 36px; left: 80px; right: 80px;
+      height: 2px;
+      background: var(--border2);
+    }
+    .gate {
+      flex: 1;
+      text-align: center;
+      padding: 0 12px;
+    }
+    .gate-node {
+      width: 72px; height: 72px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 18px;
+      font-size: 22px;
+      font-weight: 900;
+      border: 2px solid var(--border2);
+      background: var(--bg2);
+      position: relative;
+      z-index: 1;
+      color: var(--faint);
+    }
+    .gate.now .gate-node {
+      border-color: var(--accent);
+      background: rgba(232,98,46,.12);
+      color: var(--accent);
+      box-shadow: 0 0 20px rgba(232,98,46,.2);
+    }
+    .gate.q3 .gate-node  { border-color: var(--yellow); color: var(--yellow); background: rgba(251,191,36,.08); }
+    .gate.q4 .gate-node  { border-color: #60a5fa;       color: #60a5fa;       background: rgba(96,165,250,.08); }
+    .gate.sota .gate-node{ border-color: var(--green);  color: var(--green);  background: rgba(74,222,128,.08); }
+
+    .gate-period {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .gate.now .gate-period  { color: var(--accent); }
+    .gate.q3 .gate-period   { color: var(--yellow); }
+    .gate.q4 .gate-period   { color: #60a5fa; }
+    .gate.sota .gate-period { color: var(--green); }
+
+    .gate-name {
+      font-size: 16px;
+      font-weight: 800;
+      margin-bottom: 6px;
+      letter-spacing: -.3px;
+    }
+    .gate-claim {
+      font-size: 12px;
+      font-weight: 600;
+      font-style: italic;
+      margin-bottom: 10px;
+      color: var(--muted);
+    }
+    .gate-bullets {
+      list-style: none;
+      font-size: 12px;
+      color: var(--muted);
+      text-align: left;
+      display: inline-block;
+    }
+    .gate-bullets li::before { content: '·  '; color: var(--faint); }
+
+    /* ─── BRAND ──────────────────────────────── */
+    .brand-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+      margin-top: 36px;
+    }
+    .tagline-card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 28px;
+    }
+    .tagline-card.pick {
+      border-color: var(--accent);
+      background: rgba(232,98,46,.05);
+    }
+    .pick-badge {
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: .2em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 12px;
+      display: block;
+    }
+    .tagline-text {
+      font-size: 22px;
+      font-weight: 800;
+      line-height: 1.25;
+      letter-spacing: -.4px;
+      margin-bottom: 10px;
+    }
+    .tagline-use {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    /* ─── COE PREP ───────────────────────────── */
+    details {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    summary {
+      padding: 16px 22px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--yellow);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      list-style: none;
+      user-select: none;
+    }
+    summary::-webkit-details-marker { display: none; }
+    summary::before {
+      content: '▶';
+      font-size: 9px;
+      color: var(--faint);
+      transition: transform .15s;
+    }
+    details[open] summary::before { transform: rotate(90deg); }
+    .coe-answer {
+      padding: 0 22px 18px 40px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    /* ─── FOOTER ─────────────────────────────── */
+    .footer {
+      padding: 32px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--faint);
+      font-size: 11px;
+    }
+    .footer span { color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <!-- ══ HEADER ══════════════════════════════════════════════════════════ -->
+  <header class="header">
+    <div>
+      <div class="wordmark">rage</div>
+      <div class="wordmark-sub">Build System · Market Strategy Brief</div>
+    </div>
+    <div class="header-meta">
+      <div class="badge">Draft</div>
+      <div>CMO · CTO Synthesis</div>
+      <div>April 2026</div>
+      <div style="margin-top:8px; color: var(--faint)">Phase 11 complete · 189 tests · 12 crates</div>
+    </div>
+  </header>
+
+  <!-- ══ 01 · THE OPPORTUNITY ════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="label">01 · The Opportunity</div>
+    <div class="big-quote">
+      Every JS build tool's cache is <em>lying to you</em>.<br>
+      You declared the inputs. You trusted they were right.<br>
+      rage <em>observes</em> them instead.
+    </div>
+
+    <div class="three-up">
+      <div class="insight-card">
+        <div class="insight-num">01</div>
+        <h3>The cache confidence gap</h3>
+        <p>Turborepo, Nx, and lage all cache based on declared input lists in config files. When those declarations drift from reality — and they do — you get stale outputs. Silently. rage's sandbox observes what files a build actually touches, then fingerprints those. You can't misconfigure what you don't configure.</p>
+      </div>
+      <div class="insight-card">
+        <div class="insight-num">02</div>
+        <h3>Bazel correctness is real but brutal</h3>
+        <p>Bazel's sandbox model solves this problem — but it costs you 2–4 months of ramp-up, BUILD file maintenance, Starlark mastery, and a full-time build engineer. The insight isn't "Bazel is wrong." It's "nobody has made Bazel's correctness model accessible to JS developers without the BUILD tax."</p>
+      </div>
+      <div class="insight-card">
+        <div class="insight-num">03</div>
+        <h3>The quadrant is genuinely empty</h3>
+        <p>Simple + Correct does not exist in this market. Turborepo owns Simple + Trust-me. Bazel/Buck2 own Complex + Correct. rage targets the top-right quadrant that no tool has claimed. That's the white space.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 02 · POSITIONING MATRIX ═════════════════════════════════════════ -->
+  <section class="section">
+    <div class="label">02 · Market Positioning</div>
+    <h2>Where rage lives in the market</h2>
+
+    <div class="matrix-layout">
+      <div class="matrix-svg-wrap">
+        <svg width="500" height="420" viewBox="0 0 500 420" xmlns="http://www.w3.org/2000/svg" class="matrix-svg">
+          <defs>
+            <marker id="arr" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+              <path d="M0,0 L6,3 L0,6 Z" fill="#333" />
+            </marker>
+            <filter id="glow">
+              <feGaussianBlur stdDeviation="3" result="blur"/>
+              <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+
+          <!-- Quadrant backgrounds -->
+          <rect x="55" y="22" width="195" height="190" fill="#1a1a1a" rx="2"/>
+          <rect x="250" y="22" width="210" height="190" fill="rgba(232,98,46,0.04)" rx="2"/>
+          <rect x="55" y="212" width="195" height="190" fill="#111" rx="2"/>
+          <rect x="250" y="212" width="210" height="190" fill="#141414" rx="2"/>
+
+          <!-- Quadrant border lines -->
+          <line x1="55" y1="212" x2="460" y2="212" stroke="#2a2a2a" stroke-width="1" stroke-dasharray="4,4"/>
+          <line x1="252" y1="22"  x2="252" y2="402"  stroke="#2a2a2a" stroke-width="1" stroke-dasharray="4,4"/>
+
+          <!-- Outer frame -->
+          <rect x="55" y="22" width="405" height="380" fill="none" stroke="#2a2a2a" stroke-width="1" rx="2"/>
+
+          <!-- Quadrant labels -->
+          <text x="152" y="46" text-anchor="middle" fill="#2e2e2e" font-size="9" font-weight="700" letter-spacing="1.5" font-family="system-ui">COMPLEX + CORRECT</text>
+          <text x="355" y="46" text-anchor="middle" fill="rgba(232,98,46,0.4)" font-size="9" font-weight="700" letter-spacing="1.5" font-family="system-ui">SIMPLE + CORRECT ★</text>
+          <text x="152" y="395" text-anchor="middle" fill="#252525" font-size="9" font-weight="700" letter-spacing="1.5" font-family="system-ui">COMPLEX + TRUST-ME</text>
+          <text x="355" y="395" text-anchor="middle" fill="#2e2e2e" font-size="9" font-weight="700" letter-spacing="1.5" font-family="system-ui">SIMPLE + TRUST-ME</text>
+
+          <!-- Y-axis label -->
+          <text x="18" y="212" text-anchor="middle" fill="#444" font-size="9" font-weight="700" letter-spacing="1.2" font-family="system-ui" transform="rotate(-90,18,212)">CACHE CORRECTNESS</text>
+          <text x="18" y="80"  text-anchor="middle" fill="#3a3a3a" font-size="8" font-family="system-ui" transform="rotate(-90,18,80)">OBSERVED</text>
+          <text x="18" y="340" text-anchor="middle" fill="#3a3a3a" font-size="8" font-family="system-ui" transform="rotate(-90,18,340)">DECLARED</text>
+
+          <!-- X-axis label -->
+          <text x="257" y="416" text-anchor="middle" fill="#444" font-size="9" font-weight="700" letter-spacing="1.2" font-family="system-ui">DEVELOPER EXPERIENCE</text>
+          <text x="80"  y="416" text-anchor="middle" fill="#3a3a3a" font-size="8" font-family="system-ui">HIGH OVERHEAD</text>
+          <text x="435" y="416" text-anchor="middle" fill="#3a3a3a" font-size="8" font-family="system-ui">LOW OVERHEAD</text>
+
+          <!-- ── COMPETITOR DOTS ── -->
+
+          <!-- Bazel: complex, correct → top-left zone -->
+          <circle cx="100" cy="72"  r="7" fill="#60a5fa" opacity=".85"/>
+          <text x="114" y="70"  fill="#60a5fa" font-size="11" font-weight="700" font-family="system-ui">Bazel</text>
+          <text x="114" y="82"  fill="#444"    font-size="10" font-family="system-ui">BUILD files, high overhead</text>
+
+          <!-- Buck2: complex-ish, correct -->
+          <circle cx="118" cy="98"  r="6" fill="#818cf8" opacity=".85"/>
+          <text x="130" y="96"  fill="#818cf8" font-size="11" font-weight="700" font-family="system-ui">Buck2</text>
+          <text x="130" y="108" fill="#444"    font-size="10" font-family="system-ui">Starlark, Meta-only traction</text>
+
+          <!-- Aspect Build: complex, medium correct -->
+          <circle cx="148" cy="178" r="6" fill="#34d399" opacity=".85"/>
+          <text x="160" y="176" fill="#34d399" font-size="11" font-weight="700" font-family="system-ui">Aspect Build</text>
+          <text x="160" y="188" fill="#444"    font-size="10" font-family="system-ui">Bazel wrapper + consulting</text>
+
+          <!-- Nx: moderate simple, low correct -->
+          <circle cx="306" cy="314" r="7" fill="#e879f9" opacity=".85"/>
+          <text x="318" y="312" fill="#e879f9" font-size="11" font-weight="700" font-family="system-ui">Nx</text>
+          <text x="318" y="324" fill="#444"    font-size="10" font-family="system-ui">Nx Cloud lock-in, complex</text>
+
+          <!-- lage: simple, trust-me -->
+          <circle cx="352" cy="338" r="6" fill="#94a3b8" opacity=".85"/>
+          <text x="362" y="338" fill="#94a3b8" font-size="11" font-weight="700" font-family="system-ui">lage</text>
+          <text x="362" y="350" fill="#444"    font-size="10" font-family="system-ui">Predecessor; JS, no sandbox</text>
+
+          <!-- Turborepo: very simple, trust-me -->
+          <circle cx="408" cy="350" r="7" fill="#fb923c" opacity=".85"/>
+          <text x="418" y="340" fill="#fb923c" font-size="11" font-weight="700" font-family="system-ui">Turborepo</text>
+          <text x="418" y="352" fill="#444"    font-size="10" font-family="system-ui">Simple, fastest growing</text>
+
+          <!-- ── RAGE TARGET ── -->
+          <!-- Glow ring -->
+          <circle cx="390" cy="72" r="22" fill="none" stroke="rgba(232,98,46,0.18)" stroke-width="12"/>
+          <circle cx="390" cy="72" r="14" fill="none" stroke="rgba(232,98,46,0.35)" stroke-width="5"/>
+          <!-- Dot -->
+          <circle cx="390" cy="72" r="9" fill="#e8622e" filter="url(#glow)"/>
+          <!-- Label -->
+          <text x="390" y="52" text-anchor="middle" fill="#e8622e" font-size="13" font-weight="900" font-family="system-ui">rage</text>
+          <text x="390" y="98" text-anchor="middle" fill="rgba(232,98,46,0.7)" font-size="9" font-weight="700" letter-spacing="1" font-family="system-ui">TARGET POSITION</text>
+        </svg>
+      </div>
+
+      <div class="matrix-side">
+        <h3 style="font-size:18px; letter-spacing:-.3px; line-height:1.3; margin-bottom:16px;">Simple <em style="color:var(--accent); font-style:normal">+</em> Correct.<br>This quadrant is unclaimed.</h3>
+        <p class="sub" style="font-size:13px;">Every tool is a tradeoff. Bazel is correct but painful. Turborepo is simple but trusting. Nobody owns the top-right. That's the positioning thesis.</p>
+
+        <ul class="legend-list">
+          <li><span class="legend-dot rage"></span><strong>rage</strong> — Target position. Observation-based cache. Zero BUILD files.</li>
+          <li><span class="legend-dot bazel"></span><strong>Bazel</strong> — Correct, hermetic. Costs months of ramp-up.</li>
+          <li><span class="legend-dot buck2"></span><strong>Buck2</strong> — Rust, fast, Starlark declarations. Adoption stalled.</li>
+          <li><span class="legend-dot aspect"></span><strong>Aspect Build</strong> — Bazel + consulting. You're still on Bazel.</li>
+          <li><span class="legend-dot nx"></span><strong>Nx</strong> — Smartest JS tool. Nx Cloud is a data-plane lock-in.</li>
+          <li><span class="legend-dot lage"></span><strong>lage</strong> — rage's predecessor. Simple, no correctness guarantees.</li>
+          <li><span class="legend-dot turbo"></span><strong>Turborepo</strong> — Fastest growing. Simple, zero hermeticity.</li>
+        </ul>
+
+        <div class="callout-box">
+          <strong>The architectural insight:</strong> rage uses a macOS DYLD sandbox to intercept every filesystem call a build makes. No input declarations needed. The <em>first-run pathset becomes the fingerprint</em> for all future cache lookups. Same correctness model as BuildXL. Zero BUILD file maintenance.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 03 · COMPETITIVE LANDSCAPE ══════════════════════════════════════ -->
+  <section class="section">
+    <div class="label">03 · Competitive Landscape</div>
+    <h2>Head-to-head comparison</h2>
+    <p class="sub" style="margin-bottom:32px;">Honest table. No marketing copy.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:160px">Tool</th>
+            <th>Cache Model</th>
+            <th>Sandbox</th>
+            <th>Remote Cache</th>
+            <th>Languages</th>
+            <th>Setup Time</th>
+            <th>Vendor Lock</th>
+            <th>Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="tool-cell">Turborepo<small>Vercel · Rust</small></td>
+            <td>Input declaration<br><span style="font-size:11px;color:var(--muted)">turbo.json inputs field</span></td>
+            <td class="no">✗ None</td>
+            <td><span class="partial">⚠ Vercel only</span><br><span style="font-size:11px">self-host possible</span></td>
+            <td>JS / TS only</td>
+            <td class="yes">~5 min</td>
+            <td class="partial">Low–Med</td>
+            <td><span class="verdict verdict-threat">Primary threat</span></td>
+          </tr>
+          <tr>
+            <td class="tool-cell">Nx<small>Nrwl · TS</small></td>
+            <td>Input declaration<br><span style="font-size:11px;color:var(--muted)">project.json globs</span></td>
+            <td class="no">✗ None</td>
+            <td><span class="no">✗ Nx Cloud only</span><br><span style="font-size:11px">artifacts through their servers</span></td>
+            <td>JS primary, expanding</td>
+            <td class="no">1–2 weeks</td>
+            <td class="no">High (Nx Cloud)</td>
+            <td><span class="verdict verdict-threat">Enterprise target</span></td>
+          </tr>
+          <tr>
+            <td class="tool-cell">Bazel<small>Google · Java</small></td>
+            <td>BUILD file declaration<br><span style="font-size:11px;color:var(--muted)">Starlark + bzl rules</span></td>
+            <td class="yes">✓ Full sandbox</td>
+            <td><span class="yes">✓ Open protocol</span><br><span style="font-size:11px">EngFlow, BuildBuddy</span></td>
+            <td>Polyglot (painful)</td>
+            <td class="no">2–4 months</td>
+            <td class="partial">Low (OSS)</td>
+            <td><span class="verdict verdict-pain">Painful but correct</span></td>
+          </tr>
+          <tr>
+            <td class="tool-cell">Buck2<small>Meta · Rust</small></td>
+            <td>Starlark declaration<br><span style="font-size:11px;color:var(--muted)">BUCK files</span></td>
+            <td class="yes">✓ Full sandbox</td>
+            <td><span class="partial">⚠ DIY only</span><br><span style="font-size:11px">no managed service</span></td>
+            <td>Polyglot</td>
+            <td class="no">Weeks</td>
+            <td class="partial">Low (OSS)</td>
+            <td><span class="verdict verdict-stalled">Correct, niche</span></td>
+          </tr>
+          <tr>
+            <td class="tool-cell">Aspect Build<small>Commercial Bazel</small></td>
+            <td>BUILD file declaration<br><span style="font-size:11px;color:var(--muted)">Bazel underneath</span></td>
+            <td class="yes">✓ Bazel sandbox</td>
+            <td><span class="yes">✓ Managed</span><br><span style="font-size:11px">self-hosted option</span></td>
+            <td>Polyglot (via Bazel)</td>
+            <td class="no">Months + consulting</td>
+            <td class="no">High + $$$</td>
+            <td><span class="verdict verdict-wedge">Bazel wrapper</span></td>
+          </tr>
+          <tr class="rage-row">
+            <td class="tool-cell">rage<small>Microsoft · Rust · alpha</small></td>
+            <td><strong style="color:var(--green)">Observed (sandbox)</strong><br><span style="font-size:11px;color:var(--muted)">DYLD pathset → blake3 WF→SF</span></td>
+            <td><span class="yes">✓ macOS</span><br><span class="partial" style="font-size:11px">⚠ Linux: planned Q3</span></td>
+            <td><span class="partial">⚠ Planned</span><br><span style="font-size:11px">S3 / Azure Blob (open)</span></td>
+            <td>JS / TS now<br><span style="font-size:11px">Go / Rust: roadmap</span></td>
+            <td class="yes">~10 min</td>
+            <td class="yes">None (open S3)</td>
+            <td><span class="verdict verdict-wedge">Alpha · phase 11/N</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ══ 04 · THREE PILLARS ═══════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="label">04 · Core Messages</div>
+    <h2>The three things we say</h2>
+    <p class="sub">Every developer conversation leads with one of these. Test with engineers before landing on copy.</p>
+
+    <div class="pillars">
+      <div class="pillar">
+        <span class="pillar-icon">🔬</span>
+        <h3>Correct by construction, not by configuration</h3>
+        <p>rage doesn't ask you to declare what files your build reads. It watches what your build actually reads — using a macOS DYLD interposer that hooks every <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;font-size:12px">open()</code>, <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;font-size:12px">stat()</code>, and <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;font-size:12px">rename()</code> syscall. The pathset becomes the fingerprint. A cache hit means every byte your build touched is identical. Not "we think so." Proven.</p>
+        <div class="counter">Differentiator vs: <em>Turborepo · Nx · lage · Buck2</em></div>
+      </div>
+      <div class="pillar">
+        <span class="pillar-icon">🏗️</span>
+        <h3>BuildXL-grade correctness. Zero BUILD files.</h3>
+        <p>BuildXL ships Windows. It solves this exact problem at Microsoft-internal scale using the same two-phase WF→SF fingerprint algorithm rage implements. The difference: BuildXL requires DScript declarations. rage's TypeScript plugin infers declared inputs automatically, and the sandbox validates them. You get the algorithm without the authoring tax.</p>
+        <div class="counter">Differentiator vs: <em>Bazel · Buck2 · Aspect Build</em></div>
+      </div>
+      <div class="pillar">
+        <span class="pillar-icon">⚡</span>
+        <h3>The daemon that stays converged</h3>
+        <p>Nx has a daemon for performance. rage's daemon maintains <em>desired state</em>. Tell it "I want <code style="background:var(--bg3);padding:1px 5px;border-radius:3px;font-size:12px">build</code> to be green across all packages." It converges. File changes trigger reconvergence. It's not a cache proxy — it's a controller with a reconciliation loop. The status page is a live view of convergence state via WebSocket push.</p>
+        <div class="counter">Differentiator vs: <em>Every tool in the market</em></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 05 · HONEST STATUS ═══════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="label">05 · Honest Status</div>
+    <h2>What's real. What's next.</h2>
+    <p class="sub" style="margin-bottom:0">Developers will audit this. Don't oversell. The COE will ask.</p>
+
+    <div class="honest-cols">
+      <div class="honest-col">
+        <div class="honest-col-head built">✓ Built &amp; tested · 189 passing tests</div>
+        <ul class="honest-items">
+          <li>
+            <span class="hi-dot g"></span>
+            <div><div class="hi-title">Two-phase WF→SF cache (BuildXL model)</div><div class="hi-note">blake3 everywhere. Production default since Phase 9. Cache hits are provably correct.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot g"></span>
+            <div><div class="hi-title">macOS DYLD sandbox · observed pathsets</div><div class="hi-note">Real Mach-O <code style="font-size:11px">__DATA,__interpose</code> hooks. Known caveat: system-hardened binaries on macOS 26 (Tahoe) evade injection. Documented. Homebrew bash workaround in place.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot g"></span>
+            <div><div class="hi-title">Daemon with desired-state reconciliation</div><div class="hi-note">Unix socket IPC, reconciler loop, notify-based file watcher, 3-hr idle timeout, four-state model.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot g"></span>
+            <div><div class="hi-title">HTTP + WebSocket status page (<code style="font-size:11px">rage open</code>)</div><div class="hi-note">Axum server, vanilla JS, WS push on state change. Bidirectional — browser can trigger RetryTask.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot g"></span>
+            <div><div class="hi-title">TypeScript ecosystem plugin</div><div class="hi-note">Auto-infers declared inputs, ABI fingerprint from .d.ts outputs. Clean plugin trait for extensions.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot g"></span>
+            <div><div class="hi-title">Git scoping (--since, --affected)</div><div class="hi-note">BFS through reverse dep graph for transitive affected packages. Works.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot g"></span>
+            <div><div class="hi-title">Wave-parallel Tokio execution</div><div class="hi-note"><code style="font-size:11px">unsafe = forbid</code> workspace-wide. MIT/Apache-2.0.</div></div>
+          </li>
+        </ul>
+      </div>
+
+      <div class="honest-col">
+        <div class="honest-col-head future">◷ On the roadmap · not a line of code yet</div>
+        <ul class="honest-items">
+          <li>
+            <span class="hi-dot y"></span>
+            <div><div class="hi-title">Linux eBPF sandbox</div><div class="hi-note">Currently a no-op stub. CI runs on Linux. This is the #1 blocker for claiming CI-readiness. Required before any serious launch.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot y"></span>
+            <div><div class="hi-title">Remote cache (S3 / Azure Blob)</div><div class="hi-note">CacheConfig.backend field exists. Only "local" is wired. Without this, rage is a single-developer optimization, not a team tool.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot y"></span>
+            <div><div class="hi-title">rage why-miss · rage stats · rage env-audit</div><div class="hi-note">CLI subcommands that turn cache debugging from black-box to transparent. Critical for developer trust. Spec exists; zero code.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot y"></span>
+            <div><div class="hi-title">Hub / spoke distributed builds</div><div class="hi-note">Extensive gRPC protobuf design exists. Zero implementation. This is the feature that competes with Nx Cloud's orchestration — control-plane only, data-plane is your storage.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot y"></span>
+            <div><div class="hi-title">Second ecosystem plugin (Go or Rust)</div><div class="hi-note">Plugin trait is ready. workspace-tools is JS-only. "Multi-ecosystem" requires at least two plugins.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot y"></span>
+            <div><div class="hi-title">Benchmarks</div><div class="hi-note">Zero benchmarks anywhere in the codebase. "Fast like BuildXL" is an architectural claim, not a measured result. Cannot claim SOTA without reproducible public benchmarks.</div></div>
+          </li>
+          <li>
+            <span class="hi-dot y"></span>
+            <div><div class="hi-title">ABI fingerprint wired into TwoPhaseCache</div><div class="hi-note">.d.ts early-cutoff is computed by the TypeScript plugin but not connected to cache lookup path. Quick win — wire it.</div></div>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 06 · LAUNCH GATES ════════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="label">06 · Launch Gates</div>
+    <h2>The path to SOTA</h2>
+    <p class="sub">We claim each gate only when the work ships. The COE will hold us to this.</p>
+
+    <div class="gates-wrap">
+      <div class="gates-track">
+
+        <div class="gate now">
+          <div class="gate-node">α</div>
+          <div class="gate-period">Now · Alpha</div>
+          <div class="gate-name">The Correctness Engine</div>
+          <div class="gate-claim">"Here's the architecture. Here's why it matters."</div>
+          <ul class="gate-bullets">
+            <li>macOS + TypeScript monorepos</li>
+            <li>Invite-only / friend-of-team</li>
+            <li>rage.build site goes live</li>
+            <li>Public GitHub + honest README</li>
+            <li>Technical manifesto post (HN)</li>
+          </ul>
+        </div>
+
+        <div class="gate q3">
+          <div class="gate-node">1</div>
+          <div class="gate-period">Q3 2026</div>
+          <div class="gate-name">CI-Ready</div>
+          <div class="gate-claim">"Works where builds actually run."</div>
+          <ul class="gate-bullets">
+            <li>Linux eBPF sandbox ships</li>
+            <li>rage why-miss ships</li>
+            <li>Remote cache (S3/Azure)</li>
+            <li>Lage → rage migration guide</li>
+            <li>GitHub Actions recipe</li>
+          </ul>
+        </div>
+
+        <div class="gate q4">
+          <div class="gate-node">2</div>
+          <div class="gate-period">Q4 2026</div>
+          <div class="gate-name">Team Scale</div>
+          <div class="gate-claim">"Used in production by real teams."</div>
+          <ul class="gate-bullets">
+            <li>Hub / spoke distributed builds</li>
+            <li>Second ecosystem plugin</li>
+            <li>ABI fingerprint early-cutoff live</li>
+            <li>rage stats dashboard</li>
+            <li>3+ public reference customers</li>
+          </ul>
+        </div>
+
+        <div class="gate sota">
+          <div class="gate-node">★</div>
+          <div class="gate-period">Q1 2027</div>
+          <div class="gate-name">SOTA Claim</div>
+          <div class="gate-claim">"The number is there. Reproduce it yourself."</div>
+          <ul class="gate-bullets">
+            <li>Published reproducible benchmarks</li>
+            <li>Polyglot: JS + Go + Rust</li>
+            <li>Open benchmark suite on GitHub</li>
+            <li>Conference talk / write-up</li>
+            <li>rage.build comparison page live</li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 07 · BRAND ══════════════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="label">07 · Brand</div>
+    <h2>What we say in one line</h2>
+    <p class="sub" style="margin-bottom:0">Test these with three engineers before picking one. The launch audience is skeptical HN readers.</p>
+
+    <div class="brand-grid">
+      <div class="tagline-card pick">
+        <span class="pick-badge">✦ Recommended · Launch copy</span>
+        <div class="tagline-text">"Stop trusting your cache.<br>Start verifying it."</div>
+        <div class="tagline-use">Provocative. Names the problem. Works for HN post title, hero headline, conference talk opener. The audience already has the pain — this names it.</div>
+      </div>
+      <div class="tagline-card">
+        <div class="tagline-text">"Build correctness you can prove."</div>
+        <div class="tagline-use">Technical. Credentialed. Use this on the rage.build hero after the launch post lands. Works for developer docs homepage, GitHub tagline.</div>
+      </div>
+      <div class="tagline-card">
+        <div class="tagline-text">"BuildXL correctness.<br>Zero BUILD files."</div>
+        <div class="tagline-use">Credential-forward. Use in the competitive comparison page, Bazel/Buck2 migration landing pages. Best for teams that already evaluated Bazel and said "too much."</div>
+      </div>
+      <div class="tagline-card">
+        <div class="tagline-text">"The build tool that watches."</div>
+        <div class="tagline-use">Evocative. Slightly mysterious. Consider for conference swag, social, sticker. Hints at the sandbox observation model without explaining it — good for curiosity-driven click.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══ 08 · COE PREP ════════════════════════════════════════════════════ -->
+  <section class="section">
+    <div class="label">08 · COE Challenges</div>
+    <h2>The hard questions</h2>
+    <p class="sub" style="margin-bottom:32px;">The skeptic in the room will ask these. Expand each for the prepared answer.</p>
+
+    <details>
+      <summary>⚠ "You're JS-only and macOS-only. Turborepo works everywhere. Why would anyone switch?"</summary>
+      <div class="coe-answer">Correct. That's why we don't claim SOTA today. At Gate 0, rage is an alpha for developers who've hit the "cache lied to me" problem on macOS TypeScript repos. The narrative is "here's the architecture and why it's right" — not "ship it to production now." Gate 1 (Linux sandbox + remote cache) is when we have a serious answer to this question. We should be explicit about this timeline, not defensive about the current state.</div>
+    </details>
+
+    <details>
+      <summary>⚠ "macOS 26 (Tahoe) strips DYLD_INSERT_LIBRARIES from system binaries. Your sandbox story breaks."</summary>
+      <div class="coe-answer">Known and documented in the codebase (sandbox/src/macos.rs). Hardened system binaries on macOS 26+ evade DYLD injection — specifically /bin/sh, /usr/bin/node if system-installed, and similar. Rage works around this by preferring Homebrew-installed interpreters, which are ad-hoc signed and injectable. The limitation: any task that spawns a system-hardened binary loses interposition for that subtree. Affects a subset of builds, not all. The Linux eBPF sandbox (Gate 1) closes this gap cleanly — eBPF doesn't have this limitation. We should document the Tahoe caveat clearly on rage.build.</div>
+    </details>
+
+    <details>
+      <summary>⚠ "No benchmarks. You can't claim 'fast like BuildXL' without numbers."</summary>
+      <div class="coe-answer">100% correct. We don't have benchmarks. We have architectural claims: blake3 hashing, Tokio wave-parallel execution, WF lookup that only hashes declared globs (no sandbox execution on cache hit). These are sound but unmeasured. The SOTA gate (Gate 3, Q1 2027) requires a published, reproducible benchmark suite. Until then, we should not use the word "fastest" or imply performance superiority. The correctness story stands on its own without performance claims.</div>
+    </details>
+
+    <details>
+      <summary>⚠ "Buck2 is also Rust-based and also correct. What's actually different?"</summary>
+      <div class="coe-answer">Buck2 still requires BUILD file declarations (Starlark). You author your inputs. If your declarations drift, your cache drifts. rage observes inputs — no authoring required. That's the fundamental difference. Buck2 also has zero managed remote cache service, tiny community outside Meta, and adoption that's essentially stalled since the 2022 announcement. We're not competing with Buck2 for the same audience — Buck2's users are large polyglot shops that already own BUILD file expertise. rage's users are JS developers who want correctness without the maintenance burden.</div>
+    </details>
+
+    <details>
+      <summary>⚠ "No remote cache means no team workflow. You're a developer toy."</summary>
+      <div class="coe-answer">Yes, until Gate 1. This is the honest answer. The alpha positioning should be "correctness engine for developers evaluating the architecture" not "replace your CI today." The remote cache backend (S3/Azure Blob, open protocol — not a Vercel or Nx lock-in) is the feature that turns rage into a team tool. It's planned and architecturally obvious to implement given the existing TwoPhaseCache abstraction. Gate 1 is the team-readiness milestone. Until then, the target audience is build-system-curious developers and teams doing evaluation, not production deployments.</div>
+    </details>
+
+    <details>
+      <summary>⚠ "Nx already has 20K GitHub stars and enterprise sales. You're late."</summary>
+      <div class="coe-answer">Late to the JS task runner market, yes. Not late to the correctness market — that doesn't exist yet. The positioning isn't "better Nx." It's "the tool that solves the problem Nx can't solve without BUILD file maintenance and vendor lock-in." The lage installed base (existing Microsoft ecosystem users) is the first-mover wedge. From there, the expansion story is teams that hit Nx Cloud pricing friction or want correctness guarantees. We don't need to replace Nx. We need to own the team that evaluated Nx and wanted something more trustworthy.</div>
+    </details>
+  </section>
+
+  <!-- ══ FOOTER ═══════════════════════════════════════════════════════════ -->
+  <footer class="footer">
+    <span>rage · Market Strategy Brief · Draft · April 2026</span>
+    <span>CMO/CTO synthesis · Internal only · Phase 11 complete</span>
+  </footer>
+
+</div>
+</body>
+</html>
