@@ -90,4 +90,14 @@ pub trait EcosystemPlugin: Send + Sync {
     fn infer_root_tasks(&self, _workspace_root: &Path) -> Vec<RootTask> {
         Vec::new()
     }
+
+    /// Returns `true` when the on-disk artifacts left behind by this plugin's
+    /// root task(s) still exist. Callers use this on a cache hit to decide
+    /// whether the cached state is materially valid.
+    ///
+    /// Default returns `true`: ecosystems that have no installable side-effects
+    /// preserve the existing cache-hit behaviour.
+    fn verify_install_effects(&self, _workspace_root: &Path) -> bool {
+        true
+    }
 }

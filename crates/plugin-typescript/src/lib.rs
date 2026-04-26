@@ -3,6 +3,8 @@
 //! Detects packages by `tsconfig.json`. Declares `typecheck` and `build`
 //! tasks. ABI fingerprint hashes `.d.ts` outputs.
 
+pub mod pathset_extractor;
+
 use plugin::{AllowlistEntry, EcosystemPlugin, OutputFile, PluginConfig, TaskDef};
 use std::path::Path;
 
@@ -219,6 +221,14 @@ impl EcosystemPlugin for TypeScriptPlugin {
         // No lockfile found — no install task. (A future heuristic could
         // fall back to package.json#packageManager; that's out of scope.)
         Vec::new()
+    }
+
+    fn verify_install_effects(&self, workspace_root: &std::path::Path) -> bool {
+        let nm = workspace_root.join("node_modules");
+        match std::fs::read_dir(&nm) {
+            Ok(mut iter) => iter.next().is_some(),
+            Err(_) => false,
+        }
     }
 
     fn abi_fingerprint(&self, outputs: &[OutputFile]) -> Option<String> {
@@ -559,5 +569,29 @@ mod tests {
         assert!(patterns.iter().any(|p| p.contains(".nvm")));
         assert!(patterns.iter().any(|p| p.contains(".asdf")));
         assert!(patterns.iter().any(|p| p.contains("mise")));
+    }
+
+    #[test]
+    fn verify_install_effects_true_when_node_modules_present_and_nonempty() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/ms")).unwrap();
+        std::fs::write(dir.path().join("node_modules/ms/index.js"), b"x").unwrap();
+        let p = TypeScriptPlugin::new();
+        assert!(p.verify_install_effects(dir.path()));
+    }
+
+    #[test]
+    fn verify_install_effects_false_when_node_modules_missing() {
+        let dir = tempdir().unwrap();
+        let p = TypeScriptPlugin::new();
+        assert!(!p.verify_install_effects(dir.path()));
+    }
+
+    #[test]
+    fn verify_install_effects_false_when_node_modules_empty() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules")).unwrap();
+        let p = TypeScriptPlugin::new();
+        assert!(!p.verify_install_effects(dir.path()));
     }
 }
