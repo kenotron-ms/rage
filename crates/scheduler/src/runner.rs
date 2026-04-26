@@ -774,6 +774,28 @@ async fn run_root_task_two_phase(
     let elapsed = start.elapsed();
 
     if status.success() {
+        // Capture all node_modules into CAS — blocking but runs once per lockfile change.
+        // Done BEFORE writing the marker so marker only exists when CAS is populated.
+        let ws = task.workspace_root.clone();
+        let fp_for_dir = fp.clone();
+        let cache_dir = cache.dir().to_path_buf();
+        let store_clone = Arc::clone(&artifact_store);
+        let captured = tokio::task::spawn_blocking(move || {
+            let artifact_dir = cache_dir
+                .join("artifact-packages")
+                .join(&fp_for_dir);
+            crate::artifact_capture::capture_all_node_modules(
+                &ws,
+                &artifact_dir,
+                store_clone.as_ref(),
+            )
+            .unwrap_or(0)
+        })
+        .await
+        .unwrap_or(0);
+
+        eprintln!("[rage] artifact cache: {} packages captured", captured);
+
         // Best-effort marker write — cache failures must not break a build.
         let _ = std::fs::write(&marker, b"");
         eprintln!(

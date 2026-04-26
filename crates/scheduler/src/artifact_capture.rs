@@ -130,6 +130,97 @@ fn write_package_entry(path: &Path, artifact: &PackageArtifact) -> std::io::Resu
     std::fs::rename(&tmp, path)
 }
 
+/// Capture EVERY package currently in `workspace_root/node_modules/` into the CAS.
+/// Called once after a successful root install task (yarn/npm/pnpm install).
+/// Runs synchronously in `spawn_blocking` — callers must ensure they are in an async context.
+/// Returns the number of packages captured (newly written or already present in artifact_dir).
+pub fn capture_all_node_modules(
+    workspace_root: &Path,
+    artifact_dir: &Path,
+    store: &LocalArtifactStore,
+) -> std::io::Result<usize> {
+    let nm = workspace_root.join("node_modules");
+    if !nm.is_dir() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(artifact_dir)?;
+
+    let mut captured = 0;
+
+    // Walk top-level entries in node_modules/
+    for entry in std::fs::read_dir(&nm)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden dirs (.bin, .cache, .pnpm, .yarn, etc.)
+        if name_str.starts_with('.') {
+            continue;
+        }
+
+        if name_str.starts_with('@') {
+            // Scoped package — walk one level deeper
+            let scope_dir = entry.path();
+            if !scope_dir.is_dir() {
+                continue;
+            }
+            for inner in std::fs::read_dir(&scope_dir)? {
+                let inner = inner?;
+                let inner_name = inner.file_name();
+                let inner_name_str = inner_name.to_string_lossy();
+                let full_name = format!("{}/{}", name_str, inner_name_str);
+                let pkg_json = inner.path().join("package.json");
+                if let Some(version) = read_version(&pkg_json) {
+                    let pkg_file = artifact_dir.join(package_filename(&full_name, &version));
+                    if !pkg_file.exists() {
+                        let pkg_ref = PathsetPackageRef {
+                            name: full_name,
+                            version,
+                            package_root: inner.path(),
+                        };
+                        if let Ok(artifact) = capture_package(&pkg_ref, store) {
+                            let _ = write_package_entry(&pkg_file, &artifact);
+                            captured += 1;
+                        }
+                    } else {
+                        captured += 1; // already done
+                    }
+                }
+            }
+        } else {
+            // Regular package
+            let pkg_path = entry.path();
+            if !pkg_path.is_dir() {
+                continue;
+            }
+            let pkg_json = pkg_path.join("package.json");
+            if let Some(version) = read_version(&pkg_json) {
+                let pkg_file = artifact_dir.join(package_filename(&name_str, &version));
+                if !pkg_file.exists() {
+                    let pkg_ref = PathsetPackageRef {
+                        name: name_str.to_string(),
+                        version,
+                        package_root: pkg_path,
+                    };
+                    if let Ok(artifact) = capture_package(&pkg_ref, store) {
+                        let _ = write_package_entry(&pkg_file, &artifact);
+                        captured += 1;
+                    }
+                } else {
+                    captured += 1; // already done
+                }
+            }
+        }
+    }
+    Ok(captured)
+}
+
+fn read_version(pkg_json: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(pkg_json).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version")?.as_str().map(|s| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +374,107 @@ mod tests {
         for (_, h) in &artifact.files {
             assert!(store.contains(h));
         }
+    }
+
+    // ── capture_all_node_modules tests (RED) ─────────────────────────────────
+
+    #[test]
+    fn capture_all_node_modules_captures_every_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let store_dir = tmp.path().join("content");
+        let artifact_dir = tmp.path().join("artifact-packages/fp123");
+        let store = LocalArtifactStore::new(&store_dir);
+
+        // Create flat node_modules with 2 packages
+        for pkg in &["ms", "chalk"] {
+            let dir = ws.join("node_modules").join(pkg);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("index.js"), b"// pkg").unwrap();
+            std::fs::write(
+                dir.join("package.json"),
+                format!(r#"{{"name":"{}","version":"1.0.0"}}"#, pkg).as_bytes(),
+            )
+            .unwrap();
+        }
+        // Create scoped package
+        let types_dir = ws.join("node_modules/@types/node");
+        std::fs::create_dir_all(&types_dir).unwrap();
+        std::fs::write(types_dir.join("index.d.ts"), b"// types").unwrap();
+        std::fs::write(
+            types_dir.join("package.json"),
+            br#"{"name":"@types/node","version":"20.0.0"}"#,
+        )
+        .unwrap();
+
+        let count = capture_all_node_modules(ws, &artifact_dir, &store).unwrap();
+
+        assert_eq!(count, 3);
+        assert!(
+            artifact_dir.join("ms@1.0.0.json").exists(),
+            "ms@1.0.0.json must exist"
+        );
+        assert!(
+            artifact_dir.join("chalk@1.0.0.json").exists(),
+            "chalk@1.0.0.json must exist"
+        );
+        assert!(
+            artifact_dir.join("@types+node@20.0.0.json").exists(),
+            "@types+node@20.0.0.json must exist"
+        );
+    }
+
+    #[test]
+    fn capture_all_skips_hidden_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let store = LocalArtifactStore::new(tmp.path().join("content"));
+        let artifact_dir = tmp.path().join("artifact-packages/fp123");
+
+        std::fs::create_dir_all(ws.join("node_modules/.bin")).unwrap();
+        std::fs::create_dir_all(ws.join("node_modules/.cache")).unwrap();
+        // No real package dirs
+
+        let count = capture_all_node_modules(ws, &artifact_dir, &store).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn capture_all_returns_zero_when_no_node_modules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let store = LocalArtifactStore::new(tmp.path().join("content"));
+        let artifact_dir = tmp.path().join("artifact-packages/fp123");
+
+        // No node_modules directory at all
+        let count = capture_all_node_modules(ws, &artifact_dir, &store).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn capture_all_skips_already_captured_packages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let store_dir = tmp.path().join("content");
+        let artifact_dir = tmp.path().join("artifact-packages/fp123");
+        let store = LocalArtifactStore::new(&store_dir);
+
+        // Create one package
+        let ms_dir = ws.join("node_modules/ms");
+        std::fs::create_dir_all(&ms_dir).unwrap();
+        std::fs::write(ms_dir.join("index.js"), b"// ms").unwrap();
+        std::fs::write(
+            ms_dir.join("package.json"),
+            br#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
+
+        // First capture
+        let count1 = capture_all_node_modules(ws, &artifact_dir, &store).unwrap();
+        assert_eq!(count1, 1);
+
+        // Second capture: file already exists, should still return 1 (already done)
+        let count2 = capture_all_node_modules(ws, &artifact_dir, &store).unwrap();
+        assert_eq!(count2, 1);
     }
 }
