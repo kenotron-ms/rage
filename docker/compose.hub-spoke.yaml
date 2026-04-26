@@ -1,0 +1,92 @@
+# rage distributed build test — hub + 2 spokes via Docker Compose.
+#
+# Usage:
+#   docker compose -f docker/compose.hub-spoke.yaml up
+#
+# The hub discovers the lage workspace task graph, starts a gRPC server,
+# writes its address to /shared/rage-hub.json, and dispatches tasks to spokes
+# as they connect.
+#
+# Prereqs: `docker compose -f docker/compose.hub-spoke.yaml build` (takes 2-5 min).
+
+services:
+  hub:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.hub-spoke
+    command:
+      - "hub"
+      - "--workspace"
+      - "/workspace"
+      - "--script"
+      - "build"
+      - "--port"
+      - "9650"
+      - "--addr-file"
+      - "/shared/rage-hub.json"
+    volumes:
+      - type: bind
+        source: /Users/ken/workspace/lage
+        target: /workspace
+        read_only: true
+      - shared:/shared
+      - hub-cache:/root/.rage
+    ports:
+      - "9650:9650"
+    environment:
+      - RAGE_HUB_TOKEN=test-token-abc123
+    healthcheck:
+      test: ["CMD", "rage", "spoke", "--hub-address", "http://127.0.0.1:9650", "--help"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  spoke1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.hub-spoke
+    command:
+      - "spoke"
+      - "--workspace"
+      - "/workspace"
+      - "--addr-file"
+      - "/shared/rage-hub.json"
+    volumes:
+      - type: bind
+        source: /Users/ken/workspace/lage
+        target: /workspace
+        read_only: true
+      - shared:/shared
+      - spoke1-cache:/root/.rage
+    environment:
+      - RAGE_HUB_TOKEN=test-token-abc123
+    depends_on:
+      - hub
+
+  spoke2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.hub-spoke
+    command:
+      - "spoke"
+      - "--workspace"
+      - "/workspace"
+      - "--addr-file"
+      - "/shared/rage-hub.json"
+    volumes:
+      - type: bind
+        source: /Users/ken/workspace/lage
+        target: /workspace
+        read_only: true
+      - shared:/shared
+      - spoke2-cache:/root/.rage
+    environment:
+      - RAGE_HUB_TOKEN=test-token-abc123
+    depends_on:
+      - hub
+
+volumes:
+  shared:
+  hub-cache:
+  spoke1-cache:
+  spoke2-cache:

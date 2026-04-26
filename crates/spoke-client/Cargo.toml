@@ -1,0 +1,27 @@
+[package]
+name = "spoke-client"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Tonic generates code with unsafe blocks; allow it in this crate only.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+tonic = { version = "0.12", features = ["transport", "codegen"] }
+prost = "0.13"
+tokio = { workspace = true }
+tokio-stream = "0.1"
+anyhow = "1"
+hostname = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tonic-build = "0.12"

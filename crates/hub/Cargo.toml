@@ -1,0 +1,32 @@
+[package]
+name = "hub"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Tonic generates code with unsafe blocks; allow it in this crate only.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+tonic = { version = "0.12", features = ["transport", "codegen"] }
+prost = "0.13"
+tokio = { workspace = true }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-stream = { version = "0.1", features = ["net"] }
+async-stream = "0.3"
+futures-core = "0.3"
+futures-util = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+tonic-build = "0.12"

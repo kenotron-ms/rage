@@ -27,6 +27,9 @@ cache = { path = "../cache", features = ["s3", "azure"] }
 scoping = { path = "../scoping" }
 tokio = { version = "1", features = ["full"] }
 daemon = { path = "../daemon" }
+hub = { path = "../hub" }
+spoke-client = { path = "../spoke-client" }
+hostname = "0.4"
 serde_json = "1"
 webbrowser = "1"
 

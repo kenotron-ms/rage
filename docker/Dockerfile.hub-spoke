@@ -1,0 +1,30 @@
+# Multi-stage Linux build for rage hub/spoke Docker integration test.
+# Stage 1: Compile rage on Linux (inside container = Linux binary).
+# Stage 2: Minimal runtime image.
+
+FROM rust:1.91-bookworm AS builder
+
+WORKDIR /build
+
+# Install protoc (required for tonic proto compilation)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy source
+COPY . .
+
+# Build the rage CLI in release mode
+RUN cargo build --release -p rage-cli 2>&1
+
+# ─── Runtime stage ────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates bash && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/rage /usr/local/bin/rage
+
+ENTRYPOINT ["/usr/local/bin/rage"]
+CMD ["--help"]

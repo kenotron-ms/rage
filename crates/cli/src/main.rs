@@ -108,6 +108,63 @@ enum Command {
         /// Positional workspace path (overrides --workspace).
         workspace_pos: Option<PathBuf>,
     },
+
+    /// Start rage as a distributed build hub (CI coordinator).
+    ///
+    /// Discovers the workspace task graph, starts a gRPC server, and dispatches
+    /// tasks to spoke workers as they connect. Writes its address to --addr-file
+    /// so spokes can discover it.
+    Hub {
+        /// Workspace root (defaults to cwd).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Positional workspace path (overrides --workspace).
+        workspace_pos: Option<PathBuf>,
+
+        /// Script to run across the workspace (e.g. `build`).
+        #[arg(long, default_value = "build")]
+        script: String,
+
+        /// gRPC port to listen on.
+        #[arg(long, default_value = "9650")]
+        port: u16,
+
+        /// File to write hub address to for spoke discovery.
+        /// In Docker Compose: `/shared/rage-hub.json`
+        #[arg(long)]
+        addr_file: Option<PathBuf>,
+
+        /// Bearer token for spoke authentication. Defaults to RAGE_HUB_TOKEN env var.
+        #[arg(long)]
+        token: Option<String>,
+    },
+
+    /// Start rage as a distributed build spoke (worker connecting to a hub).
+    ///
+    /// Connects to the hub, subscribes to tasks, executes them, and reports
+    /// results back to the hub until the build completes.
+    Spoke {
+        /// Workspace root where tasks execute.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+
+        /// Positional workspace path (overrides --workspace).
+        workspace_pos: Option<PathBuf>,
+
+        /// File to read hub address from (written by `rage hub --addr-file`).
+        /// In Docker Compose: `/shared/rage-hub.json`
+        #[arg(long)]
+        addr_file: Option<PathBuf>,
+
+        /// Direct hub address (overrides --addr-file). E.g. `http://hub:9650`
+        #[arg(long)]
+        hub_address: Option<String>,
+
+        /// Bearer token for hub authentication. Defaults to RAGE_HUB_TOKEN env var.
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -170,6 +227,29 @@ async fn main() -> Result<()> {
         } => {
             let root = resolve_workspace(workspace_pos, workspace);
             cmd_why_miss(&root, &package, &script)
+        }
+
+        Command::Hub {
+            workspace,
+            workspace_pos,
+            script,
+            port,
+            addr_file,
+            token,
+        } => {
+            let root = resolve_workspace(workspace_pos, workspace);
+            cmd_hub(&root, &script, port, addr_file, token).await
+        }
+
+        Command::Spoke {
+            workspace,
+            workspace_pos,
+            addr_file,
+            hub_address,
+            token,
+        } => {
+            let root = resolve_workspace(workspace_pos, workspace);
+            cmd_spoke(&root, addr_file, hub_address, token).await
         }
     }
 }
@@ -575,4 +655,127 @@ fn print_why_miss_diff(
         eprintln!("  (no differences found between the two snapshots)");
         eprintln!("  Note: the cache miss may be due to pathset changes (sandbox-observed reads)");
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hub mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn cmd_hub(
+    workspace: &Path,
+    script: &str,
+    port: u16,
+    addr_file: Option<PathBuf>,
+    token_arg: Option<String>,
+) -> Result<()> {
+    use hub::dag::TaskNode;
+    use hub::rendezvous::{write_hub_addr, HubAddr};
+    use hub::server::HubServer;
+    use std::net::SocketAddr;
+
+    let token = token_arg
+        .or_else(|| std::env::var("RAGE_HUB_TOKEN").ok())
+        .unwrap_or_else(|| "rage-default-token".to_string());
+
+    let build_id = format!("build-{}", std::process::id());
+
+    // Discover packages
+    let packages = workspace_tools::discover_packages(workspace)
+        .context("discovering workspace packages")?;
+    let resolved = workspace_tools::build_package_graph(packages)
+        .context("resolving package graph")?;
+
+    // Build task nodes for hub
+    let mut task_nodes: Vec<TaskNode> = Vec::new();
+    for pkg in &resolved {
+        let pkg_json = pkg.path.join("package.json");
+        let scripts = std::fs::read_to_string(&pkg_json)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("scripts").and_then(|s| s.as_object().cloned()));
+
+        let Some(scripts) = scripts else { continue };
+        let Some(cmd) = scripts.get(script).and_then(|c| c.as_str()) else { continue };
+
+        let task_id = format!("{}#{}", pkg.name, script);
+        let pkg_path = pkg.path.strip_prefix(workspace)
+            .unwrap_or(&pkg.path)
+            .to_string_lossy()
+            .to_string();
+
+        let depends_on: Vec<String> = pkg.dependencies.iter()
+            .map(|dep| format!("{}#{}", dep, script))
+            .collect();
+
+        task_nodes.push(TaskNode {
+            task_id,
+            package_name: pkg.name.clone(),
+            script_name: script.to_string(),
+            command: cmd.to_string(),
+            package_path: pkg_path,
+            depends_on,
+        });
+    }
+
+    if task_nodes.is_empty() {
+        anyhow::bail!("No packages have a '{}' script", script);
+    }
+
+    eprintln!("[rage-hub] {} tasks to distribute across spokes", task_nodes.len());
+
+    let hub = HubServer::new(task_nodes, token.clone(), build_id.clone());
+
+    // Write rendezvous file if requested
+    if let Some(file) = &addr_file {
+        let hostname_str = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let addr_str = format!("http://{}:{}", hostname_str, port);
+        let hub_addr = HubAddr {
+            addr: addr_str.clone(),
+            token: token.clone(),
+            build_id: build_id.clone(),
+        };
+        write_hub_addr(file, &hub_addr)?;
+        eprintln!("[rage-hub] rendezvous written to {}", file.display());
+        eprintln!("[rage-hub] spokes connect to: {}", addr_str);
+    }
+
+    let bind: SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    hub.serve(bind).await
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spoke mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn cmd_spoke(
+    workspace: &Path,
+    addr_file: Option<PathBuf>,
+    hub_address: Option<String>,
+    token_arg: Option<String>,
+) -> Result<()> {
+    use hub::rendezvous::read_hub_addr_with_timeout;
+
+    let token = token_arg
+        .or_else(|| std::env::var("RAGE_HUB_TOKEN").ok())
+        .unwrap_or_else(|| "rage-default-token".to_string());
+
+    let hub_addr_str = if let Some(addr) = hub_address {
+        addr
+    } else if let Some(file) = addr_file
+        .or_else(|| std::env::var("RAGE_HUB_ADDR_FILE").ok().map(PathBuf::from))
+    {
+        eprintln!("[rage-spoke] polling for hub address from {}", file.display());
+        let hub_addr = read_hub_addr_with_timeout(&file, 60).await?;
+        hub_addr.addr
+    } else if let Ok(addr) = std::env::var("RAGE_HUB_ADDRESS") {
+        addr
+    } else {
+        anyhow::bail!("No hub address: use --hub-address, --addr-file, RAGE_HUB_ADDRESS, or RAGE_HUB_ADDR_FILE");
+    };
+
+    eprintln!("[rage-spoke] connecting to hub at {}", hub_addr_str);
+    spoke_client::run_as_spoke(hub_addr_str, token, workspace.to_path_buf()).await
 }
