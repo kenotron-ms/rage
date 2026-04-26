@@ -391,6 +391,7 @@ pub async fn run_tasks_two_phase(
                             script: "unknown".to_string(),
                         });
                     }
+                    set.abort_all();
                 }
             }
         }
@@ -477,7 +478,32 @@ async fn run_single_task_two_phase(
     }
 
     // Phase 1: cache lookup
-    if let Some((sf, _entry)) = cache.lookup(&inputs) {
+    // Run in spawn_blocking: compute_weak_fingerprint does synchronous
+    // file I/O (tool-binary hash + glob walk). Keeping it off the tokio
+    // worker-thread pool prevents all worker threads from blocking in
+    // parallel when a full wave of package tasks starts at once.
+    let cache_lookup_result = {
+        let c2   = Arc::clone(&cache);
+        let cmd2 = task.command.clone();
+        let tp2  = tool_path.clone();
+        let pp2  = task.cwd.clone();
+        let gl2  = task.declared_input_globs.clone();
+        let df2  = dep_abi_fps.clone();
+        tokio::task::spawn_blocking(move || {
+            let wf_inputs = cache::WeakFpInputs {
+                command:              &cmd2,
+                tool_path:            &tp2,
+                package_path:         &pp2,
+                declared_input_globs: &gl2,
+                tracked_env:          &[],
+                dep_abi_fingerprints: &df2,
+            };
+            c2.lookup(&wf_inputs)
+        })
+        .await
+        .unwrap_or(None)
+    };
+    if let Some((sf, _entry)) = cache_lookup_result {
         // Replay captured output from the original run.
         if let Some(out) = cache::output_store::read_output(cache.dir(), &sf) {
             print!("{}", out.stdout);
