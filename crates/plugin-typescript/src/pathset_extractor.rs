@@ -145,6 +145,99 @@ fn lookup_yarn_classic_version(lock_text: &str, name: &str) -> Option<String> {
     Some(body[..end].to_string())
 }
 
+/// Extract package refs from flat node_modules layout (yarn/npm).
+/// Reads version from each package's own package.json — no lockfile parsing.
+/// Works for yarn classic, yarn berry (nodeLinker=node-modules), and npm.
+pub fn extract_flat_from_node_modules(
+    pathset_reads: &[PathBuf],
+    workspace_root: &Path,
+) -> Vec<PathsetPackageRef> {
+    let nm_root = workspace_root.join("node_modules");
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<PathsetPackageRef> = Vec::new();
+
+    for p in pathset_reads {
+        // Must be under node_modules but not under .pnpm (that's handled by extract_pnpm_packages)
+        let Ok(rel) = p.strip_prefix(&nm_root) else {
+            continue;
+        };
+        let s = rel.to_string_lossy();
+        if s.contains(".pnpm") || s.contains("__pycache__") {
+            continue;
+        }
+
+        // Extract package name from the first path segment(s)
+        let mut comps = rel.components();
+        let first = match comps.next() {
+            Some(c) => c.as_os_str().to_string_lossy().to_string(),
+            None => continue,
+        };
+
+        // Skip dot-prefixed entries like .cache, .bin, .pnpm
+        if first.starts_with('.') {
+            continue;
+        }
+
+        let name = if first.starts_with('@') {
+            // Scoped package: need the second component too
+            let Some(second) = comps.next() else {
+                continue;
+            };
+            format!("{}/{}", first, second.as_os_str().to_string_lossy())
+        } else {
+            first
+        };
+
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+
+        // Read version from the package's own package.json
+        let pkg_json_path = nm_root.join(&name).join("package.json");
+        let Ok(text) = std::fs::read_to_string(&pkg_json_path) else {
+            continue;
+        };
+
+        // Parse version field; skip workspace packages (those with a "workspaces" field)
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+
+        // Skip workspace packages (they have a "workspaces" field)
+        if value.get("workspaces").is_some() {
+            continue;
+        }
+
+        let Some(version) = value
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
+            continue;
+        };
+
+        let package_root = nm_root.join(&name);
+
+        // Skip if package_root resolves outside node_modules (symlink to workspace source).
+        // Canonicalize both sides so macOS /private alias and other symlinks compare correctly.
+        if let (Ok(canonical_pkg), Ok(canonical_nm)) = (
+            std::fs::canonicalize(&package_root),
+            std::fs::canonicalize(&nm_root),
+        ) {
+            if !canonical_pkg.starts_with(&canonical_nm) {
+                continue;
+            }
+        }
+
+        out.push(PathsetPackageRef {
+            name,
+            version,
+            package_root,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +363,60 @@ mod tests {
         std::fs::write(ws.join("package-lock.json"), r#"{"packages":{}}"#).unwrap();
         let reads = vec![ws.join("node_modules/ghost/index.js")];
         let refs = extract_flat_packages(&reads, ws, &ws.join("package-lock.json"));
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn flat_node_modules_extracts_version_from_package_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+
+        let ms_dir = ws.join("node_modules/ms");
+        std::fs::create_dir_all(&ms_dir).unwrap();
+        std::fs::write(
+            ms_dir.join("package.json"),
+            r#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
+        std::fs::write(ms_dir.join("index.js"), b"// ms").unwrap();
+
+        let reads = vec![ms_dir.join("index.js")];
+        let refs = extract_flat_from_node_modules(&reads, ws);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "ms");
+        assert_eq!(refs[0].version, "2.1.3");
+        assert_eq!(refs[0].package_root, ms_dir);
+    }
+
+    #[test]
+    fn flat_node_modules_handles_scoped_packages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+
+        let types_node = ws.join("node_modules/@types/node");
+        std::fs::create_dir_all(&types_node).unwrap();
+        std::fs::write(
+            types_node.join("package.json"),
+            r#"{"name":"@types/node","version":"20.1.0"}"#,
+        )
+        .unwrap();
+
+        let reads = vec![types_node.join("index.d.ts")];
+        let refs = extract_flat_from_node_modules(&reads, ws);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "@types/node");
+        assert_eq!(refs[0].version, "20.1.0");
+    }
+
+    #[test]
+    fn flat_node_modules_skips_if_no_package_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        // No package.json — should skip gracefully
+        let reads = vec![ws.join("node_modules/ghost/index.js")];
+        let refs = extract_flat_from_node_modules(&reads, ws);
         assert!(refs.is_empty());
     }
 }

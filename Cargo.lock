@@ -2730,6 +2730,7 @@ dependencies = [
  "pipeline-config",
  "plugin",
  "regex",
+ "serde_json",
  "tempfile",
 ]
 

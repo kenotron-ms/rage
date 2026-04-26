@@ -5,7 +5,9 @@ use artifact_store::{
     capture_package, LocalArtifactStore, PackageArtifact, PathsetPackageRef,
     WorkspacePackageManifest,
 };
-use plugin_typescript::pathset_extractor::{extract_pnpm_packages, PathsetPackageRef as TsPkgRef};
+use plugin_typescript::pathset_extractor::{
+    extract_flat_from_node_modules, extract_pnpm_packages, PathsetPackageRef as TsPkgRef,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,6 +45,14 @@ pub fn capture_now(
 ) -> std::io::Result<()> {
     // 1) Discover packages from pnpm-style pathset reads.
     let ts_refs: Vec<TsPkgRef> = extract_pnpm_packages(pathset_reads, workspace_root);
+
+    // Fall back to flat layout (yarn/npm): read version from package.json.
+    let ts_refs = if ts_refs.is_empty() {
+        extract_flat_from_node_modules(pathset_reads, workspace_root)
+    } else {
+        ts_refs
+    };
+
     if ts_refs.is_empty() {
         return Ok(());
     }
@@ -148,5 +158,40 @@ mod tests {
         for (_, h) in &m.packages[0].files {
             assert!(store.contains(h));
         }
+    }
+
+    #[test]
+    fn capture_now_works_with_flat_yarn_layout() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let store = LocalArtifactStore::new(store_dir.path());
+
+        // Flat yarn layout: node_modules/ms/ (no .pnpm)
+        let ms_dir = ws.path().join("node_modules/ms");
+        std::fs::create_dir_all(&ms_dir).unwrap();
+        std::fs::write(ms_dir.join("index.js"), b"// ms").unwrap();
+        std::fs::write(
+            ms_dir.join("package.json"),
+            r#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
+
+        let pathset_reads = vec![ms_dir.join("index.js")];
+        let manifest_path = ws.path().join("artifact-packages/fp-yarn.json");
+
+        capture_now(
+            &pathset_reads,
+            ws.path(),
+            &manifest_path,
+            "fp-yarn",
+            &store,
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&manifest_path).unwrap();
+        let m: WorkspacePackageManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(m.packages.len(), 1);
+        assert_eq!(m.packages[0].name, "ms");
+        assert_eq!(m.packages[0].version, "2.1.3");
     }
 }
