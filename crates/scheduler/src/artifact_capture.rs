@@ -2,12 +2,17 @@
 //! into the per-package CAS, writing one JSON file per package immediately
 //! after it is captured so the manifest survives process exit at any point.
 
+//! Captures packages into the content-addressed store (CAS) using two strategies:
+//! 1. Lockfile-based (preferred): parse lockfile → find PM tarballs → store in CAS
+//! 2. Walk-based (fallback): walk node_modules → hash individual files → store in CAS
+
 use artifact_store::{
     capture_package, LocalArtifactStore, PackageArtifact, PathsetPackageRef,
 };
 use plugin_typescript::pathset_extractor::{
     extract_flat_from_node_modules, extract_pnpm_packages, PathsetPackageRef as TsPkgRef,
 };
+use plugin_typescript::lockfile::{compute_cas_key, find_yarn_berry_zip};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -128,6 +133,94 @@ fn write_package_entry(path: &Path, artifact: &PackageArtifact) -> std::io::Resu
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json.as_bytes())?;
     std::fs::rename(&tmp, path)
+}
+
+/// Capture packages from pre-parsed lockfile data using the lockfile-integrity-hash approach.
+///
+/// This is the preferred capture strategy:
+/// 1. `packages` — lockfile-parsed package list (call `plugin.parse_lockfile` before spawn_blocking)
+/// 2. `pm_cache` — PM tarball cache directory (call `plugin.local_pm_cache` before spawn_blocking)
+/// 3. For each package: CAS key = `blake3(integrity)` → skip if already in CAS
+/// 4. Find the tarball/zip in PM cache by name+version → store in CAS under integrity key
+/// 5. Write per-package manifest entry (atomic, survives process exit)
+///
+/// Returns the number of newly captured packages.
+pub fn capture_from_lockfile_packages(
+    packages: &[plugin::LockfilePackage],
+    pm_cache: Option<&Path>,
+    artifact_dir: &Path,
+    store: &LocalArtifactStore,
+) -> std::io::Result<usize> {
+    if packages.is_empty() {
+        return Ok(0);
+    }
+
+    let pm_cache = pm_cache.map(|p| p.to_path_buf());
+
+    std::fs::create_dir_all(artifact_dir)?;
+
+    let mut captured = 0usize;
+    for pkg in packages {
+        let cas_key = compute_cas_key(&pkg.integrity);
+
+        // Skip if already in CAS
+        if store.contains_raw_key(&cas_key) {
+            // Also ensure the per-package manifest file exists
+            let pkg_file = artifact_dir.join(package_filename(&pkg.name, &pkg.version));
+            if !pkg_file.exists() {
+                // CAS has it but manifest file is missing — write it
+                let entry = serde_json::json!({
+                    "name": pkg.name,
+                    "version": pkg.version,
+                    "integrity": pkg.integrity,
+                    "cas_key_hex": hex::encode(&cas_key),
+                });
+                let tmp = pkg_file.with_extension("tmp");
+                let _ = std::fs::write(&tmp, serde_json::to_vec(&entry).unwrap_or_default());
+                let _ = std::fs::rename(&tmp, &pkg_file);
+            }
+            continue;
+        }
+
+        // Find tarball in PM cache
+        let tarball_bytes = pm_cache.as_ref().and_then(|cache_dir| {
+            find_yarn_berry_zip(cache_dir, &pkg.name, &pkg.version)
+                .and_then(|path| std::fs::read(&path).ok())
+        });
+
+        let bytes = match tarball_bytes {
+            Some(b) => b,
+            None => {
+                // PM cache miss — skip (will need full reinstall on cold restore)
+                continue;
+            }
+        };
+
+        // Store in CAS under the integrity-derived key
+        if let Err(e) = store.put_bytes_keyed(cas_key, &bytes) {
+            eprintln!(
+                "[rage] artifact capture: failed to store {} — {e}",
+                pkg.name
+            );
+            continue;
+        }
+
+        // Write per-package manifest immediately (atomic)
+        let pkg_file = artifact_dir.join(package_filename(&pkg.name, &pkg.version));
+        let entry = serde_json::json!({
+            "name": pkg.name,
+            "version": pkg.version,
+            "integrity": pkg.integrity,
+            "cas_key_hex": hex::encode(&cas_key),
+        });
+        let tmp = pkg_file.with_extension("tmp");
+        if std::fs::write(&tmp, serde_json::to_vec(&entry).unwrap_or_default()).is_ok() {
+            let _ = std::fs::rename(&tmp, &pkg_file);
+        }
+        captured += 1;
+    }
+
+    Ok(captured)
 }
 
 /// Capture EVERY package currently in `workspace_root/node_modules/` into the CAS.

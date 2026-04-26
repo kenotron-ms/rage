@@ -3,6 +3,7 @@
 //! Detects packages by `tsconfig.json`. Declares `typecheck` and `build`
 //! tasks. ABI fingerprint hashes `.d.ts` outputs.
 
+pub mod lockfile;
 pub mod pathset_extractor;
 
 use plugin::{AllowlistEntry, EcosystemPlugin, OutputFile, PluginConfig, TaskDef};
@@ -228,6 +229,125 @@ impl EcosystemPlugin for TypeScriptPlugin {
         match std::fs::read_dir(&nm) {
             Ok(mut iter) => iter.next().is_some(),
             Err(_) => false,
+        }
+    }
+
+    fn parse_lockfile(&self, workspace_root: &Path) -> Option<Vec<plugin::LockfilePackage>> {
+        use crate::lockfile::*;
+
+        // Detection priority: pnpm → yarn (berry/classic) → npm
+        if let Ok(content) = std::fs::read_to_string(workspace_root.join("pnpm-lock.yaml")) {
+            return Some(parse_pnpm_lockfile(&content));
+        }
+        if let Ok(content) = std::fs::read_to_string(workspace_root.join("yarn.lock")) {
+            // Detect yarn version from __metadata presence
+            if content.contains("__metadata:") {
+                return Some(parse_yarn_berry_lockfile(&content));
+            }
+            return Some(parse_yarn_classic_lockfile(&content));
+        }
+        if let Ok(content) = std::fs::read_to_string(workspace_root.join("package-lock.json")) {
+            return Some(parse_npm_lockfile(&content));
+        }
+        None
+    }
+
+    fn local_pm_cache(&self, workspace_root: &Path) -> Option<std::path::PathBuf> {
+        // Yarn berry: uses global cache at ~/.yarn/berry/cache/ by default
+        // Can be overridden by YARN_CACHE_FOLDER or cacheFolder in .yarnrc.yml
+        if workspace_root.join("yarn.lock").exists() {
+            // Check YARN_CACHE_FOLDER env var first
+            if let Ok(cache) = std::env::var("YARN_CACHE_FOLDER") {
+                let p = std::path::Path::new(&cache);
+                if p.is_dir() {
+                    return Some(p.to_path_buf());
+                }
+            }
+            // Check workspace .yarn/cache (used for zero-installs or berry with local cache)
+            let ws_cache = workspace_root.join(".yarn/cache");
+            if ws_cache.is_dir() {
+                return Some(ws_cache);
+            }
+            // Global yarn berry cache
+            let home = std::env::var("HOME").unwrap_or_default();
+            let global_cache = std::path::Path::new(&home).join(".yarn/berry/cache");
+            if global_cache.is_dir() {
+                return Some(global_cache);
+            }
+            // Yarn classic global cache
+            let classic_cache = std::path::Path::new(&home).join(".yarn/cache");
+            if classic_cache.is_dir() {
+                return Some(classic_cache);
+            }
+        }
+
+        // pnpm
+        if workspace_root.join("pnpm-lock.yaml").exists() {
+            let home = std::env::var("HOME").unwrap_or_default();
+            for path in &[
+                format!("{}/.local/share/pnpm/store/v3/files", home),
+                format!("{}/Library/pnpm/store/v3/files", home),
+            ] {
+                let p = std::path::Path::new(path);
+                if p.is_dir() {
+                    return Some(p.to_path_buf());
+                }
+            }
+        }
+
+        // npm
+        if workspace_root.join("package-lock.json").exists() {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let npm_cache = std::path::Path::new(&home).join(".npm/_cacache");
+            if npm_cache.is_dir() {
+                return Some(npm_cache);
+            }
+        }
+
+        None
+    }
+
+    fn restore_from_cas(
+        &self,
+        packages: &[plugin::LockfilePackage],
+        workspace_root: &Path,
+        store: &dyn plugin::ArtifactStoreRef,
+    ) -> Result<(), anyhow::Error> {
+        use crate::lockfile::{compute_cas_key, extract_yarn_zip_to_workspace};
+
+        let mut restored = 0usize;
+        let mut failed = 0usize;
+
+        for pkg in packages {
+            let cas_key = compute_cas_key(&pkg.integrity);
+            match store.get_bytes(&cas_key)? {
+                None => {
+                    // CAS miss for this package — skip (should not happen if pre-flight passed)
+                    failed += 1;
+                }
+                Some(zip_bytes) => {
+                    // Extract yarn berry zip into workspace_root/
+                    // The zip contains entries like node_modules/{name}/...
+                    if let Err(e) = extract_yarn_zip_to_workspace(&zip_bytes, workspace_root) {
+                        eprintln!(
+                            "[rage] artifact restore: failed to extract {} — {e}",
+                            pkg.name
+                        );
+                        failed += 1;
+                    } else {
+                        restored += 1;
+                    }
+                }
+            }
+        }
+
+        if failed > 0 {
+            Err(anyhow::anyhow!(
+                "restore_from_cas: {failed} packages failed, {restored} succeeded"
+            ))
+        } else {
+            eprintln!("[rage] artifact restore: {restored} packages extracted from CAS");
+            Ok(())
         }
     }
 

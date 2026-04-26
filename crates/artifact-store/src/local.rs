@@ -94,6 +94,86 @@ impl ArtifactStore for LocalArtifactStore {
     }
 }
 
+impl LocalArtifactStore {
+    /// Store bytes under an arbitrary 32-byte key (not computed from content).
+    ///
+    /// Used for the lockfile-based CAS where the key is `blake3(integrity_string)`.
+    /// The storage layout is the same as for content-addressed entries:
+    /// `{root}/content/{hex[0..2]}/{hex[2..]}/data`
+    pub fn put_bytes_keyed(&self, key: [u8; 32], bytes: &[u8]) -> std::io::Result<()> {
+        let hex = hex::encode(key);
+        let dest = self
+            .root
+            .join("content")
+            .join(&hex[..2])
+            .join(&hex[2..])
+            .join("data");
+
+        if dest.is_file() {
+            return Ok(()); // already present
+        }
+
+        let parent = dest.parent().expect("path has parent");
+        std::fs::create_dir_all(parent)?;
+
+        let tmp = parent.join(format!(".tmp-keyed-{}", std::process::id()));
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+        }
+        match std::fs::rename(&tmp, &dest) {
+            Ok(()) => Ok(()),
+            Err(_) if dest.is_file() => {
+                let _ = std::fs::remove_file(&tmp);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Retrieve bytes stored under an arbitrary 32-byte key.
+    pub fn get_bytes_by_raw_key(&self, key: &[u8; 32]) -> std::io::Result<Option<Vec<u8>>> {
+        let hex = hex::encode(key);
+        let path = self
+            .root
+            .join("content")
+            .join(&hex[..2])
+            .join(&hex[2..])
+            .join("data");
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Check existence by raw 32-byte key (without computing ContentHash).
+    pub fn contains_raw_key(&self, key: &[u8; 32]) -> bool {
+        let hex = hex::encode(key);
+        self.root
+            .join("content")
+            .join(&hex[..2])
+            .join(&hex[2..])
+            .join("data")
+            .is_file()
+    }
+}
+
+/// Implement the plugin's minimal ArtifactStoreRef trait for LocalArtifactStore.
+/// This allows plugins to call store.get_bytes() / store.contains_key() without
+/// depending on the artifact-store crate directly.
+impl plugin::ArtifactStoreRef for LocalArtifactStore {
+    fn get_bytes(&self, key: &[u8; 32]) -> Result<Option<Vec<u8>>, std::io::Error> {
+        self.get_bytes_by_raw_key(key)
+    }
+
+    fn contains_key(&self, key: &[u8; 32]) -> bool {
+        self.contains_raw_key(key)
+    }
+}
+
 #[cfg(unix)]
 fn libc_exdev() -> i32 {
     18 // EXDEV on Linux/macOS

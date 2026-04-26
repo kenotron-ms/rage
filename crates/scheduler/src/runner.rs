@@ -721,10 +721,61 @@ async fn run_root_task_two_phase(
             return Ok(());
         }
         // Effects gone — try CAS restoration before falling through to re-run.
+        //
+        // Strategy 1: lockfile-based restore (preferred).
+        //   Parse lockfile → pre-flight all integrity-keyed tarballs in CAS →
+        //   plugin.restore_from_cas() extracts zips into node_modules/.
+        //
+        // Strategy 2: file-level restore (fallback).
+        //   Read per-package JSON manifests → pre-flight all file hashes in CAS →
+        //   hardlink individual files into node_modules/.
         let artifact_dir = cache
             .dir()
             .join("artifact-packages")
-            .join(&fp); // directory, not file
+            .join(&fp);
+
+        // Try lockfile-based restore first
+        let lockfile_restored = {
+            use plugin_typescript::lockfile::compute_cas_key;
+            let lockfile_pkgs = plugin.parse_lockfile(&task.workspace_root);
+            if let Some(pkgs) = lockfile_pkgs {
+                // Pre-flight: all tarballs must be in CAS before touching workspace
+                let all_present = pkgs.iter().all(|p| {
+                    let key = compute_cas_key(&p.integrity);
+                    artifact_store.contains_raw_key(&key)
+                });
+
+                if all_present && !pkgs.is_empty() {
+                    let store_ref: &dyn plugin::ArtifactStoreRef = artifact_store.as_ref();
+                    match plugin.restore_from_cas(&pkgs, &task.workspace_root, store_ref) {
+                        Ok(()) => {
+                            eprintln!(
+                                "[rage] {}#{} \u{2713} (restored from artifact cache, {} packages)",
+                                task.package_name, task.script_name, pkgs.len()
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[rage] {}#{} lockfile restore partial ({e}) — trying file-level restore",
+                                task.package_name, task.script_name
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false // Some tarballs not yet in CAS — fall through
+                }
+            } else {
+                false // No lockfile support — fall through to file-level
+            }
+        };
+
+        if lockfile_restored {
+            return Ok(());
+        }
+
+        // Fall back to file-level restore (original approach)
         match crate::artifact_restore::try_restore_from_cas(
             &artifact_dir,
             &task.workspace_root,
@@ -774,27 +825,52 @@ async fn run_root_task_two_phase(
     let elapsed = start.elapsed();
 
     if status.success() {
-        // Capture all node_modules into CAS — blocking but runs once per lockfile change.
+        // Capture into CAS — blocking, runs once per lockfile change.
         // Done BEFORE writing the marker so marker only exists when CAS is populated.
+        //
+        // Extract lockfile data BEFORE spawn_blocking (plugin reference is not 'static).
+        // Strategy 1 (preferred): lockfile-based — parse lockfile → find PM tarballs → store in CAS.
+        // Strategy 2 (fallback):  walk node_modules → hash individual files → store in CAS.
+        let lockfile_pkgs = plugin.parse_lockfile(&task.workspace_root);
+        let pm_cache_path = plugin.local_pm_cache(&task.workspace_root);
+
         let ws = task.workspace_root.clone();
         let fp_for_dir = fp.clone();
         let cache_dir = cache.dir().to_path_buf();
         let store_clone = Arc::clone(&artifact_store);
+
         let captured = tokio::task::spawn_blocking(move || {
             let artifact_dir = cache_dir
                 .join("artifact-packages")
                 .join(&fp_for_dir);
-            crate::artifact_capture::capture_all_node_modules(
-                &ws,
-                &artifact_dir,
-                store_clone.as_ref(),
-            )
-            .unwrap_or(0)
+
+            if let Some(pkgs) = lockfile_pkgs {
+                // Lockfile-based capture
+                let n = crate::artifact_capture::capture_from_lockfile_packages(
+                    &pkgs,
+                    pm_cache_path.as_deref(),
+                    &artifact_dir,
+                    store_clone.as_ref(),
+                )
+                .unwrap_or(0);
+                eprintln!("[rage] artifact cache (lockfile): {} packages captured", n);
+                n
+            } else {
+                // No lockfile — fall back to walk-based capture
+                let n = crate::artifact_capture::capture_all_node_modules(
+                    &ws,
+                    &artifact_dir,
+                    store_clone.as_ref(),
+                )
+                .unwrap_or(0);
+                eprintln!("[rage] artifact cache (walk): {} packages captured", n);
+                n
+            }
         })
         .await
         .unwrap_or(0);
 
-        eprintln!("[rage] artifact cache: {} packages captured", captured);
+        let _ = captured; // suppress unused warning
 
         // Best-effort marker write — cache failures must not break a build.
         let _ = std::fs::write(&marker, b"");
