@@ -38,6 +38,7 @@ pub fn parse_yarn_berry_lockfile(content: &str) -> Vec<LockfilePackage> {
         let mut pkg_name: Option<String> = None;
         let mut version: Option<String> = None;
         let mut checksum: Option<String> = None;
+        let mut resolution: Option<String> = None;
         let mut is_workspace = false;
 
         for line in block.lines() {
@@ -62,6 +63,9 @@ pub fn parse_yarn_berry_lockfile(content: &str) -> Vec<LockfilePackage> {
                 version = Some(v.trim().to_string());
             } else if let Some(cs) = line.strip_prefix("checksum: ") {
                 checksum = Some(cs.trim().to_string());
+            } else if let Some(res) = line.strip_prefix("resolution: ") {
+                // e.g. resolution: "lage@npm:2.14.15"
+                resolution = Some(res.trim().trim_matches('"').to_string());
             } else if line == "languageName: unknown" || line == "linkType: soft" {
                 is_workspace = true;
             }
@@ -71,8 +75,35 @@ pub fn parse_yarn_berry_lockfile(content: &str) -> Vec<LockfilePackage> {
             continue;
         }
 
+        // For yarn alias entries like `"lage-npm@npm:lage@<2.14.16":` the lockfile key gives the
+        // alias name ("lage-npm") but yarn's PM cache stores the zip under the RESOLUTION name
+        // ("lage").  E.g. resolution "lage@npm:2.14.15" → cache file "lage-npm-2.14.15-…10c0.zip"
+        // (= "lage" + "-npm-" + "2.14.15").  Using the alias name produces the wrong prefix
+        // "lage-npm-npm-2.14.15-*" which never matches, so find_yarn_berry_zip returns None and
+        // the package is silently skipped, leaving it absent from the CAS and breaking the
+        // all_present pre-flight during restore.
+        //
+        // Fix: prefer the name extracted from the resolution field over the alias in the key.
+        let name = {
+            let alias = pkg_name.unwrap();
+            if let Some(ref res) = resolution {
+                if let Some(at_pos) = res.rfind("@npm:") {
+                    let real_name = &res[..at_pos];
+                    if real_name != alias {
+                        real_name.to_string()
+                    } else {
+                        alias
+                    }
+                } else {
+                    alias
+                }
+            } else {
+                alias
+            }
+        };
+
         packages.push(LockfilePackage {
-            name: pkg_name.unwrap(),
+            name,
             version: version.unwrap(),
             integrity: checksum.unwrap(),
             tarball_url: None,
@@ -405,6 +436,84 @@ mod tests {
     fn parse_yarn_berry_skips_workspace_packages() {
         let packages = parse_yarn_berry_lockfile(YARN_BERRY_FIXTURE);
         assert!(!packages.iter().any(|p| p.name.contains("workspace-a")));
+    }
+
+    /// Yarn 4 alias entries look like `"lage-npm@npm:lage@<2.14.16":` where the lockfile key
+    /// uses the alias (`lage-npm`) but the PM cache stores the zip under the real package name
+    /// (`lage`).  The parser must extract the real name from the `resolution:` field so that
+    /// `find_yarn_berry_zip` can build the correct prefix `lage-npm-2.14.15-*.zip` instead of
+    /// the wrong `lage-npm-npm-2.14.15-*.zip`.
+    #[test]
+    fn parse_yarn_berry_uses_resolution_name_for_aliases() {
+        let fixture = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"lage-npm@npm:lage@<2.14.16":
+  version: 2.14.15
+  resolution: "lage@npm:2.14.15"
+  checksum: 10c0/aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344
+  languageName: node
+  linkType: hard
+
+"string-width-cjs@npm:string-width@^4.2.0, string-width@npm:^4.2.0":
+  version: 4.2.3
+  resolution: "string-width@npm:4.2.3"
+  checksum: 10c0/eeff001122334455eeff001122334455eeff001122334455eeff001122334455eeff001122334455eeff001122334455eeff001122334455eeff001122334455
+  languageName: node
+  linkType: hard
+
+"ms@npm:2.1.3":
+  version: 2.1.3
+  resolution: "ms@npm:2.1.3"
+  checksum: 10c0/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
+  languageName: node
+  linkType: hard
+"#;
+        let packages = parse_yarn_berry_lockfile(fixture);
+
+        // lage-npm alias → real name "lage" from resolution "lage@npm:2.14.15"
+        let lage = packages.iter().find(|p| p.name == "lage").expect("should use resolution name 'lage', not alias 'lage-npm'");
+        assert_eq!(lage.version, "2.14.15");
+
+        // string-width-cjs alias → real name "string-width" from resolution
+        let sw = packages.iter().find(|p| p.name == "string-width").expect("should use resolution name 'string-width', not alias 'string-width-cjs'");
+        assert_eq!(sw.version, "4.2.3");
+
+        // Non-aliased package: name unchanged
+        let ms = packages.iter().find(|p| p.name == "ms").unwrap();
+        assert_eq!(ms.version, "2.1.3");
+
+        // No alias names should appear in the result
+        assert!(!packages.iter().any(|p| p.name == "lage-npm"), "alias 'lage-npm' must not appear");
+        assert!(!packages.iter().any(|p| p.name == "string-width-cjs"), "alias 'string-width-cjs' must not appear");
+    }
+
+    /// find_yarn_berry_zip must locate the correct zip using the resolution-based name so that
+    /// the prefix matches what yarn actually writes to its cache directory.
+    #[test]
+    fn find_yarn_berry_zip_uses_resolution_name_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+
+        // yarn cache stores `lage@npm:2.14.15` as `lage-npm-2.14.15-{hash}-10c0.zip`
+        // (= real_name "lage" + "-npm-" + version — NOT the alias "lage-npm")
+        std::fs::write(cache.join("lage-npm-2.14.15-0e927de26f-10c0.zip"), b"fakecontent").unwrap();
+        // string-width-cjs alias → "string-width-npm-4.2.3-{hash}-10c0.zip"
+        std::fs::write(cache.join("string-width-npm-4.2.3-2c27177bae-10c0.zip"), b"fakecontent2").unwrap();
+
+        // find_yarn_berry_zip is called with the RESOLUTION name (already fixed by the parser)
+        let found_lage = find_yarn_berry_zip(cache, "lage", "2.14.15").unwrap();
+        assert!(found_lage.file_name().unwrap().to_string_lossy().contains("lage-npm-2.14.15"));
+
+        let found_sw = find_yarn_berry_zip(cache, "string-width", "4.2.3").unwrap();
+        assert!(found_sw.file_name().unwrap().to_string_lossy().contains("string-width-npm-4.2.3"));
+
+        // The OLD wrong aliases should NOT be found (they'd look for "lage-npm-npm-…" prefix)
+        assert!(find_yarn_berry_zip(cache, "lage-npm", "2.14.15").is_none(),
+            "alias 'lage-npm' must not match — yarn cache uses real name in filename");
+        assert!(find_yarn_berry_zip(cache, "string-width-cjs", "4.2.3").is_none(),
+            "alias 'string-width-cjs' must not match");
     }
 
     #[test]

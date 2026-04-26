@@ -141,14 +141,18 @@ fn write_package_entry(path: &Path, artifact: &PackageArtifact) -> std::io::Resu
 /// 1. `packages` — lockfile-parsed package list (call `plugin.parse_lockfile` before spawn_blocking)
 /// 2. `pm_cache` — PM tarball cache directory (call `plugin.local_pm_cache` before spawn_blocking)
 /// 3. For each package: CAS key = `blake3(integrity)` → skip if already in CAS
-/// 4. Find the tarball/zip in PM cache by name+version → store in CAS under integrity key
-/// 5. Write per-package manifest entry (atomic, survives process exit)
+/// 4. Find the tarball/zip in PM cache by name+version → store raw zip bytes in CAS
+///
+/// No per-package manifest files are written here — the lockfile-based restore path reads
+/// packages directly from `plugin.parse_lockfile()` and looks them up in CAS by integrity key.
+/// Writing lockfile-format manifests to `artifact_dir` would confuse `try_restore_from_cas`
+/// which expects `PackageArtifact` (file-level) JSON there.
 ///
 /// Returns the number of newly captured packages.
 pub fn capture_from_lockfile_packages(
     packages: &[plugin::LockfilePackage],
     pm_cache: Option<&Path>,
-    artifact_dir: &Path,
+    _artifact_dir: &Path,
     store: &LocalArtifactStore,
 ) -> std::io::Result<usize> {
     if packages.is_empty() {
@@ -157,32 +161,16 @@ pub fn capture_from_lockfile_packages(
 
     let pm_cache = pm_cache.map(|p| p.to_path_buf());
 
-    std::fs::create_dir_all(artifact_dir)?;
-
     let mut captured = 0usize;
     for pkg in packages {
         let cas_key = compute_cas_key(&pkg.integrity);
 
-        // Skip if already in CAS
+        // Skip if already in CAS — the zip is present, nothing new to store.
         if store.contains_raw_key(&cas_key) {
-            // Also ensure the per-package manifest file exists
-            let pkg_file = artifact_dir.join(package_filename(&pkg.name, &pkg.version));
-            if !pkg_file.exists() {
-                // CAS has it but manifest file is missing — write it
-                let entry = serde_json::json!({
-                    "name": pkg.name,
-                    "version": pkg.version,
-                    "integrity": pkg.integrity,
-                    "cas_key_hex": hex::encode(&cas_key),
-                });
-                let tmp = pkg_file.with_extension("tmp");
-                let _ = std::fs::write(&tmp, serde_json::to_vec(&entry).unwrap_or_default());
-                let _ = std::fs::rename(&tmp, &pkg_file);
-            }
             continue;
         }
 
-        // Find tarball in PM cache
+        // Find tarball in PM cache (yarn berry: ~/.yarn/berry/cache/*.zip)
         let tarball_bytes = pm_cache.as_ref().and_then(|cache_dir| {
             find_yarn_berry_zip(cache_dir, &pkg.name, &pkg.version)
                 .and_then(|path| std::fs::read(&path).ok())
@@ -205,18 +193,6 @@ pub fn capture_from_lockfile_packages(
             continue;
         }
 
-        // Write per-package manifest immediately (atomic)
-        let pkg_file = artifact_dir.join(package_filename(&pkg.name, &pkg.version));
-        let entry = serde_json::json!({
-            "name": pkg.name,
-            "version": pkg.version,
-            "integrity": pkg.integrity,
-            "cas_key_hex": hex::encode(&cas_key),
-        });
-        let tmp = pkg_file.with_extension("tmp");
-        if std::fs::write(&tmp, serde_json::to_vec(&entry).unwrap_or_default()).is_ok() {
-            let _ = std::fs::rename(&tmp, &pkg_file);
-        }
         captured += 1;
     }
 
