@@ -376,7 +376,21 @@ async fn cmd_run(
         // Full remote support for run_tasks_two_phase will integrate the remote
         // backend with TwoPhaseCache in a future iteration.
         let _ = &config.cache.backend; // referenced so Clippy is happy
-        scheduler::run_tasks_two_phase(&dag, tasks, two_phase)
+        // Construct shared LocalArtifactStore at <RAGE_HOME>/artifacts.
+        // Sits parallel to cache/ so it can be shared across workspaces on the host.
+        let cache_dir_for_store = resolve_cache_dir(root);
+        let store_root = cache_dir_for_store
+            .parent()                  // <RAGE_HOME>/cache
+            .and_then(|p| p.parent())  // <RAGE_HOME>
+            .map(|p| p.join("artifacts"))
+            .unwrap_or_else(|| cache_dir_for_store.join("artifacts"));
+        std::fs::create_dir_all(&store_root).ok();
+        let artifact_store = std::sync::Arc::new(
+            artifact_store::LocalArtifactStore::new(&store_root)
+        );
+        let plugin_arc: std::sync::Arc<dyn plugin::EcosystemPlugin> =
+            std::sync::Arc::new(plugin_typescript::TypeScriptPlugin::new());
+        scheduler::run_tasks_two_phase(&dag, tasks, two_phase, plugin_arc, artifact_store)
             .await
             .with_context(|| format!("'{script}' run failed"))?;
     }
