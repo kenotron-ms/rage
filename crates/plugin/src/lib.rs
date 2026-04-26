@@ -11,6 +11,38 @@ pub use types::{AllowlistEntry, OutputFile, PluginConfig, TaskDef};
 
 use std::path::{Path, PathBuf};
 
+/// A package resolved from a lockfile, with its content integrity hash.
+///
+/// The integrity string is taken verbatim from the lockfile (e.g. `sha512-XXXX`
+/// for npm/pnpm/yarn classic, `10c0/sha512hex` for yarn berry). It is used as
+/// the basis for the CAS key (`Blake3(integrity.as_bytes())`), making CAS entries
+/// deterministic and matching the package manager's own verification.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LockfilePackage {
+    /// npm package name (e.g. `"ms"` or `"@types/node"`).
+    pub name: String,
+    /// Resolved version (e.g. `"2.1.3"`).
+    pub version: String,
+    /// Integrity hash string from the lockfile. Format varies by PM:
+    /// - pnpm / yarn classic / npm: `sha512-XXXX` or `sha1-XXXX`
+    /// - yarn berry: `10c0/sha512hex` (cache-version-prefixed sha512)
+    pub integrity: String,
+    /// URL of the tarball (optional). Present in pnpm/yarn classic/npm lockfiles.
+    pub tarball_url: Option<String>,
+}
+
+/// Minimal artifact store reference used by plugins for CAS restoration.
+///
+/// Defined here to avoid a direct dependency on the `artifact-store` crate from
+/// plugin implementations. `artifact-store` implements this trait for
+/// `LocalArtifactStore`.
+pub trait ArtifactStoreRef: Send + Sync {
+    /// Retrieve bytes stored under `key`. Returns `None` if absent.
+    fn get_bytes(&self, key: &[u8; 32]) -> Result<Option<Vec<u8>>, std::io::Error>;
+    /// Cheap existence check for `key`.
+    fn contains_key(&self, key: &[u8; 32]) -> bool;
+}
+
 /// A workspace-level task that runs ONCE at the workspace root before any
 /// per-package task. Examples:
 ///
@@ -99,5 +131,100 @@ pub trait EcosystemPlugin: Send + Sync {
     /// preserve the existing cache-hit behaviour.
     fn verify_install_effects(&self, _workspace_root: &Path) -> bool {
         true
+    }
+
+    /// Parse the lockfile(s) and return all **external** packages with integrity hashes.
+    ///
+    /// Workspace-local packages (those without an integrity hash in the lockfile) MUST be
+    /// excluded from the returned list.
+    ///
+    /// Returns `None` if this ecosystem has no lockfile (e.g. a bare `requirements.txt`).
+    /// When `None` is returned, rage skips CAS capture and always runs the install command.
+    fn parse_lockfile(&self, _workspace_root: &Path) -> Option<Vec<LockfilePackage>> {
+        None
+    }
+
+    /// Path to this ecosystem's local package cache (where the PM stores downloaded tarballs).
+    ///
+    /// Used as the fast-path source during capture: rage copies tarballs from the PM cache
+    /// instead of downloading from the registry.
+    ///
+    /// Returns `None` if the PM cache path cannot be determined or doesn't exist.
+    fn local_pm_cache(&self, _workspace_root: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// Restore packages from the rage artifact CAS into the workspace's `node_modules/`.
+    ///
+    /// Called when: install marker present + `verify_install_effects` returns `false` +
+    /// CAS contains tarballs for all packages from `parse_lockfile`.
+    ///
+    /// Implementations should extract tarballs for each package into
+    /// `workspace_root/node_modules/{name}/`, handling scoped packages correctly.
+    ///
+    /// Default is a no-op — falls through to full reinstall.
+    fn restore_from_cas(
+        &self,
+        _packages: &[LockfilePackage],
+        _workspace_root: &Path,
+        _store: &dyn ArtifactStoreRef,
+    ) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NullPlugin;
+
+    impl EcosystemPlugin for NullPlugin {
+        fn id(&self) -> &'static str {
+            "null"
+        }
+        fn detection_globs(&self) -> Vec<&'static str> {
+            vec![]
+        }
+        fn infer_tasks(&self, _: &Path) -> Vec<TaskDef> {
+            vec![]
+        }
+        fn toolchain_allowlist(&self) -> Vec<AllowlistEntry> {
+            vec![]
+        }
+        fn declared_input_globs(&self, _: &str, _: &PluginConfig) -> Vec<String> {
+            vec![]
+        }
+        fn abi_fingerprint(&self, _: &[OutputFile]) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn default_parse_lockfile_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = NullPlugin;
+        assert!(p.parse_lockfile(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn default_local_pm_cache_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = NullPlugin;
+        assert!(p.local_pm_cache(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn lockfile_package_roundtrips_serde() {
+        let pkg = LockfilePackage {
+            name: "ms".to_string(),
+            version: "2.1.3".to_string(),
+            integrity: "sha512-abc123".to_string(),
+            tarball_url: Some("https://registry.npmjs.org/ms/-/ms-2.1.3.tgz".to_string()),
+        };
+        let json = serde_json::to_string(&pkg).unwrap();
+        let decoded: LockfilePackage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.name, "ms");
+        assert_eq!(decoded.integrity, "sha512-abc123");
     }
 }
