@@ -482,7 +482,7 @@ async fn run_single_task_two_phase(
     // file I/O (tool-binary hash + glob walk). Keeping it off the tokio
     // worker-thread pool prevents all worker threads from blocking in
     // parallel when a full wave of package tasks starts at once.
-    let cache_lookup_result = {
+    let (cache_lookup_result, stored_pathset_reads) = {
         let c2   = Arc::clone(&cache);
         let cmd2 = task.command.clone();
         let tp2  = tool_path.clone();
@@ -498,12 +498,35 @@ async fn run_single_task_two_phase(
                 tracked_env:          &[],
                 dep_abi_fingerprints: &df2,
             };
-            c2.lookup(&wf_inputs)
+            match c2.lookup_with_pathset_reads(&wf_inputs) {
+                Some((sf, entry, reads)) => (Some((sf, entry)), reads),
+                None => (None, vec![]),
+            }
         })
         .await
-        .unwrap_or(None)
+        .unwrap_or((None, vec![]))
     };
     if let Some((sf, _entry)) = cache_lookup_result {
+        // Populate CAS from the stored pathset on cache hit (fire-and-forget).
+        // This ensures the artifact store is primed even when all builds are warm,
+        // so that deleting node_modules can be restored without re-running install.
+        if !stored_pathset_reads.is_empty() {
+            let install_fp = find_latest_install_fingerprint(cache.dir());
+            if let Some(fp) = install_fp {
+                let manifest_path = cache
+                    .dir()
+                    .join("artifact-packages")
+                    .join(format!("{fp}.json"));
+                crate::artifact_capture::schedule_capture(
+                    stored_pathset_reads,
+                    task.workspace_root.clone(),
+                    manifest_path,
+                    fp,
+                    Arc::clone(&artifact_store),
+                );
+            }
+        }
+
         // Replay captured output from the original run.
         if let Some(out) = cache::output_store::read_output(cache.dir(), &sf) {
             print!("{}", out.stdout);

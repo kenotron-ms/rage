@@ -59,6 +59,25 @@ impl TwoPhaseCache {
         None
     }
 
+    /// Like `lookup`, but also returns the pathset reads from the stored WF entry
+    /// so callers can populate the artifact CAS on cache hits without re-reading the file.
+    ///
+    /// Returns `None` on cache miss. On hit, the `Vec<PathBuf>` contains all read paths
+    /// from the matching stored pathset.
+    pub fn lookup_with_pathset_reads(
+        &self,
+        weak_fp_inputs: &WeakFpInputs,
+    ) -> Option<(String, CacheEntry, Vec<PathBuf>)> {
+        let wf = compute_weak_fingerprint(weak_fp_inputs);
+        for ps in self.pathsets.list(&wf) {
+            let sf = compute_strong_fingerprint(&wf, &ps.reads);
+            if let Some(entry) = self.read_entry(&sf) {
+                return Some((sf, entry, ps.reads));
+            }
+        }
+        None
+    }
+
     /// Record a successful run. Stores both the pathset (under WF) and the
     /// entry (under SF). Returns the SF string.
     ///
@@ -267,6 +286,56 @@ mod tests {
         // changing declared input → WF changes → no pathsets → miss
         std::fs::write(pkg.path().join("src/index.ts"), b"b").unwrap();
         assert!(cache.lookup(&inputs).is_none());
+    }
+
+    #[test]
+    fn lookup_with_pathset_reads_returns_reads_on_hit() {
+        let cache_dir = tempdir().unwrap();
+        let pkg = tempdir().unwrap();
+        let tool = pkg.path().join("tool");
+        std::fs::write(&tool, b"x").unwrap();
+        let f = pkg_with_file(pkg.path(), "index.ts", b"hello");
+
+        let cache = TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap();
+        let inputs = WeakFpInputs {
+            command: "tsc",
+            tool_path: &tool,
+            package_path: pkg.path(),
+            declared_input_globs: &[],
+            tracked_env: &[],
+            dep_abi_fingerprints: &[],
+        };
+        let ps = StoredPathset {
+            reads: vec![f.clone()],
+            writes: vec![],
+        };
+        cache.record(&inputs, ps, entry_template("tsc")).unwrap();
+
+        let result = cache.lookup_with_pathset_reads(&inputs);
+        assert!(result.is_some(), "expected a cache hit");
+        let (sf, entry, reads) = result.unwrap();
+        assert_eq!(sf.len(), 64, "sf should be a 64-char hex string");
+        assert_eq!(entry.exit_code, 0);
+        assert_eq!(reads, vec![f], "reads must match the stored pathset reads");
+    }
+
+    #[test]
+    fn lookup_with_pathset_reads_returns_none_on_miss() {
+        let cache_dir = tempdir().unwrap();
+        let pkg = tempdir().unwrap();
+        let tool = pkg.path().join("tool");
+        std::fs::write(&tool, b"x").unwrap();
+
+        let cache = TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap();
+        let inputs = WeakFpInputs {
+            command: "tsc",
+            tool_path: &tool,
+            package_path: pkg.path(),
+            declared_input_globs: &[],
+            tracked_env: &[],
+            dep_abi_fingerprints: &[],
+        };
+        assert!(cache.lookup_with_pathset_reads(&inputs).is_none());
     }
 
     #[test]
