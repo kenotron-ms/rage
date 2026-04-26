@@ -772,7 +772,21 @@ async fn run_root_task_two_phase(
         };
 
         if lockfile_restored {
-            return Ok(());
+            // Yarn-berry zip extraction populates node_modules/<pkg>/ but never
+            // runs the linker, so node_modules/.bin/ symlinks are absent after a
+            // CAS restore.  Re-verify effects before declaring success; if .bin/
+            // is still missing we must fall through and re-run the real install
+            // so the package manager can recreate the bin-link tree.
+            if plugin.verify_install_effects(&task.workspace_root) {
+                return Ok(());
+            }
+            eprintln!(
+                "[rage] {}#{} lockfile restore extracted packages but \
+                 node_modules/.bin/ is missing — re-running install to recreate bin-links",
+                task.package_name, task.script_name
+            );
+            let _ = std::fs::remove_file(&marker);
+            // fall through to the actual install run below
         }
 
         // Fall back to file-level restore (original approach)
@@ -782,11 +796,25 @@ async fn run_root_task_two_phase(
             artifact_store.as_ref(),
         ) {
             Ok(true) => {
+                // File-level restore succeeded, but node_modules/.bin/ is not
+                // captured by the walk-based strategy (hidden dirs are skipped).
+                // Re-verify before declaring success; if .bin/ is still absent
+                // fall through to the actual install run so the package manager
+                // can recreate the bin-link tree.
+                if plugin.verify_install_effects(&task.workspace_root) {
+                    eprintln!(
+                        "[rage] {}#{} \u{2713} (restored from artifact cache)",
+                        task.package_name, task.script_name
+                    );
+                    return Ok(());
+                }
                 eprintln!(
-                    "[rage] {}#{} \u{2713} (restored from artifact cache)",
+                    "[rage] {}#{} artifact restore missing node_modules/.bin/ \
+                     — re-running install to recreate bin-links",
                     task.package_name, task.script_name
                 );
-                return Ok(());
+                let _ = std::fs::remove_file(&marker);
+                // fall through to the actual install run below
             }
             Ok(false) => {
                 // CAS miss or partial — fall through and re-run install.
