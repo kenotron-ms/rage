@@ -513,14 +513,14 @@ async fn run_single_task_two_phase(
         if !stored_pathset_reads.is_empty() {
             let install_fp = find_latest_install_fingerprint(cache.dir());
             if let Some(fp) = install_fp {
-                let manifest_path = cache
+                let artifact_dir = cache
                     .dir()
                     .join("artifact-packages")
-                    .join(format!("{fp}.json"));
+                    .join(&fp); // directory, not file
                 crate::artifact_capture::schedule_capture(
                     stored_pathset_reads,
                     task.workspace_root.clone(),
-                    manifest_path,
+                    artifact_dir,
                     fp,
                     Arc::clone(&artifact_store),
                 );
@@ -668,14 +668,14 @@ async fn run_single_task_two_phase(
         if !pathset_reads_for_capture.is_empty() {
             let install_fp = find_latest_install_fingerprint(cache.dir());
             if let Some(fp) = install_fp {
-                let manifest_path = cache
+                let artifact_dir = cache
                     .dir()
                     .join("artifact-packages")
-                    .join(format!("{fp}.json"));
+                    .join(&fp); // directory, not file
                 crate::artifact_capture::schedule_capture(
                     pathset_reads_for_capture,
                     task.workspace_root.clone(),
-                    manifest_path,
+                    artifact_dir,
                     fp,
                     Arc::clone(&artifact_store),
                 );
@@ -721,12 +721,12 @@ async fn run_root_task_two_phase(
             return Ok(());
         }
         // Effects gone — try CAS restoration before falling through to re-run.
-        let manifest_path = cache
+        let artifact_dir = cache
             .dir()
             .join("artifact-packages")
-            .join(format!("{fp}.json"));
+            .join(&fp); // directory, not file
         match crate::artifact_restore::try_restore_from_cas(
-            &manifest_path,
+            &artifact_dir,
             &task.workspace_root,
             artifact_store.as_ref(),
         ) {
@@ -1926,14 +1926,14 @@ mod tests {
 
     // ── cache-hit → schedule_capture integration ──────────────────────────────
 
-    /// `find_latest_install_fingerprint` + `capture_now` together write a manifest
-    /// for pnpm packages referenced in pathset reads.
+    /// `find_latest_install_fingerprint` + `capture_now` together write per-package
+    /// files for pnpm packages referenced in pathset reads.
     ///
     /// This covers the code path wired in `run_single_task_two_phase`:
     /// `stored_pathset_reads` non-empty + `find_latest_install_fingerprint` returns `Some(fp)`
-    /// → `schedule_capture` fires and `artifact-packages/{fp}.json` is written.
+    /// → `schedule_capture` fires and `artifact-packages/{fp}/ms@2.1.3.json` is written.
     #[test]
-    fn cache_hit_capture_writes_manifest_for_pnpm_packages() {
+    fn cache_hit_capture_writes_per_package_files_for_pnpm_packages() {
         use tempfile::tempdir;
 
         let cache_dir = tempdir().unwrap();
@@ -1964,31 +1964,27 @@ mod tests {
         let found_fp = find_latest_install_fingerprint(cache_dir.path());
         assert_eq!(found_fp.as_deref(), Some(fp));
 
-        // 5) Derive manifest path and call capture_now (sync variant of schedule_capture).
-        let manifest_path = cache_dir
-            .path()
-            .join("artifact-packages")
-            .join(format!("{fp}.json"));
+        // 5) Derive artifact directory and call capture_now (sync variant of schedule_capture).
+        let artifact_dir = cache_dir.path().join("artifact-packages").join(fp);
         crate::artifact_capture::capture_now(
             &pathset_reads,
             ws.path(),
-            &manifest_path,
+            &artifact_dir,
             fp,
             &store,
         )
         .unwrap();
 
-        // 6) Verify manifest written and contains ms@2.1.3.
-        let bytes = std::fs::read(&manifest_path).unwrap();
-        let manifest: artifact_store::WorkspacePackageManifest =
-            serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(manifest.install_fingerprint, fp);
-        assert_eq!(manifest.packages.len(), 1, "expected exactly one package");
-        assert_eq!(manifest.packages[0].name, "ms");
-        assert_eq!(manifest.packages[0].version, "2.1.3");
-        // Every file hash referenced in the manifest must be present in the CAS.
+        // 6) Verify per-package file written and contains ms@2.1.3.
+        let pkg_file = artifact_dir.join("ms@2.1.3.json");
+        assert!(pkg_file.exists(), "per-package file must exist: {pkg_file:?}");
+        let text = std::fs::read_to_string(&pkg_file).unwrap();
+        let artifact: artifact_store::PackageArtifact = serde_json::from_str(&text).unwrap();
+        assert_eq!(artifact.name, "ms");
+        assert_eq!(artifact.version, "2.1.3");
+        // Every file hash referenced in the per-package file must be present in the CAS.
         use artifact_store::ArtifactStore as _;
-        for (_, hash) in &manifest.packages[0].files {
+        for (_, hash) in &artifact.files {
             assert!(
                 store.contains(hash),
                 "CAS should contain hash for captured file"
