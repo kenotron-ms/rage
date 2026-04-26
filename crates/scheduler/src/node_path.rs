@@ -78,10 +78,43 @@ pub fn resolve_node_version(workspace_root: &Path) -> Option<String> {
 ///
 /// `version` is taken verbatim except a single leading `v` is stripped before
 /// constructing the candidate paths (so `"v18.20.4"` and `"18.20.4"` both work).
-pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
-    let v_no_prefix = version.strip_prefix('v').unwrap_or(version);
-    let v_with_prefix = format!("v{v_no_prefix}");
+/// Scan `base` for a version directory that matches `version`.
+///
+/// Tries exact match first (`v18.20.4`, `18.20.4`), then falls back to a
+/// prefix scan so that a bare major like `"18"` matches `v18.20.8`.
+fn resolve_version_dir(base: &Path, version: &str) -> Option<PathBuf> {
+    // Strip leading 'v' from both sides for comparison.
+    let version_bare = version.trim_start_matches('v');
 
+    // Try exact match first (version might already be full semver like "18.20.8").
+    for candidate in [version.to_string(), format!("v{version_bare}")] {
+        let p = base.join(&candidate);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+
+    // Prefix match: given "18" or "18.20", find highest v18.x.y installed.
+    // Collect all entries whose bare name starts with version_bare + "."
+    // OR whose bare name == version_bare (exact after stripping v).
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(base)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let bare = name.trim_start_matches('v');
+            bare == version_bare || bare.starts_with(&format!("{version_bare}."))
+        })
+        .collect();
+
+    // Sort descending so highest semver patch wins.
+    matches.sort_by(|a, b| b.cmp(a));
+    matches.into_iter().next()
+}
+
+pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
 
     // 1. fnm — honor $FNM_DIR, fall back to ~/.local/share/fnm
@@ -89,12 +122,12 @@ pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| home.as_ref().map(|h| h.join(".local/share/fnm")));
     if let Some(root) = fnm_root {
-        let candidate = root
-            .join("node-versions")
-            .join(&v_with_prefix)
-            .join("installation/bin");
-        if candidate.is_dir() {
-            return Some(candidate);
+        let base = root.join("node-versions");
+        if let Some(version_dir) = resolve_version_dir(&base, version) {
+            let candidate = version_dir.join("installation/bin");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
         }
     }
 
@@ -103,31 +136,34 @@ pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| home.as_ref().map(|h| h.join(".nvm")));
     if let Some(root) = nvm_root {
-        let candidate = root.join("versions/node").join(&v_with_prefix).join("bin");
-        if candidate.is_dir() {
-            return Some(candidate);
+        let base = root.join("versions/node");
+        if let Some(version_dir) = resolve_version_dir(&base, version) {
+            let candidate = version_dir.join("bin");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
         }
     }
 
-    // 3. asdf — ~/.asdf/installs/nodejs/{ver}/bin (no leading 'v')
+    // 3. asdf — ~/.asdf/installs/nodejs/{ver}/bin
     if let Some(h) = &home {
-        let candidate = h
-            .join(".asdf/installs/nodejs")
-            .join(v_no_prefix)
-            .join("bin");
-        if candidate.is_dir() {
-            return Some(candidate);
+        let base = h.join(".asdf/installs/nodejs");
+        if let Some(version_dir) = resolve_version_dir(&base, version) {
+            let candidate = version_dir.join("bin");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
         }
     }
 
-    // 4. mise — ~/.local/share/mise/installs/node/{ver}/bin (no leading 'v')
+    // 4. mise — ~/.local/share/mise/installs/node/{ver}/bin
     if let Some(h) = &home {
-        let candidate = h
-            .join(".local/share/mise/installs/node")
-            .join(v_no_prefix)
-            .join("bin");
-        if candidate.is_dir() {
-            return Some(candidate);
+        let base = h.join(".local/share/mise/installs/node");
+        if let Some(version_dir) = resolve_version_dir(&base, version) {
+            let candidate = version_dir.join("bin");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
         }
     }
 
@@ -520,6 +556,35 @@ mod tests {
                 "missing VM install must yield no VM bin; got: {path}"
             );
         });
+    }
+
+    // ── resolve_version_dir ───────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_version_dir_matches_major_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Simulate fnm layout: v18.20.8 installed
+        std::fs::create_dir_all(tmp.path().join("v18.20.8")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("v20.11.0")).unwrap();
+
+        // "18" should resolve to v18.20.8
+        let result = resolve_version_dir(tmp.path(), "18").unwrap();
+        assert_eq!(result.file_name().unwrap(), "v18.20.8");
+
+        // "v18" should also resolve
+        let result2 = resolve_version_dir(tmp.path(), "v18").unwrap();
+        assert_eq!(result2.file_name().unwrap(), "v18.20.8");
+
+        // "18.20" should resolve to v18.20.8
+        let result3 = resolve_version_dir(tmp.path(), "18.20").unwrap();
+        assert_eq!(result3.file_name().unwrap(), "v18.20.8");
+
+        // exact full semver still works
+        let result4 = resolve_version_dir(tmp.path(), "v18.20.8").unwrap();
+        assert_eq!(result4.file_name().unwrap(), "v18.20.8");
+
+        // non-matching returns None
+        assert!(resolve_version_dir(tmp.path(), "16").is_none());
     }
 
     // ── which_first ───────────────────────────────────────────────────────────
