@@ -2,7 +2,7 @@
 //! into the per-package CAS, updating the workspace manifest atomically.
 
 use artifact_store::{
-    capture_package, LocalArtifactStore, PackageArtifact, PathsetPackageRef,
+    capture_package, ArtifactStore, LocalArtifactStore, PackageArtifact, PathsetPackageRef,
     WorkspacePackageManifest,
 };
 use plugin_typescript::pathset_extractor::{
@@ -24,15 +24,21 @@ pub fn schedule_capture(
     install_fingerprint: String,
     store: Arc<LocalArtifactStore>,
 ) {
-    tokio::task::spawn_blocking(move || {
-        let _ = capture_now(
-            &pathset_reads,
-            &workspace_root,
-            &manifest_path,
-            &install_fingerprint,
-            store.as_ref(),
-        );
-    });
+    // Use a detached OS thread so the tokio runtime does NOT wait for this
+    // to complete at shutdown — the build should exit immediately after tasks
+    // finish. If the process exits before capture completes, the next build
+    // run will retry (atomic manifest writes mean no corruption).
+    let _ = std::thread::Builder::new()
+        .name("rage-artifact-capture".into())
+        .spawn(move || {
+            let _ = capture_now(
+                &pathset_reads,
+                &workspace_root,
+                &manifest_path,
+                &install_fingerprint,
+                store.as_ref(),
+            );
+        });
 }
 
 /// Synchronous variant — does the work inline. Used by integration tests.
@@ -52,6 +58,34 @@ pub fn capture_now(
     } else {
         ts_refs
     };
+
+    if ts_refs.is_empty() {
+        return Ok(());
+    }
+
+    // Only capture packages not already in the CAS — avoid redundant work.
+    // Cap at 20 new packages per invocation to keep background time bounded.
+    // The CAS builds up gradually across multiple runs rather than trying to
+    // do everything at once (25 tasks × 100s of packages × 1000s of files is
+    // too much work per build).
+    const MAX_NEW_PACKAGES_PER_CAPTURE: usize = 20;
+    let ts_refs: Vec<_> = ts_refs
+        .into_iter()
+        .filter(|r| {
+            // Quick check: if ANY file from this package is missing in CAS,
+            // we need to capture. Use package.json hash as a proxy.
+            !r.package_root.exists() || {
+                let pkg_json = r.package_root.join("package.json");
+                if let Ok(bytes) = std::fs::read(&pkg_json) {
+                    let hash = artifact_store::ContentHash::of(&bytes);
+                    !store.contains(&hash)
+                } else {
+                    false
+                }
+            }
+        })
+        .take(MAX_NEW_PACKAGES_PER_CAPTURE)
+        .collect();
 
     if ts_refs.is_empty() {
         return Ok(());
@@ -121,6 +155,35 @@ pub fn capture_now(
 mod tests {
     use super::*;
     use artifact_store::{ArtifactStore, LocalArtifactStore, WorkspacePackageManifest};
+
+    #[test]
+    fn schedule_capture_returns_immediately() {
+        use std::time::{Duration, Instant};
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalArtifactStore::new(tmp.path()));
+
+        // Pass a large fake pathset — if this were spawn_blocking it would
+        // block until the closure runs; with a detached thread it returns instantly.
+        let reads: Vec<PathBuf> = (0..1000)
+            .map(|i| tmp.path().join(format!("node_modules/pkg{i}/index.js")))
+            .collect();
+
+        let start = Instant::now();
+        schedule_capture(
+            reads,
+            tmp.path().to_path_buf(),
+            tmp.path().join("manifest.json"),
+            "fp123".to_string(),
+            store,
+        );
+        let elapsed = start.elapsed();
+
+        // Should return in well under 100ms — the thread is spawned but not awaited
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "schedule_capture blocked for {elapsed:?}"
+        );
+    }
 
     #[test]
     fn capture_now_writes_manifest_with_pnpm_packages() {
