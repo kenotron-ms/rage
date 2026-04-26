@@ -797,8 +797,6 @@ async fn run_root_task_two_phase(
     }
 }
 
-/// Resolve output globs for a task, returning matching file paths.
-/// Skips `node_modules`, `.git`, `target` directories (same as WF glob resolver).
 /// Find the most recent `root-{fp}.done` marker in `cache_dir` and return its `fp`.
 /// Used by the capture hook to key the manifest against the install fingerprint.
 fn find_latest_install_fingerprint(cache_dir: &Path) -> Option<String> {
@@ -1924,5 +1922,77 @@ mod tests {
         run_tasks_two_phase(&dag, vec![task], cache.clone(), test_plugin(), test_store())
             .await
             .unwrap();
+    }
+
+    // ── cache-hit → schedule_capture integration ──────────────────────────────
+
+    /// `find_latest_install_fingerprint` + `capture_now` together write a manifest
+    /// for pnpm packages referenced in pathset reads.
+    ///
+    /// This covers the code path wired in `run_single_task_two_phase`:
+    /// `stored_pathset_reads` non-empty + `find_latest_install_fingerprint` returns `Some(fp)`
+    /// → `schedule_capture` fires and `artifact-packages/{fp}.json` is written.
+    #[test]
+    fn cache_hit_capture_writes_manifest_for_pnpm_packages() {
+        use tempfile::tempdir;
+
+        let cache_dir = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        let store_dir = tempdir().unwrap();
+        let store = artifact_store::LocalArtifactStore::new(store_dir.path());
+
+        // 1) Write a `root-{fp}.done` marker so find_latest_install_fingerprint returns "abc123".
+        let fp = "abc123";
+        std::fs::write(cache_dir.path().join(format!("root-{fp}.done")), b"").unwrap();
+
+        // 2) Build a fake pnpm virtual store layout.
+        let pnpm_pkg = ws
+            .path()
+            .join("node_modules/.pnpm/ms@2.1.3/node_modules/ms");
+        std::fs::create_dir_all(&pnpm_pkg).unwrap();
+        std::fs::write(pnpm_pkg.join("index.js"), b"// ms").unwrap();
+        std::fs::write(
+            pnpm_pkg.join("package.json"),
+            br#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
+
+        // 3) Pathset reads that point into the pnpm virtual store.
+        let pathset_reads = vec![pnpm_pkg.join("index.js"), pnpm_pkg.join("package.json")];
+
+        // 4) find_latest_install_fingerprint should return "abc123".
+        let found_fp = find_latest_install_fingerprint(cache_dir.path());
+        assert_eq!(found_fp.as_deref(), Some(fp));
+
+        // 5) Derive manifest path and call capture_now (sync variant of schedule_capture).
+        let manifest_path = cache_dir
+            .path()
+            .join("artifact-packages")
+            .join(format!("{fp}.json"));
+        crate::artifact_capture::capture_now(
+            &pathset_reads,
+            ws.path(),
+            &manifest_path,
+            fp,
+            &store,
+        )
+        .unwrap();
+
+        // 6) Verify manifest written and contains ms@2.1.3.
+        let bytes = std::fs::read(&manifest_path).unwrap();
+        let manifest: artifact_store::WorkspacePackageManifest =
+            serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(manifest.install_fingerprint, fp);
+        assert_eq!(manifest.packages.len(), 1, "expected exactly one package");
+        assert_eq!(manifest.packages[0].name, "ms");
+        assert_eq!(manifest.packages[0].version, "2.1.3");
+        // Every file hash referenced in the manifest must be present in the CAS.
+        use artifact_store::ArtifactStore as _;
+        for (_, hash) in &manifest.packages[0].files {
+            assert!(
+                store.contains(hash),
+                "CAS should contain hash for captured file"
+            );
+        }
     }
 }

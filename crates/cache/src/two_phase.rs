@@ -49,14 +49,8 @@ impl TwoPhaseCache {
     ///
     /// Returns `Some((sf, entry))` on a hit, or `None` on a miss.
     pub fn lookup(&self, weak_fp_inputs: &WeakFpInputs) -> Option<(String, CacheEntry)> {
-        let wf = compute_weak_fingerprint(weak_fp_inputs);
-        for ps in self.pathsets.list(&wf) {
-            let sf = compute_strong_fingerprint(&wf, &ps.reads);
-            if let Some(entry) = self.read_entry(&sf) {
-                return Some((sf, entry));
-            }
-        }
-        None
+        self.lookup_with_pathset_reads(weak_fp_inputs)
+            .map(|(sf, entry, _)| (sf, entry))
     }
 
     /// Like `lookup`, but also returns the pathset reads from the stored WF entry
