@@ -380,9 +380,8 @@ async fn cmd_run(
         // Sits parallel to cache/ so it can be shared across workspaces on the host.
         let cache_dir_for_store = resolve_cache_dir(root);
         let store_root = cache_dir_for_store
-            .parent()                  // <RAGE_HOME>/cache
-            .and_then(|p| p.parent())  // <RAGE_HOME>
-            .map(|p| p.join("artifacts"))
+            .parent()                  // ~/.rage
+            .map(|p| p.join("artifacts"))  // ~/.rage/artifacts
             .unwrap_or_else(|| cache_dir_for_store.join("artifacts"));
         std::fs::create_dir_all(&store_root).ok();
         let artifact_store = std::sync::Arc::new(
@@ -434,6 +433,36 @@ fn resolve_cache_dir(root: &Path) -> std::path::PathBuf {
                 .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
             home.join(".rage").join("cache")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn store_root_is_sibling_of_cache_not_grandparent() {
+        // Demonstrates that store_root should go up ONE level from cache_dir
+        // to reach the .rage directory, then join("artifacts")
+        // Current buggy code does TWO parents: goes to ~ instead of .rage
+        let cache_dir = std::path::PathBuf::from("/home/user/.rage/cache");
+        
+        // WRONG (buggy): two parents
+        let store_root_buggy = cache_dir
+            .parent()                  // /home/user/.rage
+            .and_then(|p| p.parent())  // /home/user <- BUG: one too many
+            .map(|p| p.join("artifacts"))
+            .unwrap_or_else(|| cache_dir.join("artifacts"));
+        assert_eq!(store_root_buggy, std::path::PathBuf::from("/home/user/artifacts"));
+        
+        // RIGHT (fixed): one parent
+        let store_root_correct = cache_dir
+            .parent()                  // /home/user/.rage
+            .map(|p| p.join("artifacts"))  // /home/user/.rage/artifacts
+            .unwrap_or_else(|| cache_dir.join("artifacts"));
+        assert_eq!(
+            store_root_correct,
+            std::path::PathBuf::from("/home/user/.rage/artifacts")
+        );
     }
 }
 
