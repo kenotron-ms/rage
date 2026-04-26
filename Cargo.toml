@@ -35,3 +35,4 @@ all = { level = "warn", priority = -1 }
 tonic = "0.12"
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
+pathdiff = "0.2"

@@ -735,7 +735,7 @@ async fn run_root_task_two_phase(
             .join(&fp);
 
         // Try lockfile-based restore first
-        let lockfile_restored = {
+        let (lockfile_restored, lockfile_pkg_count) = {
             use plugin_typescript::lockfile::compute_cas_key;
             let lockfile_pkgs = plugin.parse_lockfile(&task.workspace_root);
             if let Some(pkgs) = lockfile_pkgs {
@@ -747,46 +747,36 @@ async fn run_root_task_two_phase(
 
                 if all_present && !pkgs.is_empty() {
                     let store_ref: &dyn plugin::ArtifactStoreRef = artifact_store.as_ref();
+                    let n = pkgs.len();
                     match plugin.restore_from_cas(&pkgs, &task.workspace_root, store_ref) {
-                        Ok(()) => {
-                            eprintln!(
-                                "[rage] {}#{} \u{2713} (restored from artifact cache, {} packages)",
-                                task.package_name, task.script_name, pkgs.len()
-                            );
-                            true
-                        }
+                        Ok(()) => (true, n),
                         Err(e) => {
                             eprintln!(
                                 "[rage] {}#{} lockfile restore partial ({e}) — trying file-level restore",
                                 task.package_name, task.script_name
                             );
-                            false
+                            (false, 0)
                         }
                     }
                 } else {
-                    false // Some tarballs not yet in CAS — fall through
+                    (false, 0) // Some tarballs not yet in CAS — fall through
                 }
             } else {
-                false // No lockfile support — fall through to file-level
+                (false, 0) // No lockfile support — fall through to file-level
             }
         };
 
         if lockfile_restored {
-            // Yarn-berry zip extraction populates node_modules/<pkg>/ but never
-            // runs the linker, so node_modules/.bin/ symlinks are absent after a
-            // CAS restore.  Re-verify effects before declaring success; if .bin/
-            // is still missing we must fall through and re-run the real install
-            // so the package manager can recreate the bin-link tree.
-            if plugin.verify_install_effects(&task.workspace_root) {
-                return Ok(());
-            }
+            // Create node_modules/.bin/ symlinks from each package's `bin` field.
+            // Tarballs don't contain bin symlinks, so we generate them here to
+            // avoid running the package manager just for bin-link creation.
+            let bin_count =
+                crate::bin_links::create_bin_links(&task.workspace_root).unwrap_or(0);
             eprintln!(
-                "[rage] {}#{} lockfile restore extracted packages but \
-                 node_modules/.bin/ is missing — re-running install to recreate bin-links",
-                task.package_name, task.script_name
+                "[rage] {}#{} \u{2713} (restored from artifact cache — {} packages, {} bin links)",
+                task.package_name, task.script_name, lockfile_pkg_count, bin_count
             );
-            let _ = std::fs::remove_file(&marker);
-            // fall through to the actual install run below
+            return Ok(());
         }
 
         // Fall back to file-level restore (original approach)
@@ -796,25 +786,17 @@ async fn run_root_task_two_phase(
             artifact_store.as_ref(),
         ) {
             Ok(true) => {
-                // File-level restore succeeded, but node_modules/.bin/ is not
-                // captured by the walk-based strategy (hidden dirs are skipped).
-                // Re-verify before declaring success; if .bin/ is still absent
-                // fall through to the actual install run so the package manager
-                // can recreate the bin-link tree.
-                if plugin.verify_install_effects(&task.workspace_root) {
-                    eprintln!(
-                        "[rage] {}#{} \u{2713} (restored from artifact cache)",
-                        task.package_name, task.script_name
-                    );
-                    return Ok(());
-                }
+                // Create node_modules/.bin/ symlinks from each package's `bin` field.
+                // Hidden dirs are skipped by the walk-based capture strategy, so
+                // .bin/ is absent after a file-level restore. We generate the
+                // symlinks here instead of re-running the package manager.
+                let bin_count =
+                    crate::bin_links::create_bin_links(&task.workspace_root).unwrap_or(0);
                 eprintln!(
-                    "[rage] {}#{} artifact restore missing node_modules/.bin/ \
-                     — re-running install to recreate bin-links",
-                    task.package_name, task.script_name
+                    "[rage] {}#{} \u{2713} (restored from artifact cache — {} bin links)",
+                    task.package_name, task.script_name, bin_count
                 );
-                let _ = std::fs::remove_file(&marker);
-                // fall through to the actual install run below
+                return Ok(());
             }
             Ok(false) => {
                 // CAS miss or partial — fall through and re-run install.

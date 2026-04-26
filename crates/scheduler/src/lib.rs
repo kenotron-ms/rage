@@ -3,6 +3,7 @@
 
 pub mod artifact_capture;
 pub mod artifact_restore;
+pub mod bin_links;
 pub mod node_path;
 pub mod runner;
 pub mod task;

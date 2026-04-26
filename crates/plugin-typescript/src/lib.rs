@@ -226,27 +226,13 @@ impl EcosystemPlugin for TypeScriptPlugin {
 
     fn verify_install_effects(&self, workspace_root: &std::path::Path) -> bool {
         // node_modules/ must exist and be non-empty.
+        // Bin-link creation is now handled by `bin_links::create_bin_links` after
+        // every CAS restore, so we no longer need to verify .bin/ here.
         let nm = workspace_root.join("node_modules");
-        match std::fs::read_dir(&nm) {
-            Ok(mut iter) => {
-                if iter.next().is_none() {
-                    return false;
-                }
-            }
-            Err(_) => return false,
-        }
-
-        // node_modules/.bin/ must exist and be non-empty.
-        //
-        // Yarn-berry's restore_from_cas extracts package zips into node_modules/
-        // but never runs the linker, so .bin/ symlinks are absent after a CAS
-        // restore.  Without .bin/, tsc and every other CLI devtool are invisible
-        // to package build tasks, producing exit 127.
-        let bin = nm.join(".bin");
-        match std::fs::read_dir(&bin) {
-            Ok(mut iter) => iter.next().is_some(),
-            Err(_) => false,
-        }
+        nm.is_dir()
+            && std::fs::read_dir(&nm)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false)
     }
 
     fn parse_lockfile(&self, workspace_root: &Path) -> Option<Vec<plugin::LockfilePackage>> {
@@ -709,15 +695,12 @@ mod tests {
     }
 
     #[test]
-    fn verify_install_effects_true_when_node_modules_and_bin_present() {
+    fn verify_install_effects_true_when_node_modules_non_empty() {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/ms")).unwrap();
         std::fs::write(dir.path().join("node_modules/ms/index.js"), b"x").unwrap();
-        // .bin/ must also be present and non-empty for a complete install.
-        let bin = dir.path().join("node_modules/.bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("tsc"), b"#!/bin/sh\n").unwrap();
         let p = TypeScriptPlugin::new();
+        // Passes even without .bin/ — bin-link creation is handled by bin_links::create_bin_links.
         assert!(p.verify_install_effects(dir.path()));
     }
 
@@ -736,32 +719,31 @@ mod tests {
         assert!(!p.verify_install_effects(dir.path()));
     }
 
-    /// Regression: restore_from_cas extracts package zips but never runs the
-    /// yarn linker, so node_modules/.bin/ is absent after a CAS restore.
-    /// verify_install_effects must return false in that state so the runner
-    /// falls through to a real `yarn install` that recreates bin-links.
+    /// After CAS restore, packages are present but .bin/ symlinks are created by
+    /// bin_links::create_bin_links (not by the package manager). verify_install_effects
+    /// no longer checks .bin/ — it only checks node_modules/ is non-empty.
     #[test]
-    fn verify_install_effects_false_when_bin_dir_missing() {
+    fn verify_install_effects_true_when_bin_dir_missing_but_packages_present() {
         let dir = tempdir().unwrap();
-        // Simulate a CAS restore: packages present, .bin/ never created.
+        // Simulate a CAS restore: packages present, .bin/ not yet created.
         std::fs::create_dir_all(dir.path().join("node_modules/ms")).unwrap();
         std::fs::write(dir.path().join("node_modules/ms/index.js"), b"x").unwrap();
-        // Deliberately no node_modules/.bin/
+        // No node_modules/.bin/ — bin_links::create_bin_links will create it later.
         let p = TypeScriptPlugin::new();
         assert!(
-            !p.verify_install_effects(dir.path()),
-            "must return false when .bin/ is absent — tsc would be exit-127 otherwise"
+            p.verify_install_effects(dir.path()),
+            "must return true when packages are present, even without .bin/              (bin-links are created separately by bin_links::create_bin_links)"
         );
     }
 
     #[test]
-    fn verify_install_effects_false_when_bin_dir_empty() {
+    fn verify_install_effects_true_when_bin_dir_empty_but_packages_present() {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/ms")).unwrap();
         std::fs::write(dir.path().join("node_modules/ms/index.js"), b"x").unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/.bin")).unwrap();
-        // .bin/ exists but has no symlinks yet
+        // .bin/ exists but is empty — still OK, bin_links::create_bin_links populates it.
         let p = TypeScriptPlugin::new();
-        assert!(!p.verify_install_effects(dir.path()));
+        assert!(p.verify_install_effects(dir.path()));
     }
 }
