@@ -76,8 +76,8 @@ impl ArtifactStore for LocalArtifactStore {
             Err(e) => {
                 let kind = e.kind();
                 let raw = e.raw_os_error();
-                let is_exdev = raw == Some(libc_exdev())
-                    || matches!(kind, std::io::ErrorKind::Unsupported);
+                let is_exdev =
+                    raw == Some(libc_exdev()) || matches!(kind, std::io::ErrorKind::Unsupported);
                 let is_perm = matches!(kind, std::io::ErrorKind::PermissionDenied);
                 if is_exdev || is_perm {
                     std::fs::copy(&src, target)?;
@@ -149,6 +149,21 @@ impl LocalArtifactStore {
         }
     }
 
+    /// Return the on-disk path for a 32-byte hash in the CAS.
+    ///
+    /// Layout: `{root}/content/{hex[..2]}/{hex[2..]}/data`
+    ///
+    /// The file may or may not exist; callers use this for hardlinking
+    /// into a target directory without re-reading bytes.
+    pub fn cas_file_path(&self, hash: &[u8; 32]) -> PathBuf {
+        let hex = hex::encode(hash);
+        self.root
+            .join("content")
+            .join(&hex[..2])
+            .join(&hex[2..])
+            .join("data")
+    }
+
     /// Check existence by raw 32-byte key (without computing ContentHash).
     pub fn contains_raw_key(&self, key: &[u8; 32]) -> bool {
         let hex = hex::encode(key);
@@ -182,4 +197,37 @@ fn libc_exdev() -> i32 {
 #[cfg(not(unix))]
 fn libc_exdev() -> i32 {
     -1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn cas_file_path_matches_expected_layout() {
+        let dir = TempDir::new().unwrap();
+        let store = LocalArtifactStore::new(dir.path());
+        let hash = [0u8; 32];
+        let expected = dir
+            .path()
+            .join("content")
+            .join("00")
+            .join("0000000000000000000000000000000000000000000000000000000000000000"[2..].to_string())
+            .join("data");
+        assert_eq!(store.cas_file_path(&hash), expected);
+    }
+
+    #[test]
+    fn cas_file_path_matches_put_bytes_keyed_location() {
+        let dir = TempDir::new().unwrap();
+        let store = LocalArtifactStore::new(dir.path());
+        let key = [0u8; 32];
+        store.put_bytes_keyed(key, b"test content").unwrap();
+        assert!(store.cas_file_path(&key).is_file());
+        assert_eq!(
+            std::fs::read(store.cas_file_path(&key)).unwrap(),
+            b"test content"
+        );
+    }
 }
