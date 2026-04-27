@@ -239,6 +239,60 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Run `task.script` via `sh -c` in `task.cwd`. Returns `Ok(true)` when the
+/// script exits 0, `Ok(false)` for any other exit. Stdout/stderr are inherited.
+pub fn run_postinstall(task: &plugin::PostinstallTask) -> std::io::Result<bool> {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&task.script)
+        .current_dir(&task.cwd)
+        .status()?;
+    Ok(status.success())
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn task_with_script(cwd: &Path, script: &str) -> plugin::PostinstallTask {
+        plugin::PostinstallTask {
+            package_name: "p".to_string(),
+            version: "1.0.0".to_string(),
+            tarball_integrity: "sha512-x".to_string(),
+            script: script.to_string(),
+            cwd: cwd.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn run_succeeds_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = task_with_script(dir.path(), "true");
+        let result = run_postinstall(&task).unwrap();
+        assert!(result, "script 'true' should return Ok(true)");
+    }
+
+    #[test]
+    fn run_failure_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = task_with_script(dir.path(), "exit 1");
+        let result = run_postinstall(&task).unwrap();
+        assert!(!result, "script 'exit 1' should return Ok(false)");
+    }
+
+    #[test]
+    fn run_executes_in_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = task_with_script(dir.path(), "touch ran.txt");
+        run_postinstall(&task).unwrap();
+        assert!(
+            dir.path().join("ran.txt").exists(),
+            "ran.txt should exist after 'touch ran.txt' script"
+        );
+    }
+}
+
 /// Look up `key` in CAS. If absent, return `Ok(false)`. Otherwise deserialize
 /// JSON delta and write each entry under `target_dir`, creating parent dirs.
 pub fn restore_postinstall_outputs(
