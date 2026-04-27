@@ -31,6 +31,31 @@ pub struct LockfilePackage {
     pub tarball_url: Option<String>,
 }
 
+/// A postinstall script that must run after a package is extracted from the tarball CAS.
+///
+/// Lifecycle: the scheduler detects packages whose `package.json` declares a `postinstall`
+/// script and emits one `PostinstallTask` per such package. The task is run inside
+/// `cwd` (i.e. `node_modules/{name}/`) before the workspace package graph is walked.
+///
+/// ## CAS key
+///
+/// The CAS key for the resulting outputs is
+/// `blake3(tarball_integrity + ":" + platform_triple + ":" + node_version)`,
+/// computed by `scheduler::postinstall_cache::postinstall_cas_key`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PostinstallTask {
+    /// npm package name (e.g. `"esbuild"` or `"@prisma/client"`).
+    pub package_name: String,
+    /// Resolved version (e.g. `"0.21.5"`).
+    pub version: String,
+    /// Lockfile integrity string for this package — basis of the CAS key.
+    pub tarball_integrity: String,
+    /// Shell command from `package.json:scripts.postinstall`.
+    pub script: String,
+    /// Working directory for the script — `node_modules/{name}/`.
+    pub cwd: PathBuf,
+}
+
 /// Minimal artifact store reference used by plugins for CAS restoration.
 ///
 /// Defined here to avoid a direct dependency on the `artifact-store` crate from
@@ -212,6 +237,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = NullPlugin;
         assert!(p.local_pm_cache(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn postinstall_task_roundtrips_serde() {
+        let task = PostinstallTask {
+            package_name: "esbuild".to_string(),
+            version: "0.21.5".to_string(),
+            tarball_integrity: "sha512-xyz".to_string(),
+            script: "node install.js".to_string(),
+            cwd: PathBuf::from("/tmp/wsp/node_modules/esbuild"),
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        let decoded: PostinstallTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, task);
     }
 
     #[test]
