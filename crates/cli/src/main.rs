@@ -456,17 +456,16 @@ async fn cmd_run(
         // Full remote support for run_tasks_two_phase will integrate the remote
         // backend with TwoPhaseCache in a future iteration.
         let _ = &config.cache.backend; // referenced so Clippy is happy
-        // Construct shared LocalArtifactStore at <RAGE_HOME>/artifacts.
-        // Sits parallel to cache/ so it can be shared across workspaces on the host.
+                                       // Construct shared LocalArtifactStore at <RAGE_HOME>/artifacts.
+                                       // Sits parallel to cache/ so it can be shared across workspaces on the host.
         let cache_dir_for_store = resolve_cache_dir(root);
         let store_root = cache_dir_for_store
-            .parent()                  // ~/.rage
-            .map(|p| p.join("artifacts"))  // ~/.rage/artifacts
+            .parent() // ~/.rage
+            .map(|p| p.join("artifacts")) // ~/.rage/artifacts
             .unwrap_or_else(|| cache_dir_for_store.join("artifacts"));
         std::fs::create_dir_all(&store_root).ok();
-        let artifact_store = std::sync::Arc::new(
-            artifact_store::LocalArtifactStore::new(&store_root)
-        );
+        let artifact_store =
+            std::sync::Arc::new(artifact_store::LocalArtifactStore::new(&store_root));
         let plugin_arc: std::sync::Arc<dyn plugin::EcosystemPlugin> =
             std::sync::Arc::new(plugin_typescript::TypeScriptPlugin::new());
         scheduler::run_tasks_two_phase(&dag, tasks, two_phase, plugin_arc, artifact_store)
@@ -513,36 +512,6 @@ fn resolve_cache_dir(root: &Path) -> std::path::PathBuf {
                 .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
             home.join(".rage").join("cache")
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn store_root_is_sibling_of_cache_not_grandparent() {
-        // Demonstrates that store_root should go up ONE level from cache_dir
-        // to reach the .rage directory, then join("artifacts")
-        // Current buggy code does TWO parents: goes to ~ instead of .rage
-        let cache_dir = std::path::PathBuf::from("/home/user/.rage/cache");
-        
-        // WRONG (buggy): two parents
-        let store_root_buggy = cache_dir
-            .parent()                  // /home/user/.rage
-            .and_then(|p| p.parent())  // /home/user <- BUG: one too many
-            .map(|p| p.join("artifacts"))
-            .unwrap_or_else(|| cache_dir.join("artifacts"));
-        assert_eq!(store_root_buggy, std::path::PathBuf::from("/home/user/artifacts"));
-        
-        // RIGHT (fixed): one parent
-        let store_root_correct = cache_dir
-            .parent()                  // /home/user/.rage
-            .map(|p| p.join("artifacts"))  // /home/user/.rage/artifacts
-            .unwrap_or_else(|| cache_dir.join("artifacts"));
-        assert_eq!(
-            store_root_correct,
-            std::path::PathBuf::from("/home/user/.rage/artifacts")
-        );
     }
 }
 
@@ -680,10 +649,10 @@ async fn cmd_hub(
     let build_id = format!("build-{}", std::process::id());
 
     // Discover packages
-    let packages = workspace_tools::discover_packages(workspace)
-        .context("discovering workspace packages")?;
-    let resolved = workspace_tools::build_package_graph(packages)
-        .context("resolving package graph")?;
+    let packages =
+        workspace_tools::discover_packages(workspace).context("discovering workspace packages")?;
+    let resolved =
+        workspace_tools::build_package_graph(packages).context("resolving package graph")?;
 
     // Build task nodes for hub
     let mut task_nodes: Vec<TaskNode> = Vec::new();
@@ -695,15 +664,21 @@ async fn cmd_hub(
             .and_then(|v| v.get("scripts").and_then(|s| s.as_object().cloned()));
 
         let Some(scripts) = scripts else { continue };
-        let Some(cmd) = scripts.get(script).and_then(|c| c.as_str()) else { continue };
+        let Some(cmd) = scripts.get(script).and_then(|c| c.as_str()) else {
+            continue;
+        };
 
         let task_id = format!("{}#{}", pkg.name, script);
-        let pkg_path = pkg.path.strip_prefix(workspace)
+        let pkg_path = pkg
+            .path
+            .strip_prefix(workspace)
             .unwrap_or(&pkg.path)
             .to_string_lossy()
             .to_string();
 
-        let depends_on: Vec<String> = pkg.dependencies.iter()
+        let depends_on: Vec<String> = pkg
+            .dependencies
+            .iter()
             .map(|dep| format!("{}#{}", dep, script))
             .collect();
 
@@ -721,7 +696,10 @@ async fn cmd_hub(
         anyhow::bail!("No packages have a '{}' script", script);
     }
 
-    eprintln!("[rage-hub] {} tasks to distribute across spokes", task_nodes.len());
+    eprintln!(
+        "[rage-hub] {} tasks to distribute across spokes",
+        task_nodes.len()
+    );
 
     let hub = HubServer::new(task_nodes, token.clone(), build_id.clone());
 
@@ -764,10 +742,13 @@ async fn cmd_spoke(
 
     let hub_addr_str = if let Some(addr) = hub_address {
         addr
-    } else if let Some(file) = addr_file
-        .or_else(|| std::env::var("RAGE_HUB_ADDR_FILE").ok().map(PathBuf::from))
+    } else if let Some(file) =
+        addr_file.or_else(|| std::env::var("RAGE_HUB_ADDR_FILE").ok().map(PathBuf::from))
     {
-        eprintln!("[rage-spoke] polling for hub address from {}", file.display());
+        eprintln!(
+            "[rage-spoke] polling for hub address from {}",
+            file.display()
+        );
         let hub_addr = read_hub_addr_with_timeout(&file, 60).await?;
         hub_addr.addr
     } else if let Ok(addr) = std::env::var("RAGE_HUB_ADDRESS") {
@@ -778,4 +759,37 @@ async fn cmd_spoke(
 
     eprintln!("[rage-spoke] connecting to hub at {}", hub_addr_str);
     spoke_client::run_as_spoke(hub_addr_str, token, workspace.to_path_buf()).await
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn store_root_is_sibling_of_cache_not_grandparent() {
+        // Demonstrates that store_root should go up ONE level from cache_dir
+        // to reach the .rage directory, then join("artifacts")
+        // Current buggy code does TWO parents: goes to ~ instead of .rage
+        let cache_dir = std::path::PathBuf::from("/home/user/.rage/cache");
+
+        // WRONG (buggy): two parents
+        let store_root_buggy = cache_dir
+            .parent() // /home/user/.rage
+            .and_then(|p| p.parent()) // /home/user <- BUG: one too many
+            .map(|p| p.join("artifacts"))
+            .unwrap_or_else(|| cache_dir.join("artifacts"));
+        assert_eq!(
+            store_root_buggy,
+            std::path::PathBuf::from("/home/user/artifacts")
+        );
+
+        // RIGHT (fixed): one parent
+        let store_root_correct = cache_dir
+            .parent() // /home/user/.rage
+            .map(|p| p.join("artifacts")) // /home/user/.rage/artifacts
+            .unwrap_or_else(|| cache_dir.join("artifacts"));
+        assert_eq!(
+            store_root_correct,
+            std::path::PathBuf::from("/home/user/.rage/artifacts")
+        );
+    }
 }

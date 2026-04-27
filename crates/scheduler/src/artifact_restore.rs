@@ -64,7 +64,6 @@ mod tests {
     use super::*;
     use artifact_store::{
         capture_package, ContentHash, LocalArtifactStore, PackageArtifact, PathsetPackageRef,
-        WorkspacePackageManifest,
     };
     use std::path::PathBuf;
 
@@ -124,12 +123,8 @@ mod tests {
         let store_dir = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
         let store = LocalArtifactStore::new(store_dir.path());
-        let result = try_restore_from_cas(
-            &ws.path().join("does-not-exist"),
-            ws.path(),
-            &store,
-        )
-        .unwrap();
+        let result =
+            try_restore_from_cas(&ws.path().join("does-not-exist"), ws.path(), &store).unwrap();
         assert!(!result);
     }
 
@@ -168,7 +163,11 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(src.path().join("ms")).unwrap();
         std::fs::write(src.path().join("ms/index.js"), b"INDEX").unwrap();
-        std::fs::write(src.path().join("ms/package.json"), br#"{"name":"ms","version":"2.1.3"}"#).unwrap();
+        std::fs::write(
+            src.path().join("ms/package.json"),
+            br#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
         let pkg_ref = PathsetPackageRef {
             name: "ms".into(),
             version: "2.1.3".into(),

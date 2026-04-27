@@ -6,7 +6,6 @@
 //! Restore on cache hit by writing the delta files back.
 //! Deletions are out of scope for v1.
 
-use std::path::{Path, PathBuf};
 
 /// Whether a filesystem entry is a regular file or a symlink.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -435,7 +434,7 @@ mod capture_dir_tests {
 
         let link_entry = manifest
             .iter()
-            .find(|e| e.rel_path == PathBuf::from("link.txt"))
+            .find(|e| e.rel_path == std::path::Path::new("link.txt"))
             .expect("link.txt entry not found in manifest");
 
         assert_eq!(link_entry.content_hash, [0u8; 32], "symlink should have zeroed hash");
