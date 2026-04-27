@@ -110,6 +110,35 @@ pub fn read_pm_script_policy(workspace_root: &Path) -> ScriptPolicy {
     ScriptPolicy::AllEnabled
 }
 
+// ── Policy filter ─────────────────────────────────────────────────────────────
+
+/// Apply a [`ScriptPolicy`] to a list of discovered tasks, returning only the
+/// tasks that the policy permits to run.
+///
+/// | Policy | Behaviour |
+/// |--------|-----------|
+/// | [`ScriptPolicy::AllDisabled`] | Returns an empty [`Vec`] (no scripts run). |
+/// | [`ScriptPolicy::AllEnabled`]  | Returns all tasks unchanged. |
+/// | [`ScriptPolicy::Allowlist`]   | Keeps only tasks whose `package_name` appears in the set. |
+/// | [`ScriptPolicy::NeverList`]   | Keeps only tasks whose `package_name` does **not** appear in the set. |
+pub fn apply_policy(
+    tasks: Vec<RawPostinstallTask>,
+    policy: &ScriptPolicy,
+) -> Vec<RawPostinstallTask> {
+    match policy {
+        ScriptPolicy::AllDisabled => Vec::new(),
+        ScriptPolicy::AllEnabled => tasks,
+        ScriptPolicy::Allowlist(set) => tasks
+            .into_iter()
+            .filter(|t| set.contains(&t.package_name))
+            .collect(),
+        ScriptPolicy::NeverList(set) => tasks
+            .into_iter()
+            .filter(|t| !set.contains(&t.package_name))
+            .collect(),
+    }
+}
+
 // ── Scanner ───────────────────────────────────────────────────────────────────────────────────
 
 /// Walk `workspace_root/node_modules/` and return one [`RawPostinstallTask`] for
@@ -356,6 +385,49 @@ mod tests {
         let results = scan_postinstall_scripts(dir.path());
         assert_eq!(results.len(), 1, "expected exactly one result, got: {results:?}");
         assert_eq!(results[0].package_name, "ok");
+    }
+
+    // ── apply_policy tests ────────────────────────────────────────────────────
+
+    /// Build a minimal RawPostinstallTask for testing.
+    fn raw(name: &str) -> RawPostinstallTask {
+        RawPostinstallTask {
+            package_name: name.to_string(),
+            script: "noop".to_string(),
+            cwd: PathBuf::from(format!("/tmp/{name}")),
+        }
+    }
+
+    #[test]
+    fn apply_policy_all_disabled_returns_empty() {
+        let tasks = vec![raw("esbuild"), raw("bcrypt")];
+        let result = apply_policy(tasks, &ScriptPolicy::AllDisabled);
+        assert!(result.is_empty(), "AllDisabled should return empty vec");
+    }
+
+    #[test]
+    fn apply_policy_all_enabled_returns_all() {
+        let tasks = vec![raw("esbuild"), raw("bcrypt")];
+        let result = apply_policy(tasks, &ScriptPolicy::AllEnabled);
+        assert_eq!(result.len(), 2, "AllEnabled should pass all tasks through");
+    }
+
+    #[test]
+    fn apply_policy_allowlist_keeps_named() {
+        let tasks = vec![raw("esbuild"), raw("bcrypt")];
+        let set: HashSet<String> = ["esbuild"].iter().map(|s| s.to_string()).collect();
+        let result = apply_policy(tasks, &ScriptPolicy::Allowlist(set));
+        assert_eq!(result.len(), 1, "Allowlist should keep only 'esbuild'");
+        assert_eq!(result[0].package_name, "esbuild");
+    }
+
+    #[test]
+    fn apply_policy_neverlist_excludes_named() {
+        let tasks = vec![raw("esbuild"), raw("bcrypt")];
+        let set: HashSet<String> = ["bcrypt"].iter().map(|s| s.to_string()).collect();
+        let result = apply_policy(tasks, &ScriptPolicy::NeverList(set));
+        assert_eq!(result.len(), 1, "NeverList should exclude 'bcrypt'");
+        assert_eq!(result[0].package_name, "esbuild");
     }
 
 }
