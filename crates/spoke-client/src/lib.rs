@@ -1,7 +1,7 @@
 //! Spoke client — connects to hub, subscribes to work, executes tasks.
 //!
 //! Usage:
-//! ```
+//! ```ignore
 //! let client = SpokeClient::new("http://hub:9650".into(), "token".into(), "/workspace".into());
 //! run_as_spoke(client).await?;
 //! ```
@@ -55,7 +55,10 @@ impl SpokeClient {
                     return Ok(());
                 }
                 Err(e) => {
-                    eprintln!("[rage-spoke] disconnected: {e} — reconnecting in {:?}", backoff);
+                    eprintln!(
+                        "[rage-spoke] disconnected: {e} — reconnecting in {:?}",
+                        backoff
+                    );
                     tokio::time::sleep(backoff).await;
                     backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
                 }
@@ -71,7 +74,10 @@ impl SpokeClient {
 
         let mut client = CoordinatorClient::new(channel);
 
-        eprintln!("[rage-spoke] connected to {} as {}", self.hub_address, self.worker_id);
+        eprintln!(
+            "[rage-spoke] connected to {} as {}",
+            self.hub_address, self.worker_id
+        );
 
         let stream = client
             .subscribe(WorkerInfo {
@@ -91,7 +97,10 @@ impl SpokeClient {
             let pkg_name = item.package_name.clone();
             let script_name = item.script_name.clone();
 
-            eprintln!("[rage-spoke] running {}#{} (task: {})", pkg_name, script_name, task_id);
+            eprintln!(
+                "[rage-spoke] running {}#{} (task: {})",
+                pkg_name, script_name, task_id
+            );
 
             let result = self.execute(&item).await;
             let start = Instant::now();

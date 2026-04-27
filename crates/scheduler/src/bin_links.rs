@@ -38,8 +38,7 @@ pub fn create_bin_links(workspace_root: &Path) -> std::io::Result<usize> {
             for inner in std::fs::read_dir(&scope_dir)? {
                 let inner = inner?;
                 let full_name = format!("{}/{}", name_str, inner.file_name().to_string_lossy());
-                count +=
-                    create_bin_links_for_package(&inner.path(), &full_name, &bin_dir)?;
+                count += create_bin_links_for_package(&inner.path(), &full_name, &bin_dir)?;
             }
         } else {
             count += create_bin_links_for_package(&entry.path(), &name_str, &bin_dir)?;
@@ -78,7 +77,7 @@ fn create_bin_links_for_package(
     match bin_field {
         serde_json::Value::String(rel_path) => {
             // Single binary: name is the package name (last segment for scoped)
-            let bin_name = pkg_name.split('/').last().unwrap_or(pkg_name);
+            let bin_name = pkg_name.split('/').next_back().unwrap_or(pkg_name);
             if create_one_bin_link(bin_dir, bin_name, pkg_dir, rel_path)? {
                 count += 1;
             }
@@ -116,8 +115,8 @@ fn create_one_bin_link(
 
     // Target: relative path from bin_dir to pkg_dir/rel_path
     // e.g.: ../typescript/bin/tsc
-    let rel_target = pathdiff::diff_paths(&target_abs, bin_dir)
-        .unwrap_or_else(|| target_abs.clone());
+    let rel_target =
+        pathdiff::diff_paths(&target_abs, bin_dir).unwrap_or_else(|| target_abs.clone());
 
     #[cfg(unix)]
     {

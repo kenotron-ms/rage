@@ -3,15 +3,15 @@
 use crate::dag::{HubDag, TaskNode};
 use crate::proto::coordinator_server::{Coordinator, CoordinatorServer};
 use crate::proto::{
-    Ack, BuildEvent, BuildRequest, CompletionReport, PingRequest, PingResponse, WorkItem,
-    WorkerInfo, build_event, BuildDone, BuildFailed, TaskCompleted, TaskStarted,
+    build_event, Ack, BuildDone, BuildEvent, BuildFailed, BuildRequest, CompletionReport,
+    PingRequest, PingResponse, WorkItem, WorkerInfo,
 };
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex, Notify};
-use tonic::{Request, Response, Status, transport::Server};
+use tokio::sync::{Mutex, Notify};
+use tonic::{transport::Server, Request, Response, Status};
 
 type WorkStream = Pin<Box<dyn futures_core::Stream<Item = Result<WorkItem, Status>> + Send>>;
 type BuildStream = Pin<Box<dyn futures_core::Stream<Item = Result<BuildEvent, Status>> + Send>>;
@@ -120,10 +120,7 @@ impl Coordinator for HubServer {
         Ok(Response::new(Box::pin(stream) as WorkStream))
     }
 
-    async fn complete(
-        &self,
-        request: Request<CompletionReport>,
-    ) -> Result<Response<Ack>, Status> {
+    async fn complete(&self, request: Request<CompletionReport>) -> Result<Response<Ack>, Status> {
         let report = request.into_inner();
 
         {
@@ -138,7 +135,10 @@ impl Coordinator for HubServer {
         // Wake all waiting spokes
         self.wake_all();
 
-        Ok(Response::new(Ack { accepted: true, reason: String::new() }))
+        Ok(Response::new(Ack {
+            accepted: true,
+            reason: String::new(),
+        }))
     }
 
     async fn submit_build(
@@ -150,14 +150,18 @@ impl Coordinator for HubServer {
             return Err(Status::unauthenticated("invalid token"));
         }
 
-        let tasks: Vec<TaskNode> = req.tasks.iter().map(|t| TaskNode {
-            task_id: t.task_id.clone(),
-            package_name: t.package_name.clone(),
-            script_name: t.script_name.clone(),
-            command: t.command.clone(),
-            package_path: t.package_path.clone(),
-            depends_on: t.depends_on.clone(),
-        }).collect();
+        let tasks: Vec<TaskNode> = req
+            .tasks
+            .iter()
+            .map(|t| TaskNode {
+                task_id: t.task_id.clone(),
+                package_name: t.package_name.clone(),
+                script_name: t.script_name.clone(),
+                command: t.command.clone(),
+                package_path: t.package_path.clone(),
+                depends_on: t.depends_on.clone(),
+            })
+            .collect();
 
         {
             let mut s = self.state.lock().await;
@@ -175,7 +179,6 @@ impl Coordinator for HubServer {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let (is_done, has_failure, total) = {
                     let s = state.lock().await;
-                    let stats = s.dag.stats();
                     let done = s.dag.is_done();
                     let fail = s.dag.has_failure();
                     let total = s.dag.total_tasks();
@@ -211,10 +214,7 @@ impl Coordinator for HubServer {
         Ok(Response::new(Box::pin(stream) as BuildStream))
     }
 
-    async fn ping(
-        &self,
-        _request: Request<PingRequest>,
-    ) -> Result<Response<PingResponse>, Status> {
+    async fn ping(&self, _request: Request<PingRequest>) -> Result<Response<PingResponse>, Status> {
         let s = self.state.lock().await;
         let stats = s.dag.stats();
         Ok(Response::new(PingResponse {

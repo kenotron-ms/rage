@@ -50,7 +50,12 @@ pub fn parse_yarn_berry_lockfile(content: &str) -> Vec<LockfilePackage> {
                 // "@actions/cache@npm:3.3.0": → "@actions/cache"
                 let inner = line.trim_start_matches('"').trim_end_matches(':');
                 // May have multiple comma-separated specifiers, take first
-                let first_spec = inner.split(',').next().unwrap_or("").trim().trim_matches('"');
+                let first_spec = inner
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"');
                 // Extract package name (everything before the last @)
                 if let Some(at_pos) = first_spec.rfind("@npm:") {
                     let name = &first_spec[..at_pos];
@@ -147,7 +152,12 @@ pub fn parse_yarn_classic_lockfile(content: &str) -> Vec<LockfilePackage> {
             if i == 0 {
                 // First line: `ms@2.1.3, ms@^2.1.1:` or `"ms@^2.1.1":`
                 let line_clean = trimmed.trim_end_matches(':').trim_matches('"');
-                let first_spec = line_clean.split(',').next().unwrap_or("").trim().trim_matches('"');
+                let first_spec = line_clean
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"');
                 // Find last `@` (scoped packages have `@` in name too)
                 if let Some(at_pos) = first_spec.rfind('@') {
                     pkg_name = Some(first_spec[..at_pos].to_string());
@@ -221,7 +231,8 @@ pub fn parse_pnpm_lockfile(content: &str) -> Vec<LockfilePackage> {
         let trimmed = line.trim();
 
         // Entry key: /ms@2.1.3: or /ms/2.1.3: (pnpm v5/v6)
-        if trimmed.ends_with(':') && !trimmed.starts_with("resolution:") && line.starts_with("  /") {
+        if trimmed.ends_with(':') && !trimmed.starts_with("resolution:") && line.starts_with("  /")
+        {
             // Push previous
             if let (Some(n), Some(v)) = (current_name.take(), current_version.take()) {
                 let int = current_integrity.take().unwrap_or_default();
@@ -240,14 +251,14 @@ pub fn parse_pnpm_lockfile(content: &str) -> Vec<LockfilePackage> {
                 current_name = Some(spec[..at_pos].to_string());
                 current_version = Some(spec[at_pos + 1..].to_string());
             }
-        } else if trimmed.starts_with("integrity:") {
-            let val = trimmed["integrity:".len()..].trim();
+        } else if let Some(stripped) = trimmed.strip_prefix("integrity:") {
+            let val = stripped.trim();
             current_integrity = Some(val.to_string());
         } else if trimmed.contains("integrity:") && trimmed.starts_with("resolution:") {
             // resolution: {integrity: sha512-XXX}
             if let Some(start) = trimmed.find("integrity: ") {
                 let rest = &trimmed[start + "integrity: ".len()..];
-                let end = rest.find(|c: char| c == ',' || c == '}').unwrap_or(rest.len());
+                let end = rest.find([',', '}']).unwrap_or(rest.len());
                 current_integrity = Some(rest[..end].trim().to_string());
             }
         }
@@ -292,7 +303,8 @@ pub fn parse_npm_lockfile(content: &str) -> Vec<LockfilePackage> {
                 continue;
             }
 
-            let integrity = pkg.get("integrity")
+            let integrity = pkg
+                .get("integrity")
                 .and_then(|i| i.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -301,12 +313,14 @@ pub fn parse_npm_lockfile(content: &str) -> Vec<LockfilePackage> {
                 continue;
             }
 
-            let version = pkg.get("version")
+            let version = pkg
+                .get("version")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
 
-            let tarball_url = pkg.get("resolved")
+            let tarball_url = pkg
+                .get("resolved")
                 .and_then(|r| r.as_str())
                 .map(|s| s.to_string());
 
@@ -366,7 +380,10 @@ pub fn find_yarn_berry_zip(cache_dir: &Path, name: &str, version: &str) -> Optio
 ///
 /// We extract them relative to `target_dir`, so the full package lands at
 /// `target_dir/node_modules/{name}/`.
-pub fn extract_yarn_zip_to_workspace(zip_bytes: &[u8], target_dir: &Path) -> Result<(), anyhow::Error> {
+pub fn extract_yarn_zip_to_workspace(
+    zip_bytes: &[u8],
+    target_dir: &Path,
+) -> Result<(), anyhow::Error> {
     use std::io::Cursor;
 
     let cursor = Cursor::new(zip_bytes);
@@ -426,7 +443,11 @@ mod tests {
 
         let ms = packages.iter().find(|p| p.name == "ms").unwrap();
         assert_eq!(ms.version, "2.1.3");
-        assert!(ms.integrity.starts_with("10c0/"), "integrity must include cache prefix: {:?}", ms.integrity);
+        assert!(
+            ms.integrity.starts_with("10c0/"),
+            "integrity must include cache prefix: {:?}",
+            ms.integrity
+        );
 
         let types = packages.iter().find(|p| p.name == "@types/node").unwrap();
         assert_eq!(types.version, "20.0.0");
@@ -473,11 +494,17 @@ mod tests {
         let packages = parse_yarn_berry_lockfile(fixture);
 
         // lage-npm alias → real name "lage" from resolution "lage@npm:2.14.15"
-        let lage = packages.iter().find(|p| p.name == "lage").expect("should use resolution name 'lage', not alias 'lage-npm'");
+        let lage = packages
+            .iter()
+            .find(|p| p.name == "lage")
+            .expect("should use resolution name 'lage', not alias 'lage-npm'");
         assert_eq!(lage.version, "2.14.15");
 
         // string-width-cjs alias → real name "string-width" from resolution
-        let sw = packages.iter().find(|p| p.name == "string-width").expect("should use resolution name 'string-width', not alias 'string-width-cjs'");
+        let sw = packages
+            .iter()
+            .find(|p| p.name == "string-width")
+            .expect("should use resolution name 'string-width', not alias 'string-width-cjs'");
         assert_eq!(sw.version, "4.2.3");
 
         // Non-aliased package: name unchanged
@@ -485,8 +512,14 @@ mod tests {
         assert_eq!(ms.version, "2.1.3");
 
         // No alias names should appear in the result
-        assert!(!packages.iter().any(|p| p.name == "lage-npm"), "alias 'lage-npm' must not appear");
-        assert!(!packages.iter().any(|p| p.name == "string-width-cjs"), "alias 'string-width-cjs' must not appear");
+        assert!(
+            !packages.iter().any(|p| p.name == "lage-npm"),
+            "alias 'lage-npm' must not appear"
+        );
+        assert!(
+            !packages.iter().any(|p| p.name == "string-width-cjs"),
+            "alias 'string-width-cjs' must not appear"
+        );
     }
 
     /// find_yarn_berry_zip must locate the correct zip using the resolution-based name so that
@@ -498,22 +531,42 @@ mod tests {
 
         // yarn cache stores `lage@npm:2.14.15` as `lage-npm-2.14.15-{hash}-10c0.zip`
         // (= real_name "lage" + "-npm-" + version — NOT the alias "lage-npm")
-        std::fs::write(cache.join("lage-npm-2.14.15-0e927de26f-10c0.zip"), b"fakecontent").unwrap();
+        std::fs::write(
+            cache.join("lage-npm-2.14.15-0e927de26f-10c0.zip"),
+            b"fakecontent",
+        )
+        .unwrap();
         // string-width-cjs alias → "string-width-npm-4.2.3-{hash}-10c0.zip"
-        std::fs::write(cache.join("string-width-npm-4.2.3-2c27177bae-10c0.zip"), b"fakecontent2").unwrap();
+        std::fs::write(
+            cache.join("string-width-npm-4.2.3-2c27177bae-10c0.zip"),
+            b"fakecontent2",
+        )
+        .unwrap();
 
         // find_yarn_berry_zip is called with the RESOLUTION name (already fixed by the parser)
         let found_lage = find_yarn_berry_zip(cache, "lage", "2.14.15").unwrap();
-        assert!(found_lage.file_name().unwrap().to_string_lossy().contains("lage-npm-2.14.15"));
+        assert!(found_lage
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("lage-npm-2.14.15"));
 
         let found_sw = find_yarn_berry_zip(cache, "string-width", "4.2.3").unwrap();
-        assert!(found_sw.file_name().unwrap().to_string_lossy().contains("string-width-npm-4.2.3"));
+        assert!(found_sw
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("string-width-npm-4.2.3"));
 
         // The OLD wrong aliases should NOT be found (they'd look for "lage-npm-npm-…" prefix)
-        assert!(find_yarn_berry_zip(cache, "lage-npm", "2.14.15").is_none(),
-            "alias 'lage-npm' must not match — yarn cache uses real name in filename");
-        assert!(find_yarn_berry_zip(cache, "string-width-cjs", "4.2.3").is_none(),
-            "alias 'string-width-cjs' must not match");
+        assert!(
+            find_yarn_berry_zip(cache, "lage-npm", "2.14.15").is_none(),
+            "alias 'lage-npm' must not match — yarn cache uses real name in filename"
+        );
+        assert!(
+            find_yarn_berry_zip(cache, "string-width-cjs", "4.2.3").is_none(),
+            "alias 'string-width-cjs' must not match"
+        );
     }
 
     #[test]
@@ -532,19 +585,43 @@ mod tests {
         let cache = tmp.path();
 
         // Create fake zip files
-        std::fs::write(cache.join("ms-npm-2.1.3-abc123def456-10c0.zip"), b"fakecontent").unwrap();
-        std::fs::write(cache.join("typescript-npm-5.4.2-xyz789abc123-10c0.zip"), b"fakecontent2").unwrap();
+        std::fs::write(
+            cache.join("ms-npm-2.1.3-abc123def456-10c0.zip"),
+            b"fakecontent",
+        )
+        .unwrap();
+        std::fs::write(
+            cache.join("typescript-npm-5.4.2-xyz789abc123-10c0.zip"),
+            b"fakecontent2",
+        )
+        .unwrap();
 
         let found = find_yarn_berry_zip(cache, "ms", "2.1.3").unwrap();
-        assert!(found.file_name().unwrap().to_string_lossy().contains("ms-npm-2.1.3"));
+        assert!(found
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("ms-npm-2.1.3"));
 
         let found2 = find_yarn_berry_zip(cache, "typescript", "5.4.2").unwrap();
-        assert!(found2.file_name().unwrap().to_string_lossy().contains("typescript-npm-5.4.2"));
+        assert!(found2
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("typescript-npm-5.4.2"));
 
         // Scoped package
-        std::fs::write(cache.join("@types-node-npm-20.0.0-111aaa222bbb-10c0.zip"), b"scoped").unwrap();
+        std::fs::write(
+            cache.join("@types-node-npm-20.0.0-111aaa222bbb-10c0.zip"),
+            b"scoped",
+        )
+        .unwrap();
         let found3 = find_yarn_berry_zip(cache, "@types/node", "20.0.0").unwrap();
-        assert!(found3.file_name().unwrap().to_string_lossy().contains("@types-node-npm-20.0.0"));
+        assert!(found3
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("@types-node-npm-20.0.0"));
     }
 
     #[test]

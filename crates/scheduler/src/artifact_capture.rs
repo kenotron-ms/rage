@@ -6,13 +6,11 @@
 //! 1. Lockfile-based (preferred): parse lockfile → find PM tarballs → store in CAS
 //! 2. Walk-based (fallback): walk node_modules → hash individual files → store in CAS
 
-use artifact_store::{
-    capture_package, LocalArtifactStore, PackageArtifact, PathsetPackageRef,
-};
+use artifact_store::{capture_package, LocalArtifactStore, PackageArtifact, PathsetPackageRef};
+use plugin_typescript::lockfile::{compute_cas_key, find_yarn_berry_zip};
 use plugin_typescript::pathset_extractor::{
     extract_flat_from_node_modules, extract_pnpm_packages, PathsetPackageRef as TsPkgRef,
 };
-use plugin_typescript::lockfile::{compute_cas_key, find_yarn_berry_zip};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -128,8 +126,7 @@ pub(crate) fn package_filename(name: &str, version: &str) -> String {
 
 /// Atomically write a `PackageArtifact` to `path` via a temp-file rename.
 fn write_package_entry(path: &Path, artifact: &PackageArtifact) -> std::io::Result<()> {
-    let json = serde_json::to_string(artifact)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string(artifact).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json.as_bytes())?;
     std::fs::rename(&tmp, path)
@@ -359,7 +356,10 @@ mod tests {
 
         // Per-package file must exist immediately after capture
         let pkg_file = artifact_dir.join("ms@2.1.3.json");
-        assert!(pkg_file.exists(), "per-package file must be written: {pkg_file:?}");
+        assert!(
+            pkg_file.exists(),
+            "per-package file must be written: {pkg_file:?}"
+        );
 
         // It must be a valid PackageArtifact (not WorkspacePackageManifest)
         let text = std::fs::read_to_string(&pkg_file).unwrap();
@@ -390,17 +390,13 @@ mod tests {
         let pathset_reads = vec![ms_dir.join("index.js")];
         let artifact_dir = ws.path().join("artifact-packages/fp-yarn");
 
-        capture_now(
-            &pathset_reads,
-            ws.path(),
-            &artifact_dir,
-            "fp-yarn",
-            &store,
-        )
-        .unwrap();
+        capture_now(&pathset_reads, ws.path(), &artifact_dir, "fp-yarn", &store).unwrap();
 
         let pkg_file = artifact_dir.join("ms@2.1.3.json");
-        assert!(pkg_file.exists(), "flat yarn layout must produce per-package file");
+        assert!(
+            pkg_file.exists(),
+            "flat yarn layout must produce per-package file"
+        );
         let text = std::fs::read_to_string(&pkg_file).unwrap();
         let artifact: artifact_store::PackageArtifact = serde_json::from_str(&text).unwrap();
         assert_eq!(artifact.name, "ms");
@@ -414,25 +410,21 @@ mod tests {
         let store = LocalArtifactStore::new(store_dir.path());
 
         // Build a fake pnpm virtual store layout so the extractor finds packages
-        let pnpm_dir = ws.path().join("node_modules/.pnpm/ms@2.1.3/node_modules/ms");
+        let pnpm_dir = ws
+            .path()
+            .join("node_modules/.pnpm/ms@2.1.3/node_modules/ms");
         std::fs::create_dir_all(&pnpm_dir).unwrap();
         std::fs::write(pnpm_dir.join("index.js"), b"// ms").unwrap();
-        std::fs::write(pnpm_dir.join("package.json"), br#"{"name":"ms","version":"2.1.3"}"#).unwrap();
-
-        let pathset_reads = vec![
-            pnpm_dir.join("index.js"),
+        std::fs::write(
             pnpm_dir.join("package.json"),
-        ];
-        let artifact_dir = ws.path().join("artifact-packages/fp123");
-
-        capture_now(
-            &pathset_reads,
-            ws.path(),
-            &artifact_dir,
-            "fp123",
-            &store,
+            br#"{"name":"ms","version":"2.1.3"}"#,
         )
         .unwrap();
+
+        let pathset_reads = vec![pnpm_dir.join("index.js"), pnpm_dir.join("package.json")];
+        let artifact_dir = ws.path().join("artifact-packages/fp123");
+
+        capture_now(&pathset_reads, ws.path(), &artifact_dir, "fp123", &store).unwrap();
 
         let pkg_file = artifact_dir.join("ms@2.1.3.json");
         let text = std::fs::read_to_string(&pkg_file).unwrap();

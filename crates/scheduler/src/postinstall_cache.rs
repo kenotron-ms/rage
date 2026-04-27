@@ -43,9 +43,20 @@ mod delta_tests {
         let before = map(&[("a", b"X"), ("b", b"Y")]);
         let after = map(&[("a", b"X"), ("b", b"Z"), ("c", b"W")]);
         let delta = compute_delta(&before, &after);
-        assert_eq!(delta.len(), 2, "expected 2 entries in delta, got {}", delta.len());
-        assert_eq!(delta.get(&PathBuf::from("b")).map(|v| v.as_slice()), Some(b"Z".as_slice()));
-        assert_eq!(delta.get(&PathBuf::from("c")).map(|v| v.as_slice()), Some(b"W".as_slice()));
+        assert_eq!(
+            delta.len(),
+            2,
+            "expected 2 entries in delta, got {}",
+            delta.len()
+        );
+        assert_eq!(
+            delta.get(&PathBuf::from("b")).map(|v| v.as_slice()),
+            Some(b"Z".as_slice())
+        );
+        assert_eq!(
+            delta.get(&PathBuf::from("c")).map(|v| v.as_slice()),
+            Some(b"W".as_slice())
+        );
     }
 
     #[test]
@@ -61,7 +72,10 @@ mod delta_tests {
         let before = map(&[("a", b"X"), ("b", b"Y")]);
         let after = map(&[("a", b"X")]);
         let delta = compute_delta(&before, &after);
-        assert!(delta.is_empty(), "expected empty delta (deletions not tracked in v1), got {delta:?}");
+        assert!(
+            delta.is_empty(),
+            "expected empty delta (deletions not tracked in v1), got {delta:?}"
+        );
     }
 }
 
@@ -117,7 +131,10 @@ mod key_tests {
     fn different_integrity_produces_different_key() {
         let k1 = postinstall_cas_key(&task("sha512-abc"));
         let k2 = postinstall_cas_key(&task("sha512-xyz"));
-        assert_ne!(k1, k2, "different integrity strings should produce different CAS keys");
+        assert_ne!(
+            k1, k2,
+            "different integrity strings should produce different CAS keys"
+        );
     }
 }
 
@@ -167,9 +184,8 @@ pub fn snapshot_dir(dir: &Path) -> std::io::Result<HashMap<PathBuf, Vec<u8>>> {
 /// Encode `bytes` using standard Base64 (RFC 4648 §4).
 /// Uses no external crate — only the standard alphabet is needed here.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHA: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         match chunk {
             [a, b, c] => {
@@ -199,7 +215,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 /// Decode a standard Base64 string.
 /// Returns `None` on bad input (unknown character or length not a multiple of 4).
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 4 != 0 {
+    if !s.len().is_multiple_of(4) {
         return None;
     }
 
@@ -368,7 +384,10 @@ mod store_tests {
         let key = [7u8; 32];
         store_postinstall_outputs(&key, &delta, &store).unwrap();
 
-        assert!(store.contains_raw_key(&key), "key should exist in CAS after store");
+        assert!(
+            store.contains_raw_key(&key),
+            "key should exist in CAS after store"
+        );
     }
 }
 
@@ -380,7 +399,10 @@ mod snapshot_tests {
     fn snapshot_missing_dir_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let result = snapshot_dir(&dir.path().join("nope")).unwrap();
-        assert!(result.is_empty(), "expected empty map for missing dir, got {result:?}");
+        assert!(
+            result.is_empty(),
+            "expected empty map for missing dir, got {result:?}"
+        );
     }
 
     #[test]
@@ -405,7 +427,9 @@ mod snapshot_tests {
             "a.txt contents mismatch"
         );
         assert_eq!(
-            result.get(&PathBuf::from("nested/b.txt")).map(|b| b.as_slice()),
+            result
+                .get(&PathBuf::from("nested/b.txt"))
+                .map(|b| b.as_slice()),
             Some(b"world".as_slice()),
             "nested/b.txt contents mismatch"
         );
@@ -454,6 +478,86 @@ mod restore_tests {
             std::fs::read(target.path().join("install.flag")).unwrap(),
             b"ok",
             "install.flag content mismatch"
+        );
+    }
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn full_postinstall_roundtrip_through_cas() {
+        // 1. Create tempdir simulating node_modules/fake-pkg/ and write package.json
+        let pkg = tempfile::tempdir().unwrap();
+        std::fs::write(pkg.path().join("package.json"), b"{}").unwrap();
+
+        // 2. Build PostinstallTask
+        let task = plugin::PostinstallTask {
+            package_name: "fake-pkg".to_string(),
+            version: "1.0.0".to_string(),
+            tarball_integrity: "sha512-fake".to_string(),
+            script: "echo built > built.flag && mkdir -p bin && printf 'bin' > bin/native"
+                .to_string(),
+            cwd: pkg.path().to_path_buf(),
+        };
+
+        // 3. Snapshot before; assert before.len() == 1 (only package.json)
+        let before = snapshot_dir(pkg.path()).unwrap();
+        assert_eq!(
+            before.len(),
+            1,
+            "expected 1 file before script, got {}",
+            before.len()
+        );
+
+        // 4. Run postinstall and assert it returns true
+        let ran = run_postinstall(&task).unwrap();
+        assert!(
+            ran,
+            "run_postinstall should return true for a successful script"
+        );
+
+        // 5. Snapshot after; compute delta; assert delta contains built.flag AND bin/native
+        let after = snapshot_dir(pkg.path()).unwrap();
+        let delta = compute_delta(&before, &after);
+        assert!(
+            delta.contains_key(&PathBuf::from("built.flag")),
+            "delta should contain built.flag"
+        );
+        assert!(
+            delta.contains_key(&PathBuf::from("bin/native")),
+            "delta should contain bin/native"
+        );
+
+        // 6. Create fresh CAS tempdir; instantiate store; compute key; store outputs
+        let cas_dir = tempfile::tempdir().unwrap();
+        #[allow(deprecated)]
+        let store = artifact_store::LocalArtifactStore::new(cas_dir.path());
+        let key = postinstall_cas_key(&task);
+        store_postinstall_outputs(&key, &delta, &store).unwrap();
+
+        // 7. Delete the new files to simulate node_modules clean
+        std::fs::remove_file(pkg.path().join("built.flag")).unwrap();
+        std::fs::remove_dir_all(pkg.path().join("bin")).unwrap();
+
+        // 8. Restore from CAS and assert it returns true
+        let restored = restore_postinstall_outputs(&key, &task.cwd, &store).unwrap();
+        assert!(
+            restored,
+            "restore_postinstall_outputs should return true for a stored key"
+        );
+
+        // 9. Assert content of restored files
+        assert_eq!(
+            std::fs::read(pkg.path().join("built.flag")).unwrap(),
+            b"built\n",
+            "built.flag content mismatch"
+        );
+        assert_eq!(
+            std::fs::read(pkg.path().join("bin/native")).unwrap(),
+            b"bin",
+            "bin/native content mismatch"
         );
     }
 }
