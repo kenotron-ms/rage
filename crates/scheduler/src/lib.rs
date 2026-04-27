@@ -5,6 +5,7 @@ pub mod artifact_capture;
 pub mod artifact_restore;
 pub mod bin_links;
 pub mod node_path;
+pub mod postinstall_cache;
 pub mod runner;
 pub mod task;
 
