@@ -33,6 +33,72 @@ pub struct ManifestEntry {
 /// A postinstall manifest is a list of changed or new entries in the package directory.
 pub type PostinstallManifest = Vec<ManifestEntry>;
 
+/// Walk `dir` recursively, capturing every file and symlink into the CAS.
+///
+/// Returns a `PostinstallManifest` describing all entries found.
+/// If `dir` does not exist, returns `Ok(Vec::new())`.
+/// Directories and unreadable entries are silently skipped.
+pub fn capture_dir(
+    dir: &std::path::Path,
+    store: &artifact_store::LocalArtifactStore,
+) -> std::io::Result<PostinstallManifest> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut manifest = PostinstallManifest::new();
+
+    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let file_type = entry.file_type();
+        if file_type.is_dir() {
+            continue;
+        }
+        let abs = entry.path();
+        let rel = match abs.strip_prefix(dir) {
+            Ok(r) => r.to_path_buf(),
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            let target = match std::fs::read_link(abs) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            manifest.push(ManifestEntry {
+                rel_path: rel,
+                content_hash: [0u8; 32],
+                mode: 0,
+                kind: FileKind::Symlink(target),
+            });
+        } else if file_type.is_file() {
+            let bytes = match std::fs::read(abs) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let content_hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+            if store.put_bytes_keyed(content_hash, &bytes).is_err() {
+                continue;
+            }
+            let mode = match abs.metadata() {
+                Ok(m) => m.permissions().mode() & 0o777,
+                Err(_) => 0o644,
+            };
+            manifest.push(ManifestEntry {
+                rel_path: rel,
+                content_hash,
+                mode,
+                kind: FileKind::Regular,
+            });
+        }
+    }
+    Ok(manifest)
+}
+
 /// Return only the files that are NEW in `after` or whose content DIFFERS
 /// from `before`. Files only present in `before` (deletions) are NOT captured.
 pub fn compute_delta(
@@ -631,5 +697,112 @@ mod manifest_type_tests {
         let json = serde_json::to_string(&manifest).expect("serialize");
         let decoded: PostinstallManifest = serde_json::from_str(&json).expect("deserialize");
         assert!(decoded.is_empty(), "expected empty manifest after roundtrip");
+    }
+}
+
+#[cfg(test)]
+mod capture_dir_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[allow(deprecated)]
+    fn make_store(dir: &std::path::Path) -> artifact_store::LocalArtifactStore {
+        artifact_store::LocalArtifactStore::new(dir)
+    }
+
+    #[test]
+    fn nonexistent_dir_returns_empty() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let nonexistent = store_dir.path().join("does_not_exist");
+        let manifest = capture_dir(&nonexistent, &store).unwrap();
+        assert!(manifest.is_empty(), "expected empty manifest for nonexistent dir, got {manifest:?}");
+    }
+
+    #[test]
+    fn regular_file_produces_correct_hash_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let pkg_dir = tempfile::tempdir().unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+
+        let content = b"hello world";
+        let file_path = pkg_dir.path().join("hello.txt");
+        std::fs::write(&file_path, content).unwrap();
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let manifest = capture_dir(pkg_dir.path(), &store).unwrap();
+        assert_eq!(manifest.len(), 1, "expected 1 entry, got {}", manifest.len());
+
+        let entry = &manifest[0];
+        assert_eq!(entry.rel_path, PathBuf::from("hello.txt"));
+        assert_eq!(entry.kind, FileKind::Regular);
+        assert_eq!(entry.mode, 0o644);
+        let expected_hash: [u8; 32] = *blake3::hash(content).as_bytes();
+        assert_eq!(entry.content_hash, expected_hash, "content_hash mismatch");
+        assert!(
+            store.cas_file_path(&entry.content_hash).is_file(),
+            "CAS file should exist after capture"
+        );
+    }
+
+    #[test]
+    fn executable_mode_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+        let pkg_dir = tempfile::tempdir().unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+
+        let file_path = pkg_dir.path().join("runner");
+        std::fs::write(&file_path, b"#!/bin/sh\necho hi").unwrap();
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manifest = capture_dir(pkg_dir.path(), &store).unwrap();
+        assert_eq!(manifest.len(), 1, "expected 1 entry");
+        assert_eq!(manifest[0].mode, 0o755, "mode should be 0o755");
+    }
+
+    #[test]
+    fn symlink_entry_has_zero_hash_and_correct_target() {
+        let pkg_dir = tempfile::tempdir().unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+
+        std::fs::write(pkg_dir.path().join("real.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink("real.txt", pkg_dir.path().join("link.txt")).unwrap();
+
+        let manifest = capture_dir(pkg_dir.path(), &store).unwrap();
+
+        let link_entry = manifest
+            .iter()
+            .find(|e| e.rel_path == PathBuf::from("link.txt"))
+            .expect("link.txt entry not found in manifest");
+
+        assert_eq!(link_entry.content_hash, [0u8; 32], "symlink should have zeroed hash");
+        assert_eq!(link_entry.mode, 0, "symlink mode should be 0");
+        match &link_entry.kind {
+            FileKind::Symlink(target) => {
+                assert_eq!(target, &PathBuf::from("real.txt"), "symlink target mismatch");
+            }
+            FileKind::Regular => panic!("expected Symlink variant, got Regular"),
+        }
+    }
+
+    #[test]
+    fn nested_file_rel_path_is_relative() {
+        let pkg_dir = tempfile::tempdir().unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+
+        std::fs::create_dir_all(pkg_dir.path().join("bin")).unwrap();
+        std::fs::write(pkg_dir.path().join("bin/esbuild"), b"binary").unwrap();
+
+        let manifest = capture_dir(pkg_dir.path(), &store).unwrap();
+        assert_eq!(manifest.len(), 1, "expected 1 entry, got {}", manifest.len());
+        assert_eq!(
+            manifest[0].rel_path,
+            PathBuf::from("bin/esbuild"),
+            "rel_path should be bin/esbuild"
+        );
     }
 }
