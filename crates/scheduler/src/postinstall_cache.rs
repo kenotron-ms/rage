@@ -169,6 +169,26 @@ mod delta_tests {
     }
 }
 
+/// Return the subset of `after` whose entries are new or changed relative to `before`.
+/// Deletions (paths only in `before`) are not returned.
+pub fn diff_manifests(
+    before: &[ManifestEntry],
+    after: &[ManifestEntry],
+) -> PostinstallManifest {
+    let before_map: std::collections::HashMap<&std::path::PathBuf, (&[u8; 32], u32, &FileKind)> =
+        before.iter().map(|e| (&e.rel_path, (&e.content_hash, e.mode, &e.kind))).collect();
+    after
+        .iter()
+        .filter(|e| match before_map.get(&e.rel_path) {
+            Some((hash, mode, kind)) => {
+                *hash != &e.content_hash || *mode != e.mode || **kind != e.kind
+            }
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
 /// Compute the CAS key under which a postinstall task's outputs are stored.
 /// Inputs: tarball integrity + platform + node version. Each axis breaks the
 /// cache so darwin-arm64+node20 cannot be restored on linux-x86_64+node18.
@@ -804,5 +824,98 @@ mod capture_dir_tests {
             PathBuf::from("bin/esbuild"),
             "rel_path should be bin/esbuild"
         );
+    }
+}
+
+#[cfg(test)]
+mod diff_manifests_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn reg(path: &str, hash: [u8; 32], mode: u32) -> ManifestEntry {
+        ManifestEntry {
+            rel_path: PathBuf::from(path),
+            content_hash: hash,
+            mode,
+            kind: FileKind::Regular,
+        }
+    }
+
+    fn lnk(path: &str, target: &str) -> ManifestEntry {
+        ManifestEntry {
+            rel_path: PathBuf::from(path),
+            content_hash: [0u8; 32],
+            mode: 0,
+            kind: FileKind::Symlink(PathBuf::from(target)),
+        }
+    }
+
+    #[test]
+    fn both_empty_yields_empty() {
+        let delta = diff_manifests(&[], &[]);
+        assert!(delta.is_empty(), "expected empty delta for two empty manifests");
+    }
+
+    #[test]
+    fn new_file_in_after_is_included() {
+        let after = vec![reg("a.txt", [1u8; 32], 0o644)];
+        let delta = diff_manifests(&[], &after);
+        assert_eq!(delta.len(), 1, "expected 1 entry in delta");
+        assert_eq!(delta[0].rel_path, PathBuf::from("a.txt"));
+    }
+
+    #[test]
+    fn unchanged_file_excluded() {
+        let before = vec![reg("a.txt", [1u8; 32], 0o644)];
+        let after = vec![reg("a.txt", [1u8; 32], 0o644)];
+        let delta = diff_manifests(&before, &after);
+        assert!(delta.is_empty(), "expected empty delta for unchanged file");
+    }
+
+    #[test]
+    fn changed_hash_included() {
+        let before = vec![reg("a.txt", [1u8; 32], 0o644)];
+        let after = vec![reg("a.txt", [2u8; 32], 0o644)];
+        let delta = diff_manifests(&before, &after);
+        assert_eq!(delta.len(), 1, "expected 1 entry in delta");
+        assert_eq!(delta[0].content_hash, [2u8; 32]);
+    }
+
+    #[test]
+    fn changed_mode_included() {
+        let before = vec![reg("a.txt", [1u8; 32], 0o644)];
+        let after = vec![reg("a.txt", [1u8; 32], 0o755)];
+        let delta = diff_manifests(&before, &after);
+        assert_eq!(delta.len(), 1, "expected 1 entry in delta");
+        assert_eq!(delta[0].mode, 0o755);
+    }
+
+    #[test]
+    fn deletion_not_tracked() {
+        let before = vec![reg("a.txt", [1u8; 32], 0o644)];
+        let delta = diff_manifests(&before, &[]);
+        assert!(delta.is_empty(), "expected empty delta (deletions not tracked)");
+    }
+
+    #[test]
+    fn changed_symlink_target_included() {
+        let before = vec![lnk("link", "old-target")];
+        let after = vec![lnk("link", "new-target")];
+        let delta = diff_manifests(&before, &after);
+        assert_eq!(delta.len(), 1, "expected 1 entry in delta");
+        match &delta[0].kind {
+            FileKind::Symlink(target) => {
+                assert_eq!(*target, PathBuf::from("new-target"));
+            }
+            FileKind::Regular => panic!("expected Symlink variant, got Regular"),
+        }
+    }
+
+    #[test]
+    fn unchanged_symlink_excluded() {
+        let before = vec![lnk("link", "target")];
+        let after = vec![lnk("link", "target")];
+        let delta = diff_manifests(&before, &after);
+        assert!(delta.is_empty(), "expected empty delta for unchanged symlink");
     }
 }
