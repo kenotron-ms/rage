@@ -5,6 +5,7 @@
 
 pub mod lockfile;
 pub mod pathset_extractor;
+pub mod postinstall;
 
 use plugin::{AllowlistEntry, EcosystemPlugin, OutputFile, PluginConfig, TaskDef};
 use std::path::Path;
