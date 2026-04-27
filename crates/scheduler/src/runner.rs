@@ -936,8 +936,8 @@ fn run_postinstall_phase(
     store: &artifact_store::LocalArtifactStore,
 ) {
     use crate::postinstall_cache::{
-        compute_delta, postinstall_cas_key, restore_postinstall_outputs, run_postinstall,
-        snapshot_dir, store_postinstall_outputs,
+        capture_dir, diff_manifests, postinstall_cas_key, restore_manifest, run_postinstall,
+        store_manifest,
     };
 
     let tasks = plugin.postinstall_tasks(workspace_root);
@@ -945,7 +945,7 @@ fn run_postinstall_phase(
         let key = postinstall_cas_key(pt);
 
         // Cache hit?
-        match restore_postinstall_outputs(&key, &pt.cwd, store) {
+        match restore_manifest(&key, &pt.cwd, store) {
             Ok(true) => {
                 eprintln!(
                     "[rage] {}#postinstall \u{2713} (restored from cache)",
@@ -962,16 +962,16 @@ fn run_postinstall_phase(
             }
         }
 
-        // Cache miss — snapshot, run, capture.
-        let before = snapshot_dir(&pt.cwd).unwrap_or_default();
+        // Cache miss — capture before, run, capture after, store delta.
+        let before = capture_dir(&pt.cwd, store).unwrap_or_default();
         let start = std::time::Instant::now();
         let ran_ok = run_postinstall(pt).unwrap_or(false);
         let elapsed = start.elapsed();
 
         if ran_ok {
-            let after = snapshot_dir(&pt.cwd).unwrap_or_default();
-            let delta = compute_delta(&before, &after);
-            if let Err(e) = store_postinstall_outputs(&key, &delta, store) {
+            let after = capture_dir(&pt.cwd, store).unwrap_or_default();
+            let delta = diff_manifests(&before, &after);
+            if let Err(e) = store_manifest(&key, &delta, store) {
                 eprintln!(
                     "[rage] {}#postinstall capture error ({e}) \u{2014} ran but not cached",
                     pt.package_name
