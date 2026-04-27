@@ -239,6 +239,31 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Look up `key` in CAS. If absent, return `Ok(false)`. Otherwise deserialize
+/// JSON delta and write each entry under `target_dir`, creating parent dirs.
+pub fn restore_postinstall_outputs(
+    key: &[u8; 32],
+    target_dir: &Path,
+    store: &artifact_store::LocalArtifactStore,
+) -> std::io::Result<bool> {
+    let bytes = match store.get_bytes_by_raw_key(key)? {
+        Some(b) => b,
+        None => return Ok(false),
+    };
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    for (rel_str, b64) in map {
+        let bytes = base64_decode(&b64)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad base64"))?;
+        let dest = target_dir.join(&rel_str);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, &bytes)?;
+    }
+    Ok(true)
+}
+
 /// Serialize `delta` (path → bytes) as a JSON `BTreeMap<String, String>` where
 /// values are Base64-encoded, then store it in `store` under the given `key`.
 pub fn store_postinstall_outputs(
@@ -329,6 +354,52 @@ mod snapshot_tests {
             result.get(&PathBuf::from("nested/b.txt")).map(|b| b.as_slice()),
             Some(b"world".as_slice()),
             "nested/b.txt contents mismatch"
+        );
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn restore_returns_false_when_key_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        #[allow(deprecated)]
+        let store = artifact_store::LocalArtifactStore::new(dir.path());
+        let target = tempfile::tempdir().unwrap();
+
+        let key = [9u8; 32];
+        let result = restore_postinstall_outputs(&key, target.path(), &store).unwrap();
+        assert!(!result, "should return false for missing key");
+    }
+
+    #[test]
+    fn store_then_restore_recreates_files() {
+        let store_dir = tempfile::tempdir().unwrap();
+        #[allow(deprecated)]
+        let store = artifact_store::LocalArtifactStore::new(store_dir.path());
+        let target = tempfile::tempdir().unwrap();
+
+        let mut delta = HashMap::new();
+        delta.insert(PathBuf::from("bin/foo.node"), b"\x7fELF...".to_vec());
+        delta.insert(PathBuf::from("install.flag"), b"ok".to_vec());
+
+        let key = [42u8; 32];
+        store_postinstall_outputs(&key, &delta, &store).unwrap();
+
+        let result = restore_postinstall_outputs(&key, target.path(), &store).unwrap();
+        assert!(result, "should return true when key exists");
+
+        assert_eq!(
+            std::fs::read(target.path().join("bin/foo.node")).unwrap(),
+            b"\x7fELF...",
+            "bin/foo.node content mismatch"
+        );
+        assert_eq!(
+            std::fs::read(target.path().join("install.flag")).unwrap(),
+            b"ok",
+            "install.flag content mismatch"
         );
     }
 }
