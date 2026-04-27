@@ -1,10 +1,11 @@
 //! Caching layer for package postinstall scripts.
 //!
-//! v1 strategy: snapshot package directory before + after running script,
-//! compute delta of new/modified files, store in CAS keyed by
-//! `blake3(tarball_integrity + ":" + platform + ":" + node_version)`.
-//! Restore on cache hit by writing the delta files back.
-//! Deletions are out of scope for v1.
+//! v2 strategy: walk the package directory before and after running the postinstall
+//! script, hash each file with blake3, and store each changed file as a separate CAS
+//! entry keyed by content hash. A small JSON manifest (path to hash + mode + kind) is
+//! stored under `blake3(tarball_integrity + ":" + platform + ":" + node_version)`.
+//! Restore uses hardlinks from CAS and `set_permissions`. An empty delta returns
+//! `Ok(false)` without touching the CAS. Deletions are not tracked.
 
 
 /// Whether a filesystem entry is a regular file or a symlink.
