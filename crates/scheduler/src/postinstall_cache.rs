@@ -444,6 +444,26 @@ pub fn restore_postinstall_outputs(
     Ok(true)
 }
 
+/// Serialize `delta` as JSON and store it in `store` under the postinstall `key`.
+///
+/// Returns `Ok(false)` without writing anything when `delta` is empty — this prevents
+/// spurious cache hits for postinstall scripts that produce no output files.
+/// Returns `Ok(true)` after successfully writing the manifest JSON to CAS.
+/// Individual file bytes must already be in CAS from a prior `capture_dir` call.
+pub fn store_manifest(
+    key: &[u8; 32],
+    delta: &PostinstallManifest,
+    store: &artifact_store::LocalArtifactStore,
+) -> std::io::Result<bool> {
+    if delta.is_empty() {
+        return Ok(false);
+    }
+    let json = serde_json::to_vec(delta)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    store.put_bytes_keyed(*key, &json)?;
+    Ok(true)
+}
+
 /// Serialize `delta` (path → bytes) as a JSON `BTreeMap<String, String>` where
 /// values are Base64-encoded, then store it in `store` under the given `key`.
 pub fn store_postinstall_outputs(
@@ -917,5 +937,71 @@ mod diff_manifests_tests {
         let after = vec![lnk("link", "target")];
         let delta = diff_manifests(&before, &after);
         assert!(delta.is_empty(), "expected empty delta for unchanged symlink");
+    }
+}
+
+#[cfg(test)]
+mod store_manifest_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[allow(deprecated)]
+    fn make_store(dir: &std::path::Path) -> artifact_store::LocalArtifactStore {
+        artifact_store::LocalArtifactStore::new(dir)
+    }
+
+    #[test]
+    fn empty_delta_returns_false_and_writes_nothing() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let key = [7u8; 32];
+
+        let result = store_manifest(&key, &vec![], &store).unwrap();
+        assert!(!result, "empty delta should return false");
+        assert!(!store.contains_raw_key(&key), "nothing should be written for empty delta");
+    }
+
+    #[test]
+    fn non_empty_delta_returns_true_and_cas_entry_readable() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let key = [42u8; 32];
+
+        let delta = vec![ManifestEntry {
+            rel_path: PathBuf::from("bin/tool"),
+            content_hash: [1u8; 32],
+            mode: 0o755,
+            kind: FileKind::Regular,
+        }];
+
+        let result = store_manifest(&key, &delta, &store).unwrap();
+        assert!(result, "non-empty delta should return true");
+        assert!(store.contains_raw_key(&key), "key should exist in CAS after store");
+
+        let bytes = store.get_bytes_by_raw_key(&key).unwrap().unwrap();
+        let manifest: PostinstallManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(manifest.len(), 1, "expected 1 entry in deserialized manifest");
+        assert_eq!(manifest[0].rel_path, PathBuf::from("bin/tool"));
+        assert_eq!(manifest[0].mode, 0o755);
+    }
+
+    #[test]
+    fn idempotent_write_same_key_does_not_error() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let key = [99u8; 32];
+
+        let delta = vec![ManifestEntry {
+            rel_path: PathBuf::from("lib/lib.so"),
+            content_hash: [2u8; 32],
+            mode: 0o644,
+            kind: FileKind::Regular,
+        }];
+
+        let first = store_manifest(&key, &delta, &store).unwrap();
+        assert!(first, "first write should return true");
+
+        let second = store_manifest(&key, &delta, &store);
+        assert!(second.is_ok(), "second write with same key should not error, got: {:?}", second);
     }
 }
