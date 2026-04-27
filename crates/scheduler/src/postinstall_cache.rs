@@ -65,6 +65,62 @@ mod delta_tests {
     }
 }
 
+/// Compute the CAS key under which a postinstall task's outputs are stored.
+/// Inputs: tarball integrity + platform + node version. Each axis breaks the
+/// cache so darwin-arm64+node20 cannot be restored on linux-x86_64+node18.
+pub fn postinstall_cas_key(task: &plugin::PostinstallTask) -> [u8; 32] {
+    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let node_version = read_node_version();
+    let input = format!("{}:{}:{}", task.tarball_integrity, platform, node_version);
+    blake3::hash(input.as_bytes()).into()
+}
+
+fn read_node_version() -> String {
+    std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn task(integrity: &str) -> plugin::PostinstallTask {
+        plugin::PostinstallTask {
+            package_name: "esbuild".to_string(),
+            version: "0.21.5".to_string(),
+            tarball_integrity: integrity.to_string(),
+            script: "node install.js".to_string(),
+            cwd: PathBuf::from("/tmp/p"),
+        }
+    }
+
+    #[test]
+    fn same_inputs_produce_same_key() {
+        let t = task("sha512-abc");
+        let k1 = postinstall_cas_key(&t);
+        let k2 = postinstall_cas_key(&t);
+        assert_eq!(k1, k2, "same task should produce same CAS key");
+    }
+
+    #[test]
+    fn different_integrity_produces_different_key() {
+        let k1 = postinstall_cas_key(&task("sha512-abc"));
+        let k2 = postinstall_cas_key(&task("sha512-xyz"));
+        assert_ne!(k1, k2, "different integrity strings should produce different CAS keys");
+    }
+}
+
 /// Walk `dir` recursively and return a map of relative path → file contents
 /// for every regular file found.
 ///
