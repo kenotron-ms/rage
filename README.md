@@ -60,6 +60,16 @@ The daemon, the hub, and the spoke are all `rage` — same binary, different con
 | **Sandbox by syscall, not by trust** | macOS: `DYLD_INSERT_LIBRARIES` interpose hooks on the libc file-access syscalls. Linux: eBPF programs attached to `sys_enter_openat` etc. via aya. No dtrace. No ptrace. No file watcher heuristics. |
 | **Daemon as reconciliation loop** | `rage dev` declares a desired state and exits in milliseconds. The daemon converges toward it continuously. File changes invalidate exactly the tasks whose stored read-sets included the changed file. |
 
+## Platform support
+
+| Platform | Status | Sandbox mechanism |
+|---|---|---|
+| macOS | ✅ Supported | DYLD interpose (`__DATA,__interpose` in a Mach-O dylib loaded via `DYLD_INSERT_LIBRARIES`) |
+| Linux | ✅ Supported | eBPF tracepoints (aya loader, `sys_enter_*` hooks, ring-buffer events) |
+| Windows | 🔜 Planned | Microsoft Detours inline patching (DLL injected into a suspended child via `DetourCreateProcessWithDllsW`, named-pipe IPC) |
+
+The Windows backend is a planned `sandbox-windows-detours` crate. The mechanism deliberately mirrors BuildXL's Windows sandbox so a rage build on Windows matches BuildXL's correctness model. See [`docs/architecture/SANDBOX.md`](docs/architecture/SANDBOX.md) for the design.
+
 ## Honest comparison
 
 | | lage | Turborepo | Nx | BuildXL | Bazel | **rage** |
@@ -104,7 +114,7 @@ rage spoke --hub $RAGE_HUB_ADDRESS
 
 - [`docs/architecture/OVERVIEW.md`](docs/architecture/OVERVIEW.md) — system architecture and crate layout
 - [`docs/architecture/CACHING.md`](docs/architecture/CACHING.md) — two-phase fingerprinting end to end
-- [`docs/architecture/SANDBOX.md`](docs/architecture/SANDBOX.md) — DYLD interpose on macOS, eBPF on Linux
+- [`docs/architecture/SANDBOX.md`](docs/architecture/SANDBOX.md) — DYLD interpose on macOS, eBPF on Linux, Detours on Windows (planned)
 - [`docs/architecture/INSTALL-CACHING.md`](docs/architecture/INSTALL-CACHING.md) — install + postinstall artifact cache
 - [`docs/architecture/DISTRIBUTED.md`](docs/architecture/DISTRIBUTED.md) — hub/spoke gRPC scheduler
 - [`docs/architecture/COMPARISON.md`](docs/architecture/COMPARISON.md) — vs lage, Turborepo, Nx, BuildXL, Bazel

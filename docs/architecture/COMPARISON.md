@@ -24,7 +24,7 @@ We compare against five build systems: **lage**, **Turborepo**, **Nx**, **BuildX
 | Languages out of the box | JS/TS | JS/TS | JS/TS, plugins | C++/C#/JS | every language | JS/TS, plugin contract for others |
 | Long-lived daemon | ✗ | ✗ | ✓ | partial (BuildXL service) | ✓ (Bazel server) | ✓ |
 | Watch mode driven by sandbox data | ✗ | ✗ | ✗ | ✓ | ✗ | ✓ |
-| OS first-class | macOS, Linux | macOS, Linux, Windows | macOS, Linux, Windows | Windows | Linux, macOS | macOS, Linux |
+| OS first-class | macOS, Linux | macOS, Linux, Windows | macOS, Linux, Windows | Windows | Linux, macOS | macOS, Linux (Windows planned) |
 
 The rows below explain the entries.
 
@@ -199,11 +199,20 @@ rage's correctness mechanism is BuildXL's correctness mechanism. The differences
 | Onboarding a JS monorepo | weeks (write DScript) | hours (install rage, write `rage.json`, run) |
 | Sandbox on macOS | partial | DYLD interpose, full coverage |
 | Sandbox on Linux | file-access tracker | eBPF tracepoints |
+| Sandbox on Windows | Detours (`DetoursServices.dll`, 100+ APIs hooked) | Detours (planned `sandbox-windows-detours`, file-access subset for cache correctness) |
 | Distributed coordinator | internal (CB cluster) | open-source `rage hub`, self-hosted |
 | Config language | DScript | JSONC + per-package manifest fields |
 | Cache rendezvous | internal | open CAS layout (S3 / Azure / fs) |
 
 The key shift is **plugin-borne declaration**. In BuildXL, the user writes DScript for each pip declaring what `tsc` reads. In rage, the TypeScript plugin declares "tsc reads `**/*.ts` and `tsconfig*.json`" once, and the workspace inherits it. The user only overrides when their package genuinely diverges. The two-phase fingerprinting and sandbox-observation parts of correctness are unchanged; the declaration burden has been moved off the user and into the plugin.
+
+### Sandbox alignment on Windows
+
+BuildXL's Windows sandbox is `DetoursServices.dll` — a 7,516-line C++ DLL that uses Microsoft Detours to inline-patch `CreateFileW`, `NtCreateFile`, and roughly 100 other file/process APIs, with a named-pipe channel back to the BuildXL host. rage's planned Windows sandbox uses the **same mechanism**: Detours inline patching, DLL injection via `DetourCreateProcessWithDllsW`, named-pipe IPC. The scope is narrower (rage hooks the file read/write pathset for cache correctness; BuildXL also enforces a full policy engine), but the underlying technique is identical.
+
+This is intentional. If BuildXL's Windows sandbox is the proven correct way to observe file access on NTFS without a kernel driver — and a decade of Windows builds at Microsoft scale says it is — then rage on Windows should follow that path rather than invent a parallel one. The alignment also means a team that has lived with BuildXL on Windows can read rage's Windows sandbox source and recognize it.
+
+See [`SANDBOX.md`](SANDBOX.md) for the implementation details.
 
 ### Honest counter-points
 
@@ -275,7 +284,7 @@ For a JS monorepo team, the question is: do you want correctness from required d
 
 - **A drop-in Bazel replacement.** Bazel will always handle multi-language, hermetic, extreme-scale builds better than rage will.
 - **The fastest cache on warm hits.** Turborepo on a small workload with all-correct declarations beats rage by a few percent. The two-phase scheme has overhead.
-- **A Windows-first build system.** v1 is macOS and Linux. Windows is on the roadmap; the sandbox layer needs a Detours-equivalent backend.
+- **A Windows-first build system.** v1 ships on macOS and Linux. Windows is planned, with a Detours-based sandbox modeled directly on BuildXL's `DetoursServices.dll` — same mechanism, narrower scope. Until that crate lands, rage on Windows is not a supported configuration.
 - **A SaaS.** There is no rage Cloud. There may be a `rage-cloud` relay for cross-network rendezvous in the future, but it will be open-source and self-hostable.
 
 ## What rage is trying to be

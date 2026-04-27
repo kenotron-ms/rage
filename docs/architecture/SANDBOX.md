@@ -17,6 +17,20 @@ pub struct Pathset {
 
 `reads` includes every path opened for reading, `stat`'d, or otherwise accessed for content. `writes` includes paths opened for write, renamed-to, unlinked, or created. Symlinks are recorded as the symlink path **and** the resolved target — both contribute to the SF.
 
+## Backends at a glance
+
+| Aspect | macOS | Linux | Windows |
+|---|---|---|---|
+| Mechanism | DYLD interpose | eBPF tracepoints | Detours inline patching |
+| Injection | Library load-time | Kernel attach | Suspended process DLL inject |
+| IPC | Unix socket | BPF RingBuf | Named pipe |
+| Scope | Per-library calls | PID subtree | Per-function trampoline |
+| Kernel mode? | No | Yes (eBPF) | No |
+| Crate | `sandbox-macos-dylib` | `sandbox-linux-ebpf` | `sandbox-windows-detours` |
+| Status | Implemented | Implemented | Planned |
+
+The three backends produce the same `Pathset` value. The differences are in how each OS exposes a hook point that fires before file content reaches the task.
+
 ## macOS — DYLD interpose
 
 `crates/sandbox-macos-dylib/` builds a Mach-O dynamic library containing a `__DATA,__interpose` table. The table maps libc symbols to logging shims. The child process is launched with:
@@ -109,6 +123,106 @@ The trade-off: eBPF requires kernel ≥ 5.8 for ring buffer support. Older kerne
 ### Capabilities
 
 eBPF programs that attach to tracepoints require `CAP_BPF` (kernel ≥ 5.8) or `CAP_SYS_ADMIN` (older). In CI containers, this means running with `--cap-add=BPF` (or `--cap-add=SYS_ADMIN`) and `--security-opt seccomp=unconfined` if the default seccomp profile blocks `bpf(2)`. The loader emits a clear error if it lacks the capability and downgrades to `loose` mode for the offending task.
+
+## Windows — Detours inline patching
+
+**Status: planned.** `crates/sandbox-windows-detours/` will be the Windows backend. The mechanism is Microsoft Detours — the same library BuildXL uses for its Windows sandbox. This is intentional design alignment: a rage build on Windows should match BuildXL's correctness model, because BuildXL has already proven the approach works at extreme scale on NTFS.
+
+### Mechanism
+
+Detours is **inline function patching via trampolines**, not IAT hooking. For each target function, Detours:
+
+1. Replaces the first 5+ bytes of the target function with a `JMP` to a detour handler.
+2. Saves the displaced original bytes into a dynamically allocated *trampoline* page that ends with a jump back to the rest of the original function.
+3. Wraps the patch in a transaction (`DetourTransactionBegin` / `DetourAttach` / `DetourTransactionCommit`) so the patch is applied atomically across all threads — every thread is suspended, every thread's instruction pointer is rewritten if it sits inside a patched range, then every thread resumes.
+
+Because the patch is at the function prologue, the hook fires for every caller — main binary, statically linked libraries, dynamically loaded DLLs. There is no per-image interpose table (macOS) and no kernel attach (Linux); the hook is in the target process's own memory.
+
+```
+macOS DYLD interpose:        per-library, resolved at load time, table-driven
+Linux eBPF tracepoints:       kernel-level, PID-subtree filtered, syscall-level
+Windows Detours patching:     in-process, trampoline-based, per-function
+```
+
+### APIs hooked
+
+The full set required for build-cache correctness:
+
+```
+NtCreateFile, NtOpenFile             ← NT native layer (catches direct syscalls)
+CreateFileW, CreateFileA             ← Win32 layer (catches normal opens)
+ReadFile, WriteFile                  ← content I/O tracking
+DeleteFileW, MoveFileExW, CopyFileW  ← file mutations
+CreateDirectoryW, RemoveDirectoryW   ← directory operations
+FindFirstFileW, FindNextFileW        ← directory enumeration (detects implicit deps)
+GetFileAttributesW                   ← existence probes
+CreateSymbolicLinkW, CreateHardLinkW ← link tracking
+```
+
+Both Win32 (`CreateFileW`) and NT native (`NtCreateFile`) are hooked because the call path is `CreateFileW → NtCreateFile → syscall`, and some tools (notably parts of the .NET runtime and certain Microsoft compilers) call the NT layer directly. Hooking only Win32 would miss those; hooking only NT would lose access to the resolved Win32 path string. Hooking both, with a thread-local re-entry guard, catches every file open exactly once.
+
+`FindFirstFileW` / `FindNextFileW` are mandatory: directory enumeration is how many tools discover their inputs (`tsc` walking `node_modules`, `webpack` resolving modules), and the *list of entries seen* is itself an implicit dependency. Treating an enumeration as a stat of every entry would over-record; not recording it loses correctness when a new sibling file appears.
+
+What is **not** hooked: registry APIs, network APIs, process/thread APIs. The pathset is filesystem-only — registry reads and network fetches are out of scope, the same as on macOS and Linux. (BuildXL's `DetoursServices.dll` hooks 100+ APIs because it is also a full policy enforcement engine; rage's scope is narrower.)
+
+### DLL injection flow
+
+The parent process launches the child with `DetourCreateProcessWithDllsW`. Sequence:
+
+1. Parent calls `DetourCreateProcessWithDllsW(child.exe, …, ["rage_sandbox.dll"])`. Internally this calls `CreateProcess` with `CREATE_SUSPENDED`, so the child exists but its primary thread has not run a single instruction.
+2. Detours allocates a page in the child via `VirtualAllocEx`, writes the path of `rage_sandbox.dll` with `WriteProcessMemory`, and creates a remote thread with `CreateRemoteThread(LoadLibraryW)` that loads the DLL into the child.
+3. The DLL's `DllMain(DLL_PROCESS_ATTACH)` runs inside the child. It opens a `DetourTransactionBegin` / `DetourAttach(...)` / `DetourTransactionCommit` block to install all hooks, then connects to the parent's named pipe.
+4. The remote thread exits. Detours resumes the primary thread of the child via `ResumeThread`. The child's `main` runs with all hooks already in place — every file access from the first instruction onward goes through the hook handler.
+
+Because the hooks are installed before the child's main thread runs, there is no startup window where file accesses are unobserved. This matches the macOS guarantee (DYLD installs interpose before `main`) and the Linux guarantee (eBPF attaches before `execve` returns to the child).
+
+### IPC — named pipes
+
+Named pipes are the Windows equivalent of Unix sockets. The parent creates `\\.\pipe\rage_sandbox_{pid}_{unique_id}` before launching the child and passes the pipe name via environment variable (`RAGE_SANDBOX_PIPE=…`). The child DLL connects on `DllMain` and writes `FileAccessEvent` records as the hooks fire:
+
+```rust
+#[repr(C)]
+struct FileAccessEvent {
+    op: u8,                 // CreateFile | NtCreateFile | ReadFile | …
+    pid: u32,
+    access_flags: u32,      // GENERIC_READ / GENERIC_WRITE / …
+    path_len: u16,
+    path: [u16; path_len],  // UTF-16, fully resolved (reparse points and symlinks expanded)
+}
+```
+
+The format is binary, not CBOR or JSON, because Windows Unicode paths are UTF-16 native and the hook handler runs on the hot path of every file open — serialization cost matters. Named pipes are full-duplex, handle backpressure via the kernel, and work across 32/64-bit process boundaries (relevant if a 64-bit task launches a 32-bit child tool).
+
+### Rust implementation path
+
+Two viable crates:
+
+| Crate | What it is | Trade-off |
+|---|---|---|
+| `windows-detours` | Safe bindings over Microsoft's C++ Detours library | Full feature set; requires MSVC toolchain; pulls in the Detours C++ surface |
+| `detour-rs` | Pure Rust inline patching | No C++ dependency; cross-platform-compatible internals; smaller surface |
+
+rage will use `detour-rs`. The rest of the workspace forbids unsafe code (`unsafe_code = "forbid"` at the workspace level), and `detour-rs` keeps the C++ surface out of the build. The DLL itself is a separate crate (`sandbox-windows-detours`) of `crate-type = ["cdylib"]` with a per-crate `#![allow(unsafe_code)]` opt-out — the same pattern as `sandbox-macos-dylib` and `sandbox-linux-ebpf-prog`. The rest of the workspace stays unsafe-free; the FFI boundary is contained.
+
+### Cross-architecture
+
+The top-level process that drives Detours must be 64-bit. rage's CLI binary is 64-bit on every supported Windows host. The injected DLL must match the target process architecture: a 64-bit child gets the 64-bit DLL, a 32-bit child gets the 32-bit DLL. For monorepo build tooling — `node`, `tsc`, `cargo`, `python`, MSVC `cl.exe` — every relevant process is 64-bit in 2026, and rage will ship only the 64-bit DLL in v1. A 32-bit fallback is straightforward but not on the critical path.
+
+### Performance
+
+Detours patching adds approximately 1–5% overhead on process execution — the same order of magnitude as DYLD interpose on macOS, and slightly higher than eBPF on Linux (where the hook lives in the kernel, not the process). The hot cost is two indirect jumps (into the trampoline, out to the original function) per hooked call. Detours caches resolved symlink and reparse-point paths inside the hook handler so repeated opens of the same file don't re-walk the filesystem.
+
+### Trade-offs vs other Windows options
+
+| Approach | Why we rejected it |
+|---|---|
+| **MiniFilter driver** | Kernel driver. Requires a signed driver, WHQL submission, per-machine privilege model. Not shippable in OSS. |
+| **ETW (Event Tracing for Windows)** | Coalesced events, multi-millisecond latency, no per-process scoping without correlation work, drops events under load. The Windows analogue of fseventsd. |
+| **Sandboxie / AppContainer** | Security boundaries, not observation tools. AppContainer's policy model conflicts with normal build-tool behavior (registry access, etc.). |
+| **DLL injection without Detours** | Possible (manual `CreateRemoteThread` + `LoadLibrary`) but you still need the hook mechanism inside the DLL. Detours is that mechanism. |
+| **Detours inline patching** | Userland, no driver, no signing, in-process, atomic across threads, used by BuildXL in production for over a decade. |
+
+The trade-off: Detours is bypassed by processes that walk their own import table and call kernel32 / ntdll syscalls by ordinal lookup at runtime. This is rare in build tooling and absent from every common compiler.
 
 ## Modes
 
