@@ -64,6 +64,15 @@ pub fn plugin_config_from_pipeline(c: pipeline_config::PluginConfig) -> PluginCo
     }
 }
 
+/// Read the `version` field from `pkg_dir/package.json`.
+///
+/// Returns `None` when the file is absent, unreadable, or lacks a `version` string.
+fn read_pkg_version(pkg_dir: &Path) -> Option<String> {
+    let manifest = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    v.get("version").and_then(|s| s.as_str()).map(String::from)
+}
+
 /// The TypeScript plugin.
 #[derive(Debug, Default, Clone)]
 pub struct TypeScriptPlugin;
@@ -377,6 +386,47 @@ impl EcosystemPlugin for TypeScriptPlugin {
             }
         }
         Some(hasher.finalize().to_hex().to_string())
+    }
+
+    fn postinstall_tasks(&self, workspace_root: &Path) -> Vec<plugin::PostinstallTask> {
+        use crate::postinstall::{apply_policy, read_pm_script_policy, scan_postinstall_scripts};
+
+        let policy = read_pm_script_policy(workspace_root);
+        if matches!(policy, crate::postinstall::ScriptPolicy::AllDisabled) {
+            return Vec::new();
+        }
+
+        let raw = scan_postinstall_scripts(workspace_root);
+        let filtered = apply_policy(raw, &policy);
+        if filtered.is_empty() {
+            return Vec::new();
+        }
+
+        // Build a (name) → integrity index from the lockfile.
+        let lockfile = self.parse_lockfile(workspace_root).unwrap_or_default();
+        let mut by_name: std::collections::HashMap<&str, &plugin::LockfilePackage> =
+            std::collections::HashMap::new();
+        for pkg in &lockfile {
+            by_name.entry(pkg.name.as_str()).or_insert(pkg);
+        }
+
+        let mut out = Vec::with_capacity(filtered.len());
+        for raw_task in filtered {
+            let manifest_version = read_pkg_version(&raw_task.cwd).unwrap_or_default();
+            let integrity = by_name
+                .get(raw_task.package_name.as_str())
+                .map(|p| p.integrity.clone())
+                .unwrap_or_else(|| format!("rage-fallback:{}", raw_task.package_name));
+
+            out.push(plugin::PostinstallTask {
+                package_name: raw_task.package_name,
+                version: manifest_version,
+                tarball_integrity: integrity,
+                script: raw_task.script,
+                cwd: raw_task.cwd,
+            });
+        }
+        out
     }
 }
 
@@ -746,5 +796,57 @@ mod tests {
         // .bin/ exists but is empty — still OK, bin_links::create_bin_links populates it.
         let p = TypeScriptPlugin::new();
         assert!(p.verify_install_effects(dir.path()));
+    }
+}
+
+#[cfg(test)]
+mod postinstall_integration_tests {
+    use super::*;
+    use plugin::EcosystemPlugin;
+    use tempfile::tempdir;
+
+    fn write_esbuild_pkg(root: &std::path::Path) {
+        let pkg_dir = root.join("node_modules").join("esbuild");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"esbuild","version":"0.21.5","scripts":{"postinstall":"node install.js"}}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn returns_empty_when_pm_globally_disables_scripts() {
+        let dir = tempdir().unwrap();
+        // Write .npmrc with ignore-scripts=true → ScriptPolicy::AllDisabled
+        std::fs::write(dir.path().join(".npmrc"), "ignore-scripts=true\n").unwrap();
+        // Create node_modules/esbuild with postinstall
+        write_esbuild_pkg(dir.path());
+
+        let plugin = TypeScriptPlugin::new();
+        assert!(
+            plugin.postinstall_tasks(dir.path()).is_empty(),
+            "expected empty when ignore-scripts=true"
+        );
+    }
+
+    #[test]
+    fn returns_task_when_postinstall_present_and_policy_allows() {
+        let dir = tempdir().unwrap();
+        // No .npmrc — policy is AllEnabled
+        write_esbuild_pkg(dir.path());
+
+        let plugin = TypeScriptPlugin::new();
+        let tasks = plugin.postinstall_tasks(dir.path());
+        assert_eq!(tasks.len(), 1, "expected exactly one postinstall task");
+        let task = &tasks[0];
+        assert_eq!(task.package_name, "esbuild");
+        assert_eq!(task.version, "0.21.5");
+        assert_eq!(task.script, "node install.js");
+        assert!(
+            task.tarball_integrity.starts_with("rage-fallback:"),
+            "expected rage-fallback: prefix when no lockfile, got: {}",
+            task.tarball_integrity
+        );
     }
 }
