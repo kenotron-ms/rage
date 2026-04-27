@@ -464,6 +464,51 @@ pub fn store_manifest(
     Ok(true)
 }
 
+/// Look up `key` in CAS. If absent, return `Ok(false)`. Otherwise deserialize the
+/// `PostinstallManifest` and restore all entries under `target_dir`, using hardlinks
+/// for regular files (with cross-device copy fallback) and symlinks for symlinks.
+/// Unix permission bits are restored on regular files.
+pub fn restore_manifest(
+    key: &[u8; 32],
+    target_dir: &std::path::Path,
+    store: &artifact_store::LocalArtifactStore,
+) -> std::io::Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    let bytes = match store.get_bytes_by_raw_key(key)? {
+        Some(b) => b,
+        None => return Ok(false),
+    };
+    let manifest: PostinstallManifest = serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    for entry in &manifest {
+        let dest = target_dir.join(&entry.rel_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match &entry.kind {
+            FileKind::Regular => {
+                let cas_path = store.cas_file_path(&entry.content_hash);
+                let _ = std::fs::remove_file(&dest);
+                match std::fs::hard_link(&cas_path, &dest) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        std::fs::copy(&cas_path, &dest)?;
+                    }
+                }
+                std::fs::set_permissions(
+                    &dest,
+                    std::fs::Permissions::from_mode(entry.mode),
+                )?;
+            }
+            FileKind::Symlink(target) => {
+                let _ = std::fs::remove_file(&dest);
+                std::os::unix::fs::symlink(target, &dest)?;
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Serialize `delta` (path → bytes) as a JSON `BTreeMap<String, String>` where
 /// values are Base64-encoded, then store it in `store` under the given `key`.
 pub fn store_postinstall_outputs(
@@ -1003,5 +1048,138 @@ mod store_manifest_tests {
 
         let second = store_manifest(&key, &delta, &store);
         assert!(second.is_ok(), "second write with same key should not error, got: {:?}", second);
+    }
+}
+
+#[cfg(test)]
+mod restore_manifest_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[allow(deprecated)]
+    fn make_store(dir: &std::path::Path) -> artifact_store::LocalArtifactStore {
+        artifact_store::LocalArtifactStore::new(dir)
+    }
+
+    #[test]
+    fn returns_false_when_key_not_in_cas() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let target = tempfile::tempdir().unwrap();
+
+        let result = restore_manifest(&[0u8; 32], target.path(), &store).unwrap();
+        assert!(!result, "should return false for missing key");
+    }
+
+    #[test]
+    fn roundtrip_regular_file_content_and_mode() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let target = tempfile::tempdir().unwrap();
+
+        let content = b"binary content";
+        let hash: [u8; 32] = *blake3::hash(content).as_bytes();
+        store.put_bytes_keyed(hash, content).unwrap();
+
+        let delta = vec![ManifestEntry {
+            rel_path: PathBuf::from("lib/foo.node"),
+            content_hash: hash,
+            mode: 0o755,
+            kind: FileKind::Regular,
+        }];
+        store_manifest(&[10u8; 32], &delta, &store).unwrap();
+
+        let result = restore_manifest(&[10u8; 32], target.path(), &store).unwrap();
+        assert!(result, "should return true on cache hit");
+
+        let restored_path = target.path().join("lib/foo.node");
+        assert!(restored_path.is_file(), "lib/foo.node should be a regular file");
+        assert_eq!(
+            std::fs::read(&restored_path).unwrap(),
+            content,
+            "restored file content should match original"
+        );
+    }
+
+    #[test]
+    fn executable_permission_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let target = tempfile::tempdir().unwrap();
+
+        let content = b"#!/bin/sh\necho hi";
+        let hash: [u8; 32] = *blake3::hash(content).as_bytes();
+        store.put_bytes_keyed(hash, content).unwrap();
+
+        let delta = vec![ManifestEntry {
+            rel_path: PathBuf::from("runner"),
+            content_hash: hash,
+            mode: 0o755,
+            kind: FileKind::Regular,
+        }];
+        store_manifest(&[20u8; 32], &delta, &store).unwrap();
+
+        restore_manifest(&[20u8; 32], target.path(), &store).unwrap();
+
+        let restored = target.path().join("runner");
+        let mode = restored.metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "restored file should have mode 0o755");
+    }
+
+    #[test]
+    fn symlink_restored_correctly() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let target = tempfile::tempdir().unwrap();
+
+        let delta = vec![ManifestEntry {
+            rel_path: PathBuf::from("link"),
+            content_hash: [0u8; 32],
+            mode: 0,
+            kind: FileKind::Symlink(PathBuf::from("real.txt")),
+        }];
+        store_manifest(&[30u8; 32], &delta, &store).unwrap();
+
+        let result = restore_manifest(&[30u8; 32], target.path(), &store).unwrap();
+        assert!(result, "should return true on cache hit");
+
+        let link = target.path().join("link");
+        assert!(
+            link.symlink_metadata().unwrap().file_type().is_symlink(),
+            "link should be a symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            PathBuf::from("real.txt"),
+            "symlink target should be real.txt"
+        );
+    }
+
+    #[test]
+    fn parent_dirs_created_automatically() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = make_store(store_dir.path());
+        let target = tempfile::tempdir().unwrap();
+
+        let content = b"deep content";
+        let hash: [u8; 32] = *blake3::hash(content).as_bytes();
+        store.put_bytes_keyed(hash, content).unwrap();
+
+        let delta = vec![ManifestEntry {
+            rel_path: PathBuf::from("a/b/c/deep.txt"),
+            content_hash: hash,
+            mode: 0o644,
+            kind: FileKind::Regular,
+        }];
+        store_manifest(&[40u8; 32], &delta, &store).unwrap();
+
+        restore_manifest(&[40u8; 32], target.path(), &store).unwrap();
+
+        assert!(
+            target.path().join("a/b/c/deep.txt").is_file(),
+            "a/b/c/deep.txt should exist after restore"
+        );
     }
 }
