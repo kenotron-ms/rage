@@ -944,25 +944,19 @@ fn run_postinstall_phase(
     for pt in &tasks {
         let key = postinstall_cas_key(pt);
 
-        // Cache hit?
+        // Cache hit — restore files from CAS and skip running the script.
         match restore_manifest(&key, &pt.cwd, store) {
             Ok(true) => {
-                eprintln!(
-                    "[rage] {}#postinstall \u{2713} (restored from cache)",
-                    pt.package_name
-                );
+                eprintln!("[rage] {}#postinstall \u{2713} (restored from cache)", pt.package_name);
                 continue;
             }
             Ok(false) => {}
             Err(e) => {
-                eprintln!(
-                    "[rage] {}#postinstall restore error ({e}) \u{2014} re-running",
-                    pt.package_name
-                );
+                eprintln!("[rage] {}#postinstall restore error ({e}) \u{2014} re-running", pt.package_name);
             }
         }
 
-        // Cache miss — capture before, run, capture after, store delta.
+        // Cache miss — walk before, run script, walk after, store delta.
         let before = capture_dir(&pt.cwd, store).unwrap_or_default();
         let start = std::time::Instant::now();
         let ran_ok = run_postinstall(pt).unwrap_or(false);
@@ -971,17 +965,17 @@ fn run_postinstall_phase(
         if ran_ok {
             let after = capture_dir(&pt.cwd, store).unwrap_or_default();
             let delta = diff_manifests(&before, &after);
-            if let Err(e) = store_manifest(&key, &delta, store) {
-                eprintln!(
-                    "[rage] {}#postinstall capture error ({e}) \u{2014} ran but not cached",
-                    pt.package_name
-                );
+            match store_manifest(&key, &delta, store) {
+                Ok(true) => {
+                    eprintln!("[rage] {}#postinstall \u{2713} {:.2}s", pt.package_name, elapsed.as_secs_f64());
+                }
+                Ok(false) => {
+                    eprintln!("[rage] {}#postinstall (no cacheable changes) {:.2}s", pt.package_name, elapsed.as_secs_f64());
+                }
+                Err(e) => {
+                    eprintln!("[rage] {}#postinstall capture error ({e}) \u{2014} ran but not cached", pt.package_name);
+                }
             }
-            eprintln!(
-                "[rage] {}#postinstall \u{2713} {:.2}s",
-                pt.package_name,
-                elapsed.as_secs_f64()
-            );
         } else {
             eprintln!("[rage] {}#postinstall \u{2717} FAILED", pt.package_name);
         }
