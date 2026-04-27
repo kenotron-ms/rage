@@ -6,14 +6,64 @@
 //! Restore on cache hit by writing the delta files back.
 //! Deletions are out of scope for v1.
 
-use plugin::PostinstallTask;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Stub to keep the `PostinstallTask` import live until it is used by
-/// future functions in this module.
-#[allow(dead_code)]
-const _UNUSED_PIN: fn(&PostinstallTask) = |_| {};
+/// Return only the files that are NEW in `after` or whose content DIFFERS
+/// from `before`. Files only present in `before` (deletions) are NOT captured.
+pub fn compute_delta(
+    before: &HashMap<PathBuf, Vec<u8>>,
+    after: &HashMap<PathBuf, Vec<u8>>,
+) -> HashMap<PathBuf, Vec<u8>> {
+    let mut delta = HashMap::new();
+    for (path, after_bytes) in after {
+        match before.get(path) {
+            Some(before_bytes) if before_bytes == after_bytes => continue,
+            _ => {
+                delta.insert(path.clone(), after_bytes.clone());
+            }
+        }
+    }
+    delta
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+
+    fn map(pairs: &[(&str, &[u8])]) -> HashMap<PathBuf, Vec<u8>> {
+        pairs
+            .iter()
+            .map(|(k, v)| (PathBuf::from(k), v.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn delta_picks_up_new_and_changed() {
+        let before = map(&[("a", b"X"), ("b", b"Y")]);
+        let after = map(&[("a", b"X"), ("b", b"Z"), ("c", b"W")]);
+        let delta = compute_delta(&before, &after);
+        assert_eq!(delta.len(), 2, "expected 2 entries in delta, got {}", delta.len());
+        assert_eq!(delta.get(&PathBuf::from("b")).map(|v| v.as_slice()), Some(b"Z".as_slice()));
+        assert_eq!(delta.get(&PathBuf::from("c")).map(|v| v.as_slice()), Some(b"W".as_slice()));
+    }
+
+    #[test]
+    fn delta_empty_when_unchanged() {
+        let before = map(&[("a", b"X")]);
+        let after = map(&[("a", b"X")]);
+        let delta = compute_delta(&before, &after);
+        assert!(delta.is_empty(), "expected empty delta, got {delta:?}");
+    }
+
+    #[test]
+    fn delta_ignores_deletions() {
+        let before = map(&[("a", b"X"), ("b", b"Y")]);
+        let after = map(&[("a", b"X")]);
+        let delta = compute_delta(&before, &after);
+        assert!(delta.is_empty(), "expected empty delta (deletions not tracked in v1), got {delta:?}");
+    }
+}
 
 /// Walk `dir` recursively and return a map of relative path → file contents
 /// for every regular file found.
