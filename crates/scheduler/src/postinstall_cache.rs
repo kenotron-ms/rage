@@ -9,6 +9,30 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Whether a filesystem entry is a regular file or a symlink.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FileKind {
+    Regular,
+    Symlink(std::path::PathBuf),
+}
+
+/// One entry in a postinstall manifest — describes a single file or symlink
+/// relative to the package directory.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ManifestEntry {
+    /// Path relative to the package directory (e.g. `bin/esbuild`).
+    pub rel_path: std::path::PathBuf,
+    /// Blake3 hash of the file's contents. Zeroed (`[0u8; 32]`) for symlinks.
+    pub content_hash: [u8; 32],
+    /// Unix permission bits (`st_mode & 0o777`). Zero for symlinks.
+    pub mode: u32,
+    /// Whether this entry is a regular file or a symlink (with its target).
+    pub kind: FileKind,
+}
+
+/// A postinstall manifest is a list of changed or new entries in the package directory.
+pub type PostinstallManifest = Vec<ManifestEntry>;
+
 /// Return only the files that are NEW in `after` or whose content DIFFERS
 /// from `before`. Files only present in `before` (deletions) are NOT captured.
 pub fn compute_delta(
@@ -559,5 +583,53 @@ mod roundtrip_tests {
             b"bin",
             "bin/native content mismatch"
         );
+    }
+}
+
+#[cfg(test)]
+mod manifest_type_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn regular_entry_serde_roundtrip() {
+        let entry = ManifestEntry {
+            rel_path: PathBuf::from("bin/foo.node"),
+            content_hash: [1u8; 32],
+            mode: 0o755,
+            kind: FileKind::Regular,
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let decoded: ManifestEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.rel_path, entry.rel_path);
+        assert_eq!(decoded.content_hash, entry.content_hash);
+        assert_eq!(decoded.mode, entry.mode);
+        assert_eq!(decoded.kind, FileKind::Regular);
+    }
+
+    #[test]
+    fn symlink_entry_serde_roundtrip() {
+        let target = PathBuf::from("../../real/path");
+        let entry = ManifestEntry {
+            rel_path: PathBuf::from("link"),
+            content_hash: [0u8; 32],
+            mode: 0,
+            kind: FileKind::Symlink(target.clone()),
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let decoded: ManifestEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.content_hash, [0u8; 32]);
+        match decoded.kind {
+            FileKind::Symlink(t) => assert_eq!(t, target),
+            FileKind::Regular => panic!("expected Symlink variant"),
+        }
+    }
+
+    #[test]
+    fn empty_manifest_serializes_as_empty_array() {
+        let manifest: PostinstallManifest = vec![];
+        let json = serde_json::to_string(&manifest).expect("serialize");
+        let decoded: PostinstallManifest = serde_json::from_str(&json).expect("deserialize");
+        assert!(decoded.is_empty(), "expected empty manifest after roundtrip");
     }
 }
