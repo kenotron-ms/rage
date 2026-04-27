@@ -196,6 +196,30 @@ pub trait EcosystemPlugin: Send + Sync {
     ) -> Result<(), anyhow::Error> {
         Ok(())
     }
+
+    /// Returns the set of postinstall scripts that must run after packages are
+    /// extracted from the tarball CAS.
+    ///
+    /// Implementations should:
+    ///
+    /// 1. **Read the package manager's own script policy** — e.g. yarn's
+    ///    `enableScripts`, pnpm's `onlyBuiltDependencies` / `neverBuiltDependencies`,
+    ///    or npm's `ignore-scripts` flag — to determine whether scripts are
+    ///    globally disabled or selectively filtered.
+    /// 2. **Walk `node_modules/`** and find every package whose `package.json`
+    ///    declares a `scripts.postinstall` field.
+    /// 3. **Filter the list** using the policy resolved in step 1 — discard
+    ///    packages whose scripts are suppressed by the policy.
+    /// 4. **Look up each package's lockfile integrity hash** (from
+    ///    `parse_lockfile`) for use as the CAS key when caching postinstall
+    ///    outputs.
+    ///
+    /// If the PM globally disables scripts → return `vec![]`.
+    ///
+    /// Default returns `vec![]` so non-TypeScript ecosystems are unaffected.
+    fn postinstall_tasks(&self, _workspace_root: &Path) -> Vec<PostinstallTask> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +275,13 @@ mod tests {
         let json = serde_json::to_string(&task).unwrap();
         let decoded: PostinstallTask = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, task);
+    }
+
+    #[test]
+    fn default_postinstall_tasks_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = NullPlugin;
+        assert!(p.postinstall_tasks(tmp.path()).is_empty());
     }
 
     #[test]
