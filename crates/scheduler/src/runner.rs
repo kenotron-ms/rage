@@ -370,7 +370,12 @@ pub async fn run_tasks_two_phase(
             let cache_clone = cache.clone();
             let plugin_clone = Arc::clone(&plugin);
             let store_clone = Arc::clone(&artifact_store);
-            set.spawn(run_single_task_two_phase(task, cache_clone, plugin_clone, store_clone));
+            set.spawn(run_single_task_two_phase(
+                task,
+                cache_clone,
+                plugin_clone,
+                store_clone,
+            ));
         }
 
         let mut first_error: Option<RunError> = None;
@@ -483,19 +488,19 @@ async fn run_single_task_two_phase(
     // worker-thread pool prevents all worker threads from blocking in
     // parallel when a full wave of package tasks starts at once.
     let (cache_lookup_result, stored_pathset_reads) = {
-        let c2   = Arc::clone(&cache);
+        let c2 = Arc::clone(&cache);
         let cmd2 = task.command.clone();
-        let tp2  = tool_path.clone();
-        let pp2  = task.cwd.clone();
-        let gl2  = task.declared_input_globs.clone();
-        let df2  = dep_abi_fps.clone();
+        let tp2 = tool_path.clone();
+        let pp2 = task.cwd.clone();
+        let gl2 = task.declared_input_globs.clone();
+        let df2 = dep_abi_fps.clone();
         tokio::task::spawn_blocking(move || {
             let wf_inputs = cache::WeakFpInputs {
-                command:              &cmd2,
-                tool_path:            &tp2,
-                package_path:         &pp2,
+                command: &cmd2,
+                tool_path: &tp2,
+                package_path: &pp2,
                 declared_input_globs: &gl2,
-                tracked_env:          &[],
+                tracked_env: &[],
                 dep_abi_fingerprints: &df2,
             };
             match c2.lookup_with_pathset_reads(&wf_inputs) {
@@ -513,10 +518,7 @@ async fn run_single_task_two_phase(
         if !stored_pathset_reads.is_empty() {
             let install_fp = find_latest_install_fingerprint(cache.dir());
             if let Some(fp) = install_fp {
-                let artifact_dir = cache
-                    .dir()
-                    .join("artifact-packages")
-                    .join(&fp); // directory, not file
+                let artifact_dir = cache.dir().join("artifact-packages").join(&fp); // directory, not file
                 crate::artifact_capture::schedule_capture(
                     stored_pathset_reads,
                     task.workspace_root.clone(),
@@ -668,10 +670,7 @@ async fn run_single_task_two_phase(
         if !pathset_reads_for_capture.is_empty() {
             let install_fp = find_latest_install_fingerprint(cache.dir());
             if let Some(fp) = install_fp {
-                let artifact_dir = cache
-                    .dir()
-                    .join("artifact-packages")
-                    .join(&fp); // directory, not file
+                let artifact_dir = cache.dir().join("artifact-packages").join(&fp); // directory, not file
                 crate::artifact_capture::schedule_capture(
                     pathset_reads_for_capture,
                     task.workspace_root.clone(),
@@ -714,6 +713,7 @@ async fn run_root_task_two_phase(
     if marker.exists() {
         // Verify the install task's on-disk effects are still present.
         if plugin.verify_install_effects(&task.workspace_root) {
+            run_postinstall_phase(plugin, &task.workspace_root, artifact_store.as_ref());
             eprintln!(
                 "[rage] {}#{} \u{2713} (cached)",
                 task.package_name, task.script_name
@@ -729,10 +729,7 @@ async fn run_root_task_two_phase(
         // Strategy 2: file-level restore (fallback).
         //   Read per-package JSON manifests → pre-flight all file hashes in CAS →
         //   hardlink individual files into node_modules/.
-        let artifact_dir = cache
-            .dir()
-            .join("artifact-packages")
-            .join(&fp);
+        let artifact_dir = cache.dir().join("artifact-packages").join(&fp);
 
         // Try lockfile-based restore first
         let (lockfile_restored, lockfile_pkg_count) = {
@@ -770,12 +767,12 @@ async fn run_root_task_two_phase(
             // Create node_modules/.bin/ symlinks from each package's `bin` field.
             // Tarballs don't contain bin symlinks, so we generate them here to
             // avoid running the package manager just for bin-link creation.
-            let bin_count =
-                crate::bin_links::create_bin_links(&task.workspace_root).unwrap_or(0);
+            let bin_count = crate::bin_links::create_bin_links(&task.workspace_root).unwrap_or(0);
             eprintln!(
                 "[rage] {}#{} \u{2713} (restored from artifact cache — {} packages, {} bin links)",
                 task.package_name, task.script_name, lockfile_pkg_count, bin_count
             );
+            run_postinstall_phase(plugin, &task.workspace_root, artifact_store.as_ref());
             return Ok(());
         }
 
@@ -796,6 +793,7 @@ async fn run_root_task_two_phase(
                     "[rage] {}#{} \u{2713} (restored from artifact cache — {} bin links)",
                     task.package_name, task.script_name, bin_count
                 );
+                run_postinstall_phase(plugin, &task.workspace_root, artifact_store.as_ref());
                 return Ok(());
             }
             Ok(false) => {
@@ -850,9 +848,7 @@ async fn run_root_task_two_phase(
         let store_clone = Arc::clone(&artifact_store);
 
         let captured = tokio::task::spawn_blocking(move || {
-            let artifact_dir = cache_dir
-                .join("artifact-packages")
-                .join(&fp_for_dir);
+            let artifact_dir = cache_dir.join("artifact-packages").join(&fp_for_dir);
 
             if let Some(pkgs) = lockfile_pkgs {
                 // Lockfile-based capture
@@ -890,6 +886,7 @@ async fn run_root_task_two_phase(
             task.script_name,
             elapsed.as_secs_f64()
         );
+        run_postinstall_phase(plugin, &task.workspace_root, artifact_store.as_ref());
         Ok(())
     } else {
         let code = status.code().unwrap_or(-1);
@@ -914,8 +911,12 @@ fn find_latest_install_fingerprint(cache_dir: &Path) -> Option<String> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let Some(rest) = name.strip_prefix("root-") else { continue };
-        let Some(fp) = rest.strip_suffix(".done") else { continue };
+        let Some(rest) = name.strip_prefix("root-") else {
+            continue;
+        };
+        let Some(fp) = rest.strip_suffix(".done") else {
+            continue;
+        };
         let mtime = entry.metadata().and_then(|m| m.modified()).ok()?;
         match &best {
             None => best = Some((mtime, fp.to_string())),
@@ -924,6 +925,67 @@ fn find_latest_install_fingerprint(cache_dir: &Path) -> Option<String> {
         }
     }
     best.map(|(_, fp)| fp)
+}
+
+/// Run every postinstall task the plugin yields for `workspace_root`, using
+/// `store` for cache restore + capture. Errors are swallowed (logged): a
+/// failed postinstall is reported but never breaks the install task.
+fn run_postinstall_phase(
+    plugin: &dyn plugin::EcosystemPlugin,
+    workspace_root: &Path,
+    store: &artifact_store::LocalArtifactStore,
+) {
+    use crate::postinstall_cache::{
+        compute_delta, postinstall_cas_key, restore_postinstall_outputs, run_postinstall,
+        snapshot_dir, store_postinstall_outputs,
+    };
+
+    let tasks = plugin.postinstall_tasks(workspace_root);
+    for pt in &tasks {
+        let key = postinstall_cas_key(pt);
+
+        // Cache hit?
+        match restore_postinstall_outputs(&key, &pt.cwd, store) {
+            Ok(true) => {
+                eprintln!(
+                    "[rage] {}#postinstall \u{2713} (restored from cache)",
+                    pt.package_name
+                );
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!(
+                    "[rage] {}#postinstall restore error ({e}) \u{2014} re-running",
+                    pt.package_name
+                );
+            }
+        }
+
+        // Cache miss — snapshot, run, capture.
+        let before = snapshot_dir(&pt.cwd).unwrap_or_default();
+        let start = std::time::Instant::now();
+        let ran_ok = run_postinstall(pt).unwrap_or(false);
+        let elapsed = start.elapsed();
+
+        if ran_ok {
+            let after = snapshot_dir(&pt.cwd).unwrap_or_default();
+            let delta = compute_delta(&before, &after);
+            if let Err(e) = store_postinstall_outputs(&key, &delta, store) {
+                eprintln!(
+                    "[rage] {}#postinstall capture error ({e}) \u{2014} ran but not cached",
+                    pt.package_name
+                );
+            }
+            eprintln!(
+                "[rage] {}#postinstall \u{2713} {:.2}s",
+                pt.package_name,
+                elapsed.as_secs_f64()
+            );
+        } else {
+            eprintln!("[rage] {}#postinstall \u{2717} FAILED", pt.package_name);
+        }
+    }
 }
 
 /// Spawn a command with piped stdout+stderr; tee to terminal in real time
@@ -1556,9 +1618,15 @@ mod tests {
         let pkg = mk_pkg("pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
 
-        run_tasks_two_phase(&dag, vec![task.clone()], two_phase.clone(), test_plugin(), test_store())
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![task.clone()],
+            two_phase.clone(),
+            test_plugin(),
+            test_store(),
+        )
+        .await
+        .unwrap();
 
         let entries: Vec<_> = std::fs::read_dir(cache_dir.path()).unwrap().collect();
         assert!(
@@ -1733,7 +1801,9 @@ mod tests {
         let cache = std::sync::Arc::new(
             cache::TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap(),
         );
-        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store()).await.unwrap();
+        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store())
+            .await
+            .unwrap();
         assert!(
             sentinel.exists(),
             "fake-tsc must have been found via node_modules/.bin"
@@ -1774,9 +1844,15 @@ mod tests {
         let dag = build_dag(vec![pkg]).unwrap();
 
         // First run — cache miss, WF computed from src/index.ts content
-        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone(), test_plugin(), test_store())
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![task.clone()],
+            cache.clone(),
+            test_plugin(),
+            test_store(),
+        )
+        .await
+        .unwrap();
 
         let wf_files_after_first: Vec<_> = std::fs::read_dir(cache_dir.path())
             .unwrap()
@@ -1793,7 +1869,9 @@ mod tests {
         std::fs::write(&src_file, b"export const v = 2;").unwrap();
 
         // Second run — must MISS because WF changed (source file content changed)
-        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store()).await.unwrap();
+        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store())
+            .await
+            .unwrap();
 
         let wf_files_after_second: Vec<_> = std::fs::read_dir(cache_dir.path())
             .unwrap()
@@ -1860,9 +1938,15 @@ mod tests {
         let dag = build_dag(vec![pkg_core, pkg_utils]).unwrap();
 
         // First run: utils runs (cache miss) — WF includes core's ABI fp
-        run_tasks_two_phase(&dag, vec![utils_task.clone()], cache.clone(), test_plugin(), test_store())
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![utils_task.clone()],
+            cache.clone(),
+            test_plugin(),
+            test_store(),
+        )
+        .await
+        .unwrap();
 
         // Verify one WF entry for utils
         let wf_count_1 = std::fs::read_dir(cache_dir.path())
@@ -1874,9 +1958,15 @@ mod tests {
 
         // utils runs AGAIN with the same core ABI fingerprint →
         // same WF → cache HIT → printed as "(cached, two-phase)"
-        run_tasks_two_phase(&dag, vec![utils_task], cache.clone(), test_plugin(), test_store())
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![utils_task],
+            cache.clone(),
+            test_plugin(),
+            test_store(),
+        )
+        .await
+        .unwrap();
 
         // WF entry count must still be 1 (hit, not a second entry)
         let wf_count_2 = std::fs::read_dir(cache_dir.path())
@@ -1934,16 +2024,19 @@ mod tests {
         let pkg = mk_pkg("ts-lib", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
 
-        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone(), test_plugin(), test_store())
-            .await
-            .unwrap();
-
-        let tool_path = crate::node_path::which_first(
-            &task.command,
-            &task.cwd,
-            &task.workspace_root,
+        run_tasks_two_phase(
+            &dag,
+            vec![task.clone()],
+            cache.clone(),
+            test_plugin(),
+            test_store(),
         )
-        .unwrap_or_else(|| std::path::PathBuf::from("echo"));
+        .await
+        .unwrap();
+
+        let tool_path =
+            crate::node_path::which_first(&task.command, &task.cwd, &task.workspace_root)
+                .unwrap_or_else(|| std::path::PathBuf::from("echo"));
 
         let inputs = cache::WeakFpInputs {
             command: &task.command,
@@ -1954,7 +2047,9 @@ mod tests {
             dep_abi_fingerprints: &[],
         };
 
-        let (_, entry) = cache.lookup(&inputs).expect("entry must exist after first run");
+        let (_, entry) = cache
+            .lookup(&inputs)
+            .expect("entry must exist after first run");
         assert!(
             entry.abi_fingerprint.is_some(),
             "entry.abi_fingerprint must be Some(_) when .d.ts output files exist; \
@@ -2000,9 +2095,15 @@ mod tests {
         let dag = build_dag(vec![pkg]).unwrap();
 
         // First run — executes task, captures output.
-        run_tasks_two_phase(&dag, vec![task.clone()], cache.clone(), test_plugin(), test_store())
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![task.clone()],
+            cache.clone(),
+            test_plugin(),
+            test_store(),
+        )
+        .await
+        .unwrap();
 
         // Verify output was stored.
         let output_files: Vec<_> = std::fs::read_dir(cache_dir.path())
@@ -2074,18 +2175,15 @@ mod tests {
 
         // 5) Derive artifact directory and call capture_now (sync variant of schedule_capture).
         let artifact_dir = cache_dir.path().join("artifact-packages").join(fp);
-        crate::artifact_capture::capture_now(
-            &pathset_reads,
-            ws.path(),
-            &artifact_dir,
-            fp,
-            &store,
-        )
-        .unwrap();
+        crate::artifact_capture::capture_now(&pathset_reads, ws.path(), &artifact_dir, fp, &store)
+            .unwrap();
 
         // 6) Verify per-package file written and contains ms@2.1.3.
         let pkg_file = artifact_dir.join("ms@2.1.3.json");
-        assert!(pkg_file.exists(), "per-package file must exist: {pkg_file:?}");
+        assert!(
+            pkg_file.exists(),
+            "per-package file must exist: {pkg_file:?}"
+        );
         let text = std::fs::read_to_string(&pkg_file).unwrap();
         let artifact: artifact_store::PackageArtifact = serde_json::from_str(&text).unwrap();
         assert_eq!(artifact.name, "ms");
@@ -2098,5 +2196,88 @@ mod tests {
                 "CAS should contain hash for captured file"
             );
         }
+    }
+
+    // ── postinstall integration test ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn postinstall_runs_after_fresh_install_and_restores_on_second_run() {
+        use build_graph::dag::build_dag;
+        use cache::TwoPhaseCache;
+        use tempfile::tempdir;
+
+        let ws_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let store_dir = tempdir().unwrap();
+
+        // Set up fake package with postinstall script.
+        // No lockfile → integrity falls back to `rage-fallback:fake-pkg`.
+        let pkg_dir = ws_dir.path().join("node_modules").join("fake-pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            br#"{"name":"fake-pkg","version":"1.0.0","scripts":{"postinstall":"touch did-run.flag"}}"#,
+        )
+        .unwrap();
+
+        let cache = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
+        #[allow(deprecated)]
+        let store = Arc::new(artifact_store::LocalArtifactStore::new(
+            store_dir.path().to_path_buf(),
+        ));
+
+        let install = Task {
+            package_name: "workspace".to_string(),
+            script_name: "install".to_string(),
+            command: "true".to_string(),
+            cwd: ws_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: true,
+            workspace_root: ws_dir.path().to_path_buf(),
+            input_paths: Vec::new(),
+            declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+
+        // An empty DAG — root task runs in wave 0 regardless.
+        let dag = build_dag(vec![]).unwrap();
+
+        // First run — fresh install; postinstall should execute.
+        run_tasks_two_phase(
+            &dag,
+            vec![install.clone()],
+            cache.clone(),
+            test_plugin(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            pkg_dir.join("did-run.flag").exists(),
+            "postinstall should have created did-run.flag on first run"
+        );
+
+        // Delete the flag to simulate a clean package state.
+        std::fs::remove_file(pkg_dir.join("did-run.flag")).unwrap();
+
+        // Second run — marker already exists; postinstall outputs should be
+        // restored from CAS rather than re-executed.
+        run_tasks_two_phase(
+            &dag,
+            vec![install.clone()],
+            cache.clone(),
+            test_plugin(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            pkg_dir.join("did-run.flag").exists(),
+            "postinstall output should have been restored from CAS on second run"
+        );
     }
 }
