@@ -164,6 +164,135 @@ pub fn snapshot_dir(dir: &Path) -> std::io::Result<HashMap<PathBuf, Vec<u8>>> {
     Ok(map)
 }
 
+/// Encode `bytes` using standard Base64 (RFC 4648 §4).
+/// Uses no external crate — only the standard alphabet is needed here.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHA: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    for chunk in bytes.chunks(3) {
+        match chunk {
+            [a, b, c] => {
+                out.push(ALPHA[(a >> 2) as usize] as char);
+                out.push(ALPHA[((a & 0x3) << 4 | b >> 4) as usize] as char);
+                out.push(ALPHA[((b & 0xf) << 2 | c >> 6) as usize] as char);
+                out.push(ALPHA[(c & 0x3f) as usize] as char);
+            }
+            [a, b] => {
+                out.push(ALPHA[(a >> 2) as usize] as char);
+                out.push(ALPHA[((a & 0x3) << 4 | b >> 4) as usize] as char);
+                out.push(ALPHA[((b & 0xf) << 2) as usize] as char);
+                out.push('=');
+            }
+            [a] => {
+                out.push(ALPHA[(a >> 2) as usize] as char);
+                out.push(ALPHA[((a & 0x3) << 4) as usize] as char);
+                out.push('=');
+                out.push('=');
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Decode a standard Base64 string.
+/// Returns `None` on bad input (unknown character or length not a multiple of 4).
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 4 != 0 {
+        return None;
+    }
+
+    fn val(c: char) -> Option<u8> {
+        match c {
+            'A'..='Z' => Some(c as u8 - b'A'),
+            'a'..='z' => Some(c as u8 - b'a' + 26),
+            '0'..='9' => Some(c as u8 - b'0' + 52),
+            '+' => Some(62),
+            '/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let chars: Vec<char> = s.chars().collect();
+    for chunk in chars.chunks(4) {
+        let c0 = val(chunk[0])?;
+        let c1 = val(chunk[1])?;
+        if chunk[2] == '=' && chunk[3] == '=' {
+            // 1-byte group
+            out.push((c0 << 2) | (c1 >> 4));
+        } else if chunk[3] == '=' {
+            // 2-byte group
+            let c2 = val(chunk[2])?;
+            out.push((c0 << 2) | (c1 >> 4));
+            out.push(((c1 & 0xf) << 4) | (c2 >> 2));
+        } else {
+            // 3-byte group (full)
+            let c2 = val(chunk[2])?;
+            let c3 = val(chunk[3])?;
+            out.push((c0 << 2) | (c1 >> 4));
+            out.push(((c1 & 0xf) << 4) | (c2 >> 2));
+            out.push(((c2 & 0x3) << 6) | c3);
+        }
+    }
+    Some(out)
+}
+
+/// Serialize `delta` (path → bytes) as a JSON `BTreeMap<String, String>` where
+/// values are Base64-encoded, then store it in `store` under the given `key`.
+pub fn store_postinstall_outputs(
+    key: &[u8; 32],
+    delta: &HashMap<PathBuf, Vec<u8>>,
+    store: &artifact_store::LocalArtifactStore,
+) -> std::io::Result<()> {
+    use std::collections::BTreeMap;
+
+    let map: BTreeMap<String, String> = delta
+        .iter()
+        .map(|(path, bytes)| {
+            let path_str = path.to_string_lossy().into_owned();
+            let encoded = base64_encode(bytes);
+            (path_str, encoded)
+        })
+        .collect();
+
+    let json = serde_json::to_vec(&map)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    store.put_bytes_keyed(*key, &json)
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+
+    #[test]
+    fn base64_roundtrip_handles_binary() {
+        let cases: &[&[u8]] = &[b"", b"a", b"ab", b"abc", b"abcd", b"\x00\xff\x10"];
+        for case in cases {
+            let encoded = base64_encode(case);
+            let decoded = base64_decode(&encoded).expect("decode should succeed");
+            assert_eq!(&decoded, case, "roundtrip failed for {:?}", case);
+        }
+    }
+
+    #[test]
+    fn store_writes_to_cas_under_key() {
+        let dir = tempfile::tempdir().unwrap();
+        #[allow(deprecated)]
+        let store = artifact_store::LocalArtifactStore::new(dir.path());
+
+        let mut delta = HashMap::new();
+        delta.insert(PathBuf::from("install.js.lock"), b"binary\xff".to_vec());
+
+        let key = [7u8; 32];
+        store_postinstall_outputs(&key, &delta, &store).unwrap();
+
+        assert!(store.contains_raw_key(&key), "key should exist in CAS after store");
+    }
+}
+
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
