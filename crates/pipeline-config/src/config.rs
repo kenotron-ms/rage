@@ -118,6 +118,19 @@ pub struct RageConfig {
     /// Per-script pipeline settings (skip_packages, etc.).
     /// Keys are script names (e.g. `"build"`, `"test"`).
     pub pipeline: std::collections::HashMap<String, PipelineTaskConfig>,
+    /// Maximum number of package tasks that may execute their subprocess
+    /// concurrently.  `None` (the default) means "one slot per logical CPU"
+    /// as reported by `std::thread::available_parallelism`.
+    ///
+    /// Lower this when your tasks already parallelize internally (e.g. jest
+    /// with `--maxWorkers`) so they do not overwhelm the machine.
+    ///
+    /// Example in rage.json:
+    /// ```json
+    /// { "maxConcurrency": 4 }
+    /// ```
+    #[serde(rename = "maxConcurrency")]
+    pub max_concurrency: Option<usize>,
 }
 
 /// Load `rage.json` from the workspace root. Returns `None` if absent.

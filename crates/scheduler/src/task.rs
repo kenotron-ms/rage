@@ -403,6 +403,7 @@ mod tests {
             }],
             plugins_config: HashMap::new(),
             pipeline: HashMap::new(),
+            max_concurrency: None,
         };
 
         let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
@@ -465,6 +466,7 @@ mod tests {
             policies: vec![],
             plugins_config: HashMap::new(),
             pipeline,
+                    max_concurrency: None,
         };
 
         let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();

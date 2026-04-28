@@ -54,6 +54,7 @@ mod tests {
             policies,
             plugins_config: HashMap::new(),
             pipeline: HashMap::new(),
+            max_concurrency: None,
         }
     }
 

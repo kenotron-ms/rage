@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 #[derive(Debug, Error)]
@@ -370,13 +371,32 @@ async fn run_root_task_legacy(
 /// For each wave, all tasks run concurrently. Waves run sequentially.
 /// On any task failure, the wave is aborted via `JoinSet::abort_all` and the
 /// error is returned.
+/// Resolve the effective subprocess concurrency limit.
+///
+/// Returns the configured cap when set, otherwise one slot per logical CPU.
+/// Falls back to 4 if `available_parallelism` is unavailable (rare).
+pub fn effective_concurrency(max_concurrency: Option<usize>) -> usize {
+    max_concurrency.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    })
+}
+
 pub async fn run_tasks_two_phase(
     dag: &WorkspaceDag,
     tasks: Vec<Task>,
     cache: Arc<cache::TwoPhaseCache>,
     plugin: Arc<dyn plugin::EcosystemPlugin>,
     artifact_store: Arc<artifact_store::LocalArtifactStore>,
+    max_concurrency: Option<usize>,
 ) -> anyhow::Result<()> {
+    // One semaphore permit per allowed concurrent subprocess.
+    // Cache lookups and cache-hit replays proceed without acquiring a permit —
+    // only the actual subprocess execution is throttled.
+    let concurrency = effective_concurrency(max_concurrency);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+
     let levels = compute_task_levels(dag, &tasks);
 
     for level in levels {
@@ -386,11 +406,13 @@ pub async fn run_tasks_two_phase(
             let cache_clone = cache.clone();
             let plugin_clone = Arc::clone(&plugin);
             let store_clone = Arc::clone(&artifact_store);
+            let sem_clone = Arc::clone(&semaphore);
             set.spawn(run_single_task_two_phase(
                 task,
                 cache_clone,
                 plugin_clone,
                 store_clone,
+                sem_clone,
             ));
         }
 
@@ -443,6 +465,11 @@ async fn run_single_task_two_phase(
     cache: Arc<cache::TwoPhaseCache>,
     plugin: Arc<dyn plugin::EcosystemPlugin>,
     artifact_store: Arc<artifact_store::LocalArtifactStore>,
+    // Semaphore that gates subprocess execution. Acquired just before
+    // spawning the build command; released when it exits. Cache lookups
+    // and cache-hit replays never hold this permit so warm builds are
+    // fully parallel regardless of the concurrency cap.
+    subprocess_semaphore: Arc<Semaphore>,
 ) -> Result<(), RunError> {
     if task.is_root {
         return run_root_task_two_phase(task, cache, plugin.as_ref(), artifact_store).await;
@@ -570,7 +597,15 @@ async fn run_single_task_two_phase(
         return Ok(());
     }
 
-    // Cache miss — execute
+    // Cache miss — execute.
+    // Acquire a concurrency permit before spawning the subprocess so we never
+    // exceed the configured (or CPU-count-derived) limit.  The permit is
+    // dropped automatically at the end of this block.
+    let _permit = subprocess_semaphore
+        .acquire_owned()
+        .await
+        .expect("semaphore closed");
+
     eprintln!(
         "[rage] {}#{} starting [sandbox={:?}]",
         task.package_name, task.script_name, task.sandbox_mode
@@ -1666,8 +1701,7 @@ mod tests {
             vec![task.clone()],
             two_phase.clone(),
             test_plugin(),
-            test_store(),
-        )
+            test_store(), None)
         .await
         .unwrap();
 
@@ -1691,7 +1725,7 @@ mod tests {
             "expected sf-*.entry file"
         );
 
-        run_tasks_two_phase(&dag, vec![task], two_phase, test_plugin(), test_store())
+        run_tasks_two_phase(&dag, vec![task], two_phase, test_plugin(), test_store(), None)
             .await
             .unwrap();
     }
@@ -1844,7 +1878,7 @@ mod tests {
         let cache = std::sync::Arc::new(
             cache::TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap(),
         );
-        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store())
+        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store(), None)
             .await
             .unwrap();
         assert!(
@@ -1892,8 +1926,7 @@ mod tests {
             vec![task.clone()],
             cache.clone(),
             test_plugin(),
-            test_store(),
-        )
+            test_store(), None)
         .await
         .unwrap();
 
@@ -1912,7 +1945,7 @@ mod tests {
         std::fs::write(&src_file, b"export const v = 2;").unwrap();
 
         // Second run — must MISS because WF changed (source file content changed)
-        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store())
+        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store(), None)
             .await
             .unwrap();
 
@@ -1986,8 +2019,7 @@ mod tests {
             vec![utils_task.clone()],
             cache.clone(),
             test_plugin(),
-            test_store(),
-        )
+            test_store(), None)
         .await
         .unwrap();
 
@@ -2006,8 +2038,7 @@ mod tests {
             vec![utils_task],
             cache.clone(),
             test_plugin(),
-            test_store(),
-        )
+            test_store(), None)
         .await
         .unwrap();
 
@@ -2072,8 +2103,7 @@ mod tests {
             vec![task.clone()],
             cache.clone(),
             test_plugin(),
-            test_store(),
-        )
+            test_store(), None)
         .await
         .unwrap();
 
@@ -2143,8 +2173,7 @@ mod tests {
             vec![task.clone()],
             cache.clone(),
             test_plugin(),
-            test_store(),
-        )
+            test_store(), None)
         .await
         .unwrap();
 
@@ -2171,7 +2200,7 @@ mod tests {
         assert_eq!(stored.exit_code, 0);
 
         // Second run — should be a cache hit with replayed output.
-        run_tasks_two_phase(&dag, vec![task], cache.clone(), test_plugin(), test_store())
+        run_tasks_two_phase(&dag, vec![task], cache.clone(), test_plugin(), test_store(), None)
             .await
             .unwrap();
     }
@@ -2293,8 +2322,7 @@ mod tests {
             vec![install.clone()],
             cache.clone(),
             test_plugin(),
-            store.clone(),
-        )
+            store.clone(), None)
         .await
         .unwrap();
 
@@ -2313,8 +2341,7 @@ mod tests {
             vec![install.clone()],
             cache.clone(),
             test_plugin(),
-            store.clone(),
-        )
+            store.clone(), None)
         .await
         .unwrap();
 

@@ -540,9 +540,16 @@ async fn cmd_run(
             std::sync::Arc::new(artifact_store::LocalArtifactStore::new(&store_root));
         let plugin_arc: std::sync::Arc<dyn plugin::EcosystemPlugin> =
             std::sync::Arc::new(plugin_typescript::TypeScriptPlugin::new());
-        scheduler::run_tasks_two_phase(&dag, tasks, two_phase, plugin_arc, artifact_store)
-            .await
-            .with_context(|| format!("'{script}' run failed"))?;
+        scheduler::run_tasks_two_phase(
+            &dag,
+            tasks,
+            two_phase,
+            plugin_arc,
+            artifact_store,
+            config.max_concurrency,
+        )
+        .await
+        .with_context(|| format!("'{script}' run failed"))?;
     }
 
     eprintln!("Done.");
