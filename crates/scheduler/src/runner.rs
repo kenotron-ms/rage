@@ -382,8 +382,13 @@ async fn run_root_task_legacy(
 struct TaskRecord {
     package: String,
     script: String,
+    /// Milliseconds since the build wall-clock started when this task began.
+    /// Used for critical-path tracing.
+    started_at_ms: u64,
     elapsed_ms: u64,
     outcome: TaskOutcome,
+    /// Workspace-package deps of this task — needed for CP chain traversal.
+    dep_packages: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -394,10 +399,28 @@ enum TaskOutcome {
 }
 
 /// Accumulates per-task records during the run; prints the summary at the end.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct BuildSummary {
     wall_start: Option<std::time::Instant>,
     records: Vec<TaskRecord>,
+    /// Configured concurrency limit for this run.
+    allowed_concurrency: usize,
+    /// High-watermark of simultaneously-active subprocesses.
+    peak_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// Currently-active subprocess count (decremented on task exit).
+    current_active: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Default for BuildSummary {
+    fn default() -> Self {
+        Self {
+            wall_start: None,
+            records: Vec::new(),
+            allowed_concurrency: 1,
+            peak_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            current_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
 }
 
 impl BuildSummary {
@@ -410,62 +433,145 @@ impl BuildSummary {
     }
 
     fn print(&self) {
-        let total_secs = self.wall_start
-            .map(|s| s.elapsed().as_secs_f64())
-            .unwrap_or(0.0);
+        use std::collections::HashMap;
+        use std::sync::atomic::Ordering;
 
-        // Only count package tasks (skip root tasks like workspace#install).
-        let pkg_records: Vec<&TaskRecord> = self.records.iter().collect();
-        if pkg_records.is_empty() { return; }
+        let wall_ms = self.wall_start
+            .map(|s| s.elapsed().as_millis() as u64)
+            .unwrap_or(1);
+        let total_secs = wall_ms as f64 / 1000.0;
 
-        let built:  Vec<&TaskRecord> = pkg_records.iter().copied().filter(|r| r.outcome == TaskOutcome::Built).collect();
-        let cached: Vec<&TaskRecord> = pkg_records.iter().copied().filter(|r| r.outcome == TaskOutcome::Cached).collect();
-        let failed: Vec<&TaskRecord> = pkg_records.iter().copied().filter(|r| r.outcome == TaskOutcome::Failed).collect();
+        let records = &self.records;
+        if records.is_empty() { return; }
 
-        // Timing stats for built tasks only (cached replays are trivially fast).
-        let avg_build_ms: f64 = if built.is_empty() {
-            0.0
-        } else {
-            built.iter().map(|r| r.elapsed_ms as f64).sum::<f64>() / built.len() as f64
+        let built:  Vec<&TaskRecord> = records.iter().filter(|r| r.outcome == TaskOutcome::Built).collect();
+        let cached: Vec<&TaskRecord> = records.iter().filter(|r| r.outcome == TaskOutcome::Cached).collect();
+        let failed: Vec<&TaskRecord> = records.iter().filter(|r| r.outcome == TaskOutcome::Failed).collect();
+        let total = records.len();
+
+        // ── Timing stats ─────────────────────────────────────────────────────
+        let avg_build_ms = if built.is_empty() { 0.0 }
+            else { built.iter().map(|r| r.elapsed_ms as f64).sum::<f64>() / built.len() as f64 };
+
+        let p95_ms: f64 = if built.is_empty() { 0.0 } else {
+            let mut t: Vec<u64> = built.iter().map(|r| r.elapsed_ms).collect();
+            t.sort_unstable();
+            t[((t.len() - 1) as f64 * 0.95) as usize] as f64
         };
 
-        let p95_ms: f64 = if built.is_empty() {
-            0.0
-        } else {
-            let mut times: Vec<u64> = built.iter().map(|r| r.elapsed_ms).collect();
-            times.sort_unstable();
-            let idx = ((times.len() - 1) as f64 * 0.95) as usize;
-            times[idx] as f64
-        };
+        // ── Peak concurrency ─────────────────────────────────────────────────
+        let peak = self.peak_active.load(Ordering::Relaxed);
+        let allowed = self.allowed_concurrency;
+        let sum_built_ms: u64 = built.iter().map(|r| r.elapsed_ms).sum();
+        // CPU utilization: how much of (wall × slots) was actually used building
+        let cpu_util_pct = if wall_ms == 0 || allowed == 0 { 0.0 }
+            else { (sum_built_ms as f64 / (wall_ms as f64 * allowed as f64)) * 100.0 };
 
-        // Slowest 5 built tasks for the "slowest" line.
-        let mut slowest = built.clone();
-        slowest.sort_by(|a, b| b.elapsed_ms.cmp(&a.elapsed_ms));
-        let top: Vec<String> = slowest.iter().take(5)
-            .map(|r| format!("  {:.2}s  {}#{}", r.elapsed_ms as f64 / 1000.0, r.package, r.script))
+        // ── Critical path ─────────────────────────────────────────────────────
+        // finish_at[pkg] = started_at_ms + elapsed_ms
+        // CP end   = task with max finish_at
+        // CP chain = trace back via dep with highest finish_at at each step
+        let finish_at: HashMap<&str, u64> = records.iter()
+            .map(|r| (r.package.as_str(), r.started_at_ms + r.elapsed_ms))
+            .collect();
+        let deps_of: HashMap<&str, &Vec<String>> = records.iter()
+            .map(|r| (r.package.as_str(), &r.dep_packages))
             .collect();
 
-        let sep = "─".repeat(60);
-        eprintln!("
-[rage] {sep}");
+        let cp_tail = records.iter()
+            .max_by_key(|r| r.started_at_ms + r.elapsed_ms);
+        let cp_ms = cp_tail.map(|r| r.started_at_ms + r.elapsed_ms).unwrap_or(0);
+
+        // Trace the critical path chain back to its root.
+        let mut chain: Vec<&TaskRecord> = Vec::new();
+        let mut cur = cp_tail.map(|r| r.package.as_str());
+        while let Some(pkg) = cur {
+            if chain.len() > 50 { break; }  // safety cap
+            let rec = records.iter().find(|r| r.package == pkg);
+            match rec {
+                None => break,
+                Some(r) => {
+                    chain.push(r);
+                    // Follow the dep whose finish_at is highest (the one that made us wait).
+                    cur = deps_of.get(pkg)
+                        .and_then(|deps| {
+                            deps.iter()
+                                .filter_map(|d| finish_at.get(d.as_str()).map(|&f| (d.as_str(), f)))
+                                .max_by_key(|(_, f)| *f)
+                                .map(|(d, _)| d)
+                        });
+                }
+            }
+        }
+        chain.reverse();
+
+        let cp_eff_pct = if wall_ms == 0 { 0.0 } else { cp_ms as f64 / wall_ms as f64 * 100.0 };
+
+        // ── Insight ──────────────────────────────────────────────────────────
+        // cp_eff: how much of wall time was forced by sequential deps
+        // peak_util: how much of the allowed concurrency ceiling we hit
+        let peak_util = if allowed == 0 { 0.0 } else { peak as f64 / allowed as f64 };
+        let insight = if built.is_empty() {
+            "⚡ all cached".to_string()
+        } else if cp_eff_pct > 75.0 {
+            format!(
+                "⚠  critical path dominates ({:.0}% of wall) · more CPUs won't help · \
+                 split {} to reduce build time",
+                cp_eff_pct,
+                chain.last().map(|r| r.package.as_str()).unwrap_or("?")
+            )
+        } else if peak_util >= 0.90 {
+            format!(
+                "⚡ machine saturated (peak {}/{}) · more CPUs would reduce wall time",
+                peak, allowed
+            )
+        } else if cpu_util_pct < 40.0 && !built.is_empty() {
+            format!(
+                "○  scheduling gaps ({:.0}% CPU util) · \
+                 check memory budget or dependency fan-out",
+                cpu_util_pct
+            )
+        } else {
+            format!(
+                "✓  balanced  ·  peak {}/{} slots  ·  {:.0}% CPU util",
+                peak, allowed, cpu_util_pct
+            )
+        };
+
+        // ── Print ─────────────────────────────────────────────────────────────
+        let sep = "─".repeat(62);
+        eprintln!("\n[rage] {sep}");
         eprintln!(
             "[rage]  tasks    {:>3} total  ·  {:>3} built  ·  {:>3} cached  ·  {:>3} failed",
-            pkg_records.len(), built.len(), cached.len(), failed.len()
+            total, built.len(), cached.len(), failed.len()
         );
         if built.is_empty() {
-            eprintln!("[rage]  timing   {:.1}s total  (all cached)", total_secs);
+            eprintln!("[rage]  timing   {:.2}s wall  (all cached)", total_secs);
         } else {
             eprintln!(
-                "[rage]  timing   {:.1}s total  ·  {:.2}s avg/build  ·  {:.2}s p95",
+                "[rage]  timing   {:.2}s wall  ·  {:.2}s avg/build  ·  {:.2}s p95",
                 total_secs, avg_build_ms / 1000.0, p95_ms / 1000.0
             );
         }
-        if !top.is_empty() {
-            eprintln!("[rage]  slowest");
-            for line in &top { eprintln!("[rage]          {line}"); }
+        eprintln!(
+            "[rage]  concurrency   peak {}/{} slots  ·  {:.0}% CPU util",
+            peak, allowed, cpu_util_pct
+        );
+        if cp_ms > 0 {
+            eprintln!(
+                "[rage]  critical path  {:.2}s  ·  {:.0}% of wall  ({} tasks)",
+                cp_ms as f64 / 1000.0, cp_eff_pct, chain.len()
+            );
+            for (i, r) in chain.iter().enumerate() {
+                let arrow = if i == 0 { "  " } else { "→ " };
+                eprintln!(
+                    "[rage]    {}  {:.2}s  {}",
+                    arrow, r.elapsed_ms as f64 / 1000.0, r.package
+                );
+            }
         }
-        eprintln!("[rage] {sep}
-");
+        eprintln!("[rage]  insight  {insight}");
+        eprintln!("[rage] {sep}\n");
     }
 }
 
@@ -494,7 +600,11 @@ pub async fn run_tasks_two_phase(
 
     // Build-run summary — collects per-task timings and prints a table at the end.
     let summary = Arc::new(std::sync::Mutex::new(BuildSummary::default()));
-    summary.lock().unwrap().start();
+    {
+        let mut s = summary.lock().unwrap();
+        s.start();
+        s.allowed_concurrency = concurrency;
+    }
 
     // Layer 2 — memory budget (RAM guard).
     // Reads available system memory at startup; uses historical p75 peak-RSS
@@ -515,6 +625,10 @@ pub async fn run_tasks_two_phase(
             let sem_clone = Arc::clone(&semaphore);
             let budget_clone = Arc::clone(&memory_budget);
             let summary_clone = Arc::clone(&summary);
+            let (peak_clone, cur_clone) = {
+                let s = summary.lock().unwrap();
+                (Arc::clone(&s.peak_active), Arc::clone(&s.current_active))
+            };
             set.spawn(run_single_task_two_phase(
                 task,
                 cache_clone,
@@ -523,6 +637,8 @@ pub async fn run_tasks_two_phase(
                 sem_clone,
                 budget_clone,
                 summary_clone,
+                peak_clone,
+                cur_clone,
             ));
         }
 
@@ -587,6 +703,9 @@ async fn run_single_task_two_phase(
     memory_budget: Arc<crate::resource_budget::MemoryBudget>,
     // Shared build summary — records outcome + timing for the end-of-run table.
     summary: Arc<std::sync::Mutex<BuildSummary>>,
+    // Concurrency counters — track peak and current active subprocesses.
+    peak_active: Arc<std::sync::atomic::AtomicUsize>,
+    current_active: Arc<std::sync::atomic::AtomicUsize>,
 ) -> Result<(), RunError> {
     if task.is_root {
         return run_root_task_two_phase(task, cache, plugin.as_ref(), artifact_store).await;
@@ -600,6 +719,15 @@ async fn run_single_task_two_phase(
     let task_timer = std::time::Instant::now();
     let pkg_name = task.package_name.clone();
     let script_name = task.script_name.clone();
+    // started_at_ms: ms since wall_start when this task began (for critical-path).
+    // We derive it by subtracting task_timer from total elapsed at this point.
+    // Since wall_start is in BuildSummary (locked), we use a proxy: the time
+    // since the summary was created, captured once under the lock.
+    let started_at_ms: u64 = {
+        let s = summary.lock().unwrap();
+        s.wall_start.map(|ws| ws.elapsed().as_millis() as u64).unwrap_or(0)
+    };
+    let task_dep_packages = task.dep_package_names.clone();
 
     let tool_path = crate::node_path::which_first(&task.command, &task.cwd, &task.workspace_root)
         .unwrap_or_else(|| PathBuf::from("sh"));
@@ -723,8 +851,10 @@ async fn run_single_task_two_phase(
         summary.lock().unwrap().record(TaskRecord {
             package: pkg_name.clone(),
             script: script_name.clone(),
+            started_at_ms,
             elapsed_ms: task_timer.elapsed().as_millis() as u64,
             outcome: TaskOutcome::Cached,
+            dep_packages: task_dep_packages.clone(),
         });
         return Ok(());
     }
@@ -747,6 +877,13 @@ async fn run_single_task_two_phase(
         .acquire_owned()
         .await
         .expect("semaphore closed");
+
+    // Track peak subprocess concurrency.
+    {
+        use std::sync::atomic::Ordering;
+        let cur = current_active.fetch_add(1, Ordering::Relaxed) + 1;
+        peak_active.fetch_max(cur, Ordering::Relaxed);
+    }
 
     // Look up historical memory stats for this task and reserve budget.
     let stats = cache::task_stats::load(cache.dir(), &task_wf);
@@ -794,6 +931,7 @@ async fn run_single_task_two_phase(
                 stats.record(peak_rss);
                 let _ = cache::task_stats::save(cache.dir(), &task_wf, &stats);
             }
+            current_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             memory_guard.release_with_actual(peak_rss);
             (code, StoredPathset::default())
         }
@@ -912,8 +1050,10 @@ async fn run_single_task_two_phase(
         summary.lock().unwrap().record(TaskRecord {
             package: pkg_name.clone(),
             script: script_name.clone(),
-            elapsed_ms: elapsed_ms,
+            started_at_ms,
+            elapsed_ms,
             outcome: TaskOutcome::Built,
+            dep_packages: task_dep_packages.clone(),
         });
         Ok(())
     } else {
@@ -924,8 +1064,10 @@ async fn run_single_task_two_phase(
         summary.lock().unwrap().record(TaskRecord {
             package: pkg_name,
             script: script_name,
-            elapsed_ms: elapsed_ms,
+            started_at_ms,
+            elapsed_ms,
             outcome: TaskOutcome::Failed,
+            dep_packages: task_dep_packages,
         });
         Err(RunError::TaskFailed {
             package: task.package_name,
