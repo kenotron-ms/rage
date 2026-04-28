@@ -181,13 +181,24 @@ mod key_tests {
 
 
 
-/// Run `task.script` via `sh -c` in `task.cwd`. Returns `Ok(true)` when the
-/// script exits 0, `Ok(false)` for any other exit. Stdout/stderr are inherited.
-pub fn run_postinstall(task: &plugin::PostinstallTask) -> std::io::Result<bool> {
+/// Run `task.script` via `sh -c` in `task.cwd`, with `node_modules/.bin` on PATH.
+///
+/// `workspace_root` is needed to build the full PATH (package-local + workspace-root
+/// `.bin` dirs, plus any active version-manager bin dir).
+///
+/// Returns `Ok(true)` when the script exits 0, `Ok(false)` for any other exit.
+/// Stdout/stderr are inherited.
+pub fn run_postinstall(
+    task: &plugin::PostinstallTask,
+    workspace_root: &std::path::Path,
+) -> std::io::Result<bool> {
+    let system_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = crate::node_path::build_node_path(&task.cwd, workspace_root, &system_path);
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(&task.script)
         .current_dir(&task.cwd)
+        .env("PATH", new_path)
         .status()?;
     Ok(status.success())
 }
@@ -211,7 +222,7 @@ mod run_tests {
     fn run_succeeds_returns_true() {
         let dir = tempfile::tempdir().unwrap();
         let task = task_with_script(dir.path(), "true");
-        let result = run_postinstall(&task).unwrap();
+        let result = run_postinstall(&task, dir.path()).unwrap();
         assert!(result, "script 'true' should return Ok(true)");
     }
 
@@ -219,7 +230,7 @@ mod run_tests {
     fn run_failure_returns_false() {
         let dir = tempfile::tempdir().unwrap();
         let task = task_with_script(dir.path(), "exit 1");
-        let result = run_postinstall(&task).unwrap();
+        let result = run_postinstall(&task, dir.path()).unwrap();
         assert!(!result, "script 'exit 1' should return Ok(false)");
     }
 
@@ -227,7 +238,7 @@ mod run_tests {
     fn run_executes_in_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let task = task_with_script(dir.path(), "touch ran.txt");
-        run_postinstall(&task).unwrap();
+        run_postinstall(&task, dir.path()).unwrap();
         assert!(
             dir.path().join("ran.txt").exists(),
             "ran.txt should exist after 'touch ran.txt' script"

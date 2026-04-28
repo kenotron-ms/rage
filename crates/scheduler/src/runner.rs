@@ -972,7 +972,8 @@ fn run_postinstall_phase(
         // Cache miss — walk before, run script, walk after, store delta.
         let before = capture_dir(&pt.cwd, store).unwrap_or_default();
         let start = std::time::Instant::now();
-        let ran_ok = run_postinstall(pt).unwrap_or(false);
+        // Bug 1 fix: pass workspace_root so node_modules/.bin is on PATH.
+        let ran_ok = run_postinstall(pt, workspace_root).unwrap_or(false);
         let elapsed = start.elapsed();
 
         if ran_ok {
