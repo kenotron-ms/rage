@@ -17,6 +17,7 @@
 
 pub mod event;
 pub mod mock;
+pub mod pipe_proto;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
