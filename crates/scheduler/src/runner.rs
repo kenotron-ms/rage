@@ -378,31 +378,44 @@ pub async fn run_tasks_two_phase(
             ));
         }
 
-        let mut first_error: Option<RunError> = None;
+        // Bug 4 fix: collect ALL failures so every failing package is reported,
+        // not just the first one.
+        let mut errors: Vec<String> = Vec::new();
 
         while let Some(join_result) = set.join_next().await {
             match join_result {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
+                    errors.push(e.to_string());
                     set.abort_all();
                 }
                 Err(_join_err) => {
-                    if first_error.is_none() {
-                        first_error = Some(RunError::Killed {
+                    errors.push(
+                        RunError::Killed {
                             package: "unknown".to_string(),
                             script: "unknown".to_string(),
-                        });
-                    }
+                        }
+                        .to_string(),
+                    );
                     set.abort_all();
                 }
             }
         }
 
-        if let Some(e) = first_error {
-            return Err(e.into());
+        if !errors.is_empty() {
+            if errors.len() == 1 {
+                return Err(anyhow::anyhow!("{}", errors[0]));
+            } else {
+                return Err(anyhow::anyhow!(
+                    "{} tasks failed:\n{}",
+                    errors.len(),
+                    errors
+                        .iter()
+                        .map(|e| format!("  - {e}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
         }
     }
 
