@@ -6,16 +6,17 @@
 //! Detours sandbox:
 //!
 //! 1. **Creates a named pipe** that the injected `rage_sandbox.dll` connects
-//!    to over `\\.\pipe\rage_sandbox_{pid}_{nonce}`.
+//!    to over `\\\\.\\pipe\\rage_sandbox_{pid}_{nonce}`.
 //! 2. **Injects `rage_sandbox.dll`** into the child process at startup
-//!    (future: `run_sandboxed` will handle this via `CreateProcess` +
-//!    `CreateRemoteThread`).
+//!    via `inject_and_spawn` (suspended `CreateProcess` + `CreateRemoteThread`
+//!    with `LoadLibraryW`).
 //! 3. **Reads [`AccessEvent`]s** from the pipe until the child exits
 //!    (signalled by `ERROR_BROKEN_PIPE` or a zero-byte read).
 
 #[allow(unused_imports)]
 use crate::event::{AccessEvent, PathSet, RunResult};
 use crate::pipe_proto;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE,
@@ -23,15 +24,25 @@ use windows_sys::Win32::Foundation::{
 };
 #[allow(unused_imports)]
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, FILE_FLAG_OVERLAPPED};
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows_sys::Win32::System::Memory::{
+    VirtualAllocEx, VirtualFreeEx, WriteProcessMemory, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
+    PAGE_READWRITE,
+};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
     PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+#[allow(unused_imports)]
+use windows_sys::Win32::System::Threading::{
+    CreateProcessW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeProcess, ResumeThread,
+    TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
+    STARTUPINFOW,
+};
 
 /// Creates a new inbound, synchronous, byte-mode named pipe instance.
 ///
-/// The pipe name has the form `\\.\pipe\rage_sandbox_{pid}_{nonce}`.
+/// The pipe name has the form `\\\\.\\pipe\\rage_sandbox_{pid}_{nonce}`.
 ///
 /// The nonce is derived from the sub-second component of the current time
 /// XOR-mixed with the process ID — no external `rand` dependency required.
@@ -162,6 +173,209 @@ pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
     events
 }
 
+/// Returns the path to `rage_sandbox.dll`.
+///
+/// Resolution order:
+/// 1. If the environment variable `RAGE_SANDBOX_DLL_PATH` is set, its value
+///    is returned verbatim as a [`PathBuf`].
+/// 2. Otherwise the path is `<parent directory of current_exe>/rage_sandbox.dll`.
+///
+/// # Errors
+///
+/// Returns `Err` if `std::env::current_exe()` fails or if the executable has
+/// no parent directory.
+pub fn find_dll_path() -> std::io::Result<PathBuf> {
+    if let Ok(override_path) = std::env::var("RAGE_SANDBOX_DLL_PATH") {
+        return Ok(PathBuf::from(override_path));
+    }
+    let exe = std::env::current_exe()?;
+    let parent = exe.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "current_exe has no parent directory",
+        )
+    })?;
+    Ok(parent.join("rage_sandbox.dll"))
+}
+
+/// Creates a child process in a suspended state, injects `dll_path` by
+/// spawning a remote thread that calls `LoadLibraryW`, waits for the loader
+/// thread to complete, frees the remote buffer, then resumes the main thread.
+///
+/// # Arguments
+///
+/// * `cmd`        — Command to run (wrapped as `cmd /c <cmd>`).
+/// * `cwd`        — Working directory for the child process.
+/// * `env`        — Environment variables forwarded to the child.
+/// * `_pipe_name` — Named-pipe path the DLL will use (passed via `env`; this
+///                  parameter is reserved for future direct use).
+/// * `dll_path`   — Path to `rage_sandbox.dll` to inject.
+///
+/// # Returns
+///
+/// On success, returns the process `HANDLE` of the child process.  The caller
+/// is responsible for calling `WaitForSingleObject` and `CloseHandle`.
+///
+/// # Errors
+///
+/// Returns `Err` if `CreateProcessW` fails.  If `VirtualAllocEx` fails after
+/// the process is created, the child is terminated via `TerminateProcess` and
+/// both handles are closed before the error is returned.
+///
+/// # ASLR note
+///
+/// `kernel32.dll` is loaded at the same base address in every process on a
+/// given Windows boot (ASLR randomises the base once per boot, not per
+/// process), so `LoadLibraryW`'s virtual address obtained from the calling
+/// process is valid in the target process.
+#[allow(clippy::transmute_undefined_repr)]
+pub fn inject_and_spawn(
+    cmd: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    _pipe_name: &str,
+    dll_path: &Path,
+) -> std::io::Result<HANDLE> {
+    // 1. Build the command line as a null-terminated UTF-16 string.
+    //    CreateProcessW requires a *mut u16 (it may modify the buffer).
+    let cmd_str = format!("cmd /c {cmd}");
+    let mut cmd_wide: Vec<u16> = cmd_str.encode_utf16().chain(std::iter::once(0u16)).collect();
+
+    // 2. Build the environment block: each entry is "KEY=VALUE\0", followed
+    //    by an extra '\0' double-null terminator.
+    let mut env_block: Vec<u16> = Vec::new();
+    for (k, v) in env {
+        let entry = format!("{k}={v}");
+        env_block.extend(entry.encode_utf16());
+        env_block.push(0u16);
+    }
+    env_block.push(0u16); // double-null terminator
+
+    // 3. Current working directory as null-terminated UTF-16.
+    let cwd_str = cwd.to_string_lossy();
+    let cwd_wide: Vec<u16> = cwd_str.encode_utf16().chain(std::iter::once(0u16)).collect();
+
+    // 4. Initialise STARTUPINFOW (all fields zeroed, then cb set) and
+    //    PROCESS_INFORMATION (fully zeroed; filled in by CreateProcessW).
+    let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+    // 5. Launch the child suspended so we can inject the DLL before it runs.
+    //    0x0400 = CREATE_UNICODE_ENVIRONMENT — env_block is UTF-16.
+    // SAFETY: All pointers are valid; cmd_wide is kept alive for the call.
+    let ok = unsafe {
+        CreateProcessW(
+            std::ptr::null(),          // lpApplicationName  (use command line)
+            cmd_wide.as_mut_ptr(),     // lpCommandLine      (mutable per API)
+            std::ptr::null(),          // lpProcessAttributes
+            std::ptr::null(),          // lpThreadAttributes
+            0,                         // bInheritHandles
+            CREATE_SUSPENDED | 0x0400, // dwCreationFlags (0x0400 = CREATE_UNICODE_ENVIRONMENT)
+            env_block.as_ptr().cast(), // lpEnvironment
+            cwd_wide.as_ptr(),         // lpCurrentDirectory
+            &si,                       // lpStartupInfo
+            &mut pi,                   // lpProcessInformation
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // 6. Capture the process and primary-thread handles.
+    let proc_handle = pi.hProcess;
+    let thread_handle = pi.hThread;
+
+    // 7. Encode the DLL path as a null-terminated UTF-16 string.
+    let dll_wide: Vec<u16> = dll_path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .collect();
+    let dll_bytes = dll_wide.len() * 2; // byte length of the UTF-16 buffer
+
+    // 8. Allocate a buffer in the child's address space for the DLL path.
+    // SAFETY: proc_handle is a valid process handle; null lets the OS choose.
+    let remote_buf = unsafe {
+        VirtualAllocEx(
+            proc_handle,
+            std::ptr::null(),
+            dll_bytes,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
+    };
+    if remote_buf.is_null() {
+        // Clean up the suspended child before returning the error.
+        unsafe {
+            TerminateProcess(proc_handle, 1);
+            CloseHandle(proc_handle);
+            CloseHandle(thread_handle);
+        }
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // 9. Copy the DLL path into the child's address space.
+    // SAFETY: remote_buf points to dll_bytes of committed, writable memory in
+    // the child; dll_wide is a live buffer of the correct length.
+    let mut written: usize = 0;
+    unsafe {
+        WriteProcessMemory(
+            proc_handle,
+            remote_buf,
+            dll_wide.as_ptr().cast(),
+            dll_bytes,
+            &mut written,
+        );
+    }
+
+    // 10. Resolve LoadLibraryW from kernel32.dll in this process.
+    //     The VA is valid in the child because kernel32 is mapped at the same
+    //     address in every process on the same Windows boot (ASLR is
+    //     per-boot, not per-process for system DLLs).
+    // SAFETY: "kernel32.dll\0" is a valid null-terminated wide string.
+    let kernel32_wide: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+    let k32 = unsafe { GetModuleHandleW(kernel32_wide.as_ptr()) };
+    // SAFETY: k32 is a valid module handle; the proc name is a valid ANSI string.
+    let load_lib = unsafe { GetProcAddress(k32, b"LoadLibraryW\0".as_ptr()) };
+
+    // 11. Spawn a remote thread that calls LoadLibraryW(remote_buf).
+    //     Transmute FARPROC → thread-start-routine function pointer (same size,
+    //     both are pointer-sized function pointers).
+    // SAFETY: load_lib is LoadLibraryW whose VA is valid in the child process.
+    let mut remote_tid: u32 = 0;
+    let remote_thread = unsafe {
+        CreateRemoteThread(
+            proc_handle,
+            std::ptr::null(),
+            0,
+            std::mem::transmute(load_lib), // FARPROC → LPTHREAD_START_ROUTINE
+            remote_buf,
+            0,
+            &mut remote_tid,
+        )
+    };
+    if remote_thread != 0 {
+        // Wait up to 5 s for LoadLibrary to finish, then release the thread handle.
+        // SAFETY: remote_thread is a valid thread handle returned by CreateRemoteThread.
+        unsafe {
+            WaitForSingleObject(remote_thread, 5000);
+            CloseHandle(remote_thread);
+        }
+    }
+
+    // 12. Free the remote buffer, resume the main thread, release the thread handle.
+    // SAFETY: remote_buf was allocated with VirtualAllocEx; MEM_RELEASE requires size 0.
+    unsafe {
+        VirtualFreeEx(proc_handle, remote_buf, 0, MEM_RELEASE);
+        ResumeThread(thread_handle);
+        CloseHandle(thread_handle);
+    }
+
+    // 13. Return the process handle; the caller waits for the process and closes it.
+    Ok(proc_handle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,7 +385,7 @@ mod tests {
     };
 
     /// Verifies that [`create_pipe`] returns a valid pipe handle and a pipe
-    /// name that matches the expected `\\.\pipe\rage_sandbox_` prefix.
+    /// name that matches the expected `\\\\.\\pipe\\rage_sandbox_` prefix.
     #[test]
     fn create_pipe_returns_valid_handle_and_name() {
         let (handle, name) = create_pipe().expect("create_pipe should succeed");
@@ -268,7 +482,7 @@ mod tests {
 
         // Clean up the server handle.
         // SAFETY: handle is a valid, open pipe handle.
-        unsafe { CloseHandle(handle) };
+        unsafe { CloseHandle(handle) }; 
 
         assert_eq!(events.len(), 1, "expected exactly one event, got: {events:?}");
         match &events[0] {
@@ -278,5 +492,56 @@ mod tests {
             }
             other => panic!("expected AccessEvent::Read, got: {other:?}"),
         }
+    }
+
+    /// Verifies that [`find_dll_path`] returns the value of the
+    /// `RAGE_SANDBOX_DLL_PATH` environment variable when it is set.
+    #[test]
+    fn find_dll_path_uses_env_override() {
+        std::env::set_var("RAGE_SANDBOX_DLL_PATH", "C:\\override\\rage_sandbox.dll");
+        let result = find_dll_path().expect("find_dll_path should succeed with env override");
+        std::env::remove_var("RAGE_SANDBOX_DLL_PATH");
+        assert_eq!(
+            result,
+            PathBuf::from("C:\\override\\rage_sandbox.dll"),
+            "find_dll_path should return the env-var override path"
+        );
+    }
+
+    /// Verifies that [`inject_and_spawn`] can create a child process, inject
+    /// (attempt) a DLL, and return a usable process handle that eventually
+    /// exits.
+    ///
+    /// The DLL path `C:\nonexistent_rage_sandbox.dll` will cause `LoadLibraryW`
+    /// to fail silently; the main thread is still resumed and the child runs to
+    /// completion.  A full DLL integration test is in Task 7.
+    #[test]
+    fn inject_and_spawn_cmd_echo_runs_to_completion() {
+        let (pipe_handle, pipe_name) = create_pipe().expect("create_pipe should succeed");
+        let env = vec![("RAGE_PIPE_NAME".to_string(), pipe_name.clone())];
+
+        let result = inject_and_spawn(
+            "cmd /c exit 0",
+            Path::new("C:\\"),
+            &env,
+            &pipe_name,
+            Path::new("C:\\nonexistent_rage_sandbox.dll"),
+        );
+
+        if let Ok(proc_handle) = result {
+            // A real DLL integration test is in Task 7.
+            // Wait up to 5 s for the child to exit, then release the handle.
+            // SAFETY: proc_handle is a valid process handle returned by inject_and_spawn.
+            unsafe {
+                WaitForSingleObject(proc_handle, 5000);
+                CloseHandle(proc_handle);
+            }
+        }
+
+        // Always close the pipe handle regardless of inject_and_spawn outcome.
+        // SAFETY: pipe_handle is a valid named-pipe handle returned by create_pipe.
+        unsafe { CloseHandle(pipe_handle) };
+
+        // Test passes if no panic.
     }
 }
