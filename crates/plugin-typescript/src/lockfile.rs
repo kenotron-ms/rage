@@ -370,6 +370,84 @@ pub fn find_yarn_berry_zip(cache_dir: &Path, name: &str, version: &str) -> Optio
     None
 }
 
+/// Find a yarn classic (v1) tarball in `cache_dir` for the given package.
+///
+/// Yarn classic cache naming: `npm-{sanitized-name}-{version}-{hash}.tgz`
+/// where `sanitized-name` replaces `/` with `-` and keeps `@`.
+///
+/// Since we can't reconstruct yarn's content hash, we scan for files
+/// matching: `npm-{sanitized-name}-{version}-*.tgz`
+pub fn find_yarn_classic_tgz(cache_dir: &Path, name: &str, version: &str) -> Option<PathBuf> {
+    // Sanitize: @actions/core → @actions-core
+    let sanitized = name.replace('/', "-");
+    let prefix = format!("npm-{sanitized}-{version}-");
+
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let fname_str = fname.to_string_lossy();
+            if fname_str.starts_with(&prefix) && fname_str.ends_with(".tgz") {
+                return Some(entry.path());
+            }
+        }
+    }
+    None
+}
+
+/// Extract a yarn classic (v1) tarball (`.tgz`, npm format) into `target_dir/node_modules/{name}/`.
+///
+/// npm tarballs wrap all files under a `package/` prefix inside the tar archive.
+/// This function strips that prefix and writes files to
+/// `target_dir/node_modules/{name}/{relative_path}`, creating parent directories
+/// as needed.
+pub fn extract_yarn_classic_tgz_to_workspace(
+    tgz_bytes: &[u8],
+    pkg_name: &str,
+    workspace_root: &Path,
+) -> Result<(), anyhow::Error> {
+    use flate2::read::GzDecoder;
+    use std::io::Cursor;
+    use tar::Archive;
+
+    let gz = GzDecoder::new(Cursor::new(tgz_bytes));
+    let mut archive = Archive::new(gz);
+
+    // Destination: workspace_root/node_modules/{pkg_name}/
+    // For scoped packages like "@actions/core", the path contains a slash
+    // which is fine since we join it onto workspace_root.
+    let dest_dir = workspace_root.join("node_modules").join(pkg_name);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let entry_path = entry.path()?;
+        let entry_path = entry_path.as_ref();
+
+        // npm tarballs have a leading "package/" component — strip it.
+        let rel = match entry_path.strip_prefix("package") {
+            Ok(r) => r,
+            Err(_) => entry_path,
+        };
+
+        // Skip the root "package" directory entry itself.
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+
+        let dest = dest_dir.join(rel);
+
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&dest)?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            entry.unpack(&dest)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Extract a yarn berry zip file into `target_dir/`.
 ///
 /// Yarn berry zip files contain entries like:

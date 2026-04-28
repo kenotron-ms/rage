@@ -7,7 +7,7 @@
 //! 2. Walk-based (fallback): walk node_modules → hash individual files → store in CAS
 
 use artifact_store::{capture_package, LocalArtifactStore, PackageArtifact, PathsetPackageRef};
-use plugin_typescript::lockfile::{compute_cas_key, find_yarn_berry_zip};
+use plugin_typescript::lockfile::{compute_cas_key, find_yarn_berry_zip, find_yarn_classic_tgz};
 use plugin_typescript::pathset_extractor::{
     extract_flat_from_node_modules, extract_pnpm_packages, PathsetPackageRef as TsPkgRef,
 };
@@ -167,9 +167,11 @@ pub fn capture_from_lockfile_packages(
             continue;
         }
 
-        // Find tarball in PM cache (yarn berry: ~/.yarn/berry/cache/*.zip)
+        // Find tarball in PM cache.
+        // Try yarn berry (.zip) first, then yarn classic (.tgz) as fallback.
         let tarball_bytes = pm_cache.as_ref().and_then(|cache_dir| {
             find_yarn_berry_zip(cache_dir, &pkg.name, &pkg.version)
+                .or_else(|| find_yarn_classic_tgz(cache_dir, &pkg.name, &pkg.version))
                 .and_then(|path| std::fs::read(&path).ok())
         });
 

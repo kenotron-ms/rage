@@ -326,7 +326,9 @@ impl EcosystemPlugin for TypeScriptPlugin {
         workspace_root: &Path,
         store: &dyn plugin::ArtifactStoreRef,
     ) -> Result<(), anyhow::Error> {
-        use crate::lockfile::{compute_cas_key, extract_yarn_zip_to_workspace};
+        use crate::lockfile::{
+            compute_cas_key, extract_yarn_classic_tgz_to_workspace, extract_yarn_zip_to_workspace,
+        };
 
         let mut restored = 0usize;
         let mut failed = 0usize;
@@ -338,10 +340,17 @@ impl EcosystemPlugin for TypeScriptPlugin {
                     // CAS miss for this package — skip (should not happen if pre-flight passed)
                     failed += 1;
                 }
-                Some(zip_bytes) => {
-                    // Extract yarn berry zip into workspace_root/
-                    // The zip contains entries like node_modules/{name}/...
-                    if let Err(e) = extract_yarn_zip_to_workspace(&zip_bytes, workspace_root) {
+                Some(bytes) => {
+                    // Detect format by magic bytes:
+                    //   ZIP (yarn berry): starts with PK (0x50 0x4B)
+                    //   GZIP/TGZ (yarn classic): starts with 0x1F 0x8B
+                    let result = if bytes.starts_with(b"PK") {
+                        extract_yarn_zip_to_workspace(&bytes, workspace_root)
+                    } else {
+                        // Yarn classic npm tarball — extract package/ into node_modules/{name}/
+                        extract_yarn_classic_tgz_to_workspace(&bytes, &pkg.name, workspace_root)
+                    };
+                    if let Err(e) = result {
                         eprintln!(
                             "[rage] artifact restore: failed to extract {} — {e}",
                             pkg.name
