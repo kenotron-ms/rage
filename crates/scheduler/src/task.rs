@@ -137,6 +137,18 @@ pub fn build_task_list(
     workspace_root: &std::path::Path,
     plugins: &[&dyn plugin::EcosystemPlugin],
 ) -> Result<Vec<Task>, TaskError> {
+    build_task_list_filtered(dag, script_name, workspace_root, plugins, &[])
+}
+
+/// Internal implementation: builds the task list, skipping any package whose
+/// name appears in `skip_packages`.
+fn build_task_list_filtered(
+    dag: &WorkspaceDag,
+    script_name: &str,
+    workspace_root: &std::path::Path,
+    plugins: &[&dyn plugin::EcosystemPlugin],
+    skip_packages: &[String],
+) -> Result<Vec<Task>, TaskError> {
     let order = topological_sort(dag).expect("DAG is acyclic by construction");
 
     // 1. Collect root tasks from every plugin (in plugin order, stable).
@@ -163,6 +175,11 @@ pub fn build_task_list(
     // 2. Walk the package DAG and synthesize per-package tasks for `script_name`.
     let mut package_tasks_added = 0usize;
     for pkg_name in &order {
+        // Skip packages explicitly excluded via pipeline config.
+        if skip_packages.iter().any(|s| s == pkg_name) {
+            continue;
+        }
+
         let pkg = match dag.packages.get(pkg_name) {
             Some(p) => p,
             None => continue,
@@ -249,7 +266,12 @@ pub fn build_task_list_with_config(
     plugins: &[&dyn plugin::EcosystemPlugin],
     config: &pipeline_config::RageConfig,
 ) -> Result<Vec<Task>, TaskError> {
-    let mut tasks = build_task_list(dag, script_name, workspace_root, plugins)?;
+    let skip = config
+        .pipeline
+        .get(script_name)
+        .map(|p| p.skip_packages.as_slice())
+        .unwrap_or(&[]);
+    let mut tasks = build_task_list_filtered(dag, script_name, workspace_root, plugins, skip)?;
     for task in &mut tasks {
         if task.is_root {
             // Root tasks bypass per-package sandbox policy — see COE constraint #2.
@@ -380,6 +402,7 @@ mod tests {
                 sandbox: Some(SandboxMode::Strict),
             }],
             plugins_config: HashMap::new(),
+            pipeline: HashMap::new(),
         };
 
         let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
@@ -394,6 +417,65 @@ mod tests {
             .unwrap();
         assert_eq!(core.sandbox_mode, SandboxMode::Strict);
         assert_eq!(utils.sandbox_mode, SandboxMode::Observed);
+    }
+
+    #[test]
+    fn skip_packages_excludes_named_package() {
+        use workspace_tools::{build_package_graph, discover_packages};
+        let root = fixtures_dir().join("js-pnpm");
+        let raw = discover_packages(&root).unwrap();
+        let resolved = build_package_graph(raw).unwrap();
+        let dag = build_dag(resolved).unwrap();
+        let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
+
+        let skip = vec!["@fixture/core".to_string()];
+        let tasks =
+            build_task_list_filtered(&dag, "build", &root, &plugins, &skip).unwrap();
+
+        assert!(
+            tasks.iter().all(|t| t.package_name != "@fixture/core"),
+            "skipped package should not appear in task list"
+        );
+        // The other three packages should still be present.
+        assert_eq!(tasks.len(), 3);
+    }
+
+    #[test]
+    fn skip_packages_via_config() {
+        use pipeline_config::{CacheConfig, PipelineTaskConfig, RageConfig, SandboxConfig};
+        use std::collections::HashMap;
+        use workspace_tools::{build_package_graph, discover_packages};
+
+        let root = fixtures_dir().join("js-pnpm");
+        let raw = discover_packages(&root).unwrap();
+        let resolved = build_package_graph(raw).unwrap();
+        let dag = build_dag(resolved).unwrap();
+
+        let mut pipeline = HashMap::new();
+        pipeline.insert(
+            "build".to_string(),
+            PipelineTaskConfig {
+                skip_packages: vec!["@fixture/core".to_string()],
+            },
+        );
+        let cfg = RageConfig {
+            plugins: vec![],
+            sandbox: SandboxConfig::default(),
+            cache: CacheConfig::default(),
+            policies: vec![],
+            plugins_config: HashMap::new(),
+            pipeline,
+        };
+
+        let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
+        let tasks =
+            build_task_list_with_config(&dag, "build", &root, &plugins, &cfg).unwrap();
+
+        assert!(
+            tasks.iter().all(|t| t.package_name != "@fixture/core"),
+            "config skip_packages should exclude the named package"
+        );
+        assert_eq!(tasks.len(), 3);
     }
 
     #[test]

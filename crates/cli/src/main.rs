@@ -48,6 +48,12 @@ enum Command {
         /// Cannot be combined with --since.
         #[arg(long)]
         affected: bool,
+
+        /// Scope to a specific package and all of its transitive dependencies.
+        /// Use the exact package name (e.g. `--to @bebopjs/bebop`).
+        /// Cannot be combined with --since or --affected.
+        #[arg(long)]
+        to: Option<String>,
     },
 
     /// Run the rage daemon in the foreground (for debugging).
@@ -185,9 +191,10 @@ async fn main() -> Result<()> {
             no_cache,
             since,
             affected,
+            to,
         } => {
             let root = resolve_workspace(workspace_pos, workspace);
-            cmd_run(&root, &script, no_cache, since.as_deref(), affected).await
+            cmd_run(&root, &script, no_cache, since.as_deref(), affected, to.as_deref()).await
         }
         Command::Daemon {
             workspace,
@@ -362,15 +369,45 @@ fn spawn_detached_daemon(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Compute the transitive dependency closure for `target` within the workspace DAG.
+///
+/// Returns a set containing `target` itself plus every package it depends on,
+/// transitively. Used to implement `--to <package>`.
+fn transitive_dep_closure(
+    dag: &build_graph::dag::WorkspaceDag,
+    target: &str,
+) -> std::collections::HashSet<String> {
+    let mut closure = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(target.to_string());
+    while let Some(pkg_name) = queue.pop_front() {
+        if closure.insert(pkg_name.clone()) {
+            if let Some(pkg) = dag.packages.get(&pkg_name) {
+                for dep in &pkg.dependencies {
+                    if !closure.contains(dep) {
+                        queue.push_back(dep.clone());
+                    }
+                }
+            }
+        }
+    }
+    closure
+}
+
 async fn cmd_run(
     root: &Path,
     script: &str,
     no_cache: bool,
     since: Option<&str>,
     affected: bool,
+    to: Option<&str>,
 ) -> Result<()> {
-    if since.is_some() && affected {
-        anyhow::bail!("--since and --affected are mutually exclusive");
+    let exclusive = [since.is_some(), affected, to.is_some()]
+        .iter()
+        .filter(|&&b| b)
+        .count();
+    if exclusive > 1 {
+        anyhow::bail!("--since, --affected, and --to are mutually exclusive");
     }
 
     let pm = workspace_tools::detect_package_manager(root)
@@ -436,6 +473,23 @@ async fn cmd_run(
             eprintln!("No affected packages have a '{script}' script. Nothing to do.");
             return Ok(());
         }
+    }
+
+    // Filter tasks by --to <package> (target + transitive deps)
+    if let Some(target) = to {
+        if !dag.packages.contains_key(target) {
+            anyhow::bail!(
+                "package '{}' not found in workspace — check the name in package.json",
+                target
+            );
+        }
+        let closure = transitive_dep_closure(&dag, target);
+        eprintln!(
+            "Scoping to '{}' and its transitive deps: {} packages",
+            target,
+            closure.len()
+        );
+        tasks.retain(|t| t.is_root || closure.contains(&t.package_name));
     }
 
     eprintln!("Running '{}' across {} packages", script, tasks.len());

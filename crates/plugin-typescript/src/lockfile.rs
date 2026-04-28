@@ -6,6 +6,50 @@
 use plugin::LockfilePackage;
 use std::path::{Path, PathBuf};
 
+/// Extract the set of `file:` protocol tarball paths referenced in a yarn berry (v2+) lockfile.
+///
+/// Yarn stores local-file dependencies with a `resolution` like:
+/// ```text
+///   resolution: "@scope/pkg@file:./tarballs/pkg-1.0.0.tgz#./tarballs/pkg-1.0.0.tgz::hash=abc123&..."
+/// ```
+/// This function scans all `resolution:` lines for `@file:./` patterns and returns the
+/// corresponding absolute paths so callers can include them in the install-task fingerprint.
+/// Missing files are captured by the fingerprint as-is (`root_task_fingerprint` folds them
+/// in as `missing:{path}` which distinguishes absent tarballs from present ones).
+///
+/// Duplicate paths (the same tarball appearing in multiple resolution lines) are de-duplicated.
+pub fn collect_file_protocol_paths(lockfile_content: &str, workspace_root: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+
+    for line in lockfile_content.lines() {
+        let trimmed = line.trim();
+        // Only look at resolution: lines
+        let Some(rest) = trimmed.strip_prefix("resolution: \"") else {
+            continue;
+        };
+        // Find "@file:./" — the relative path follows immediately after "@file:"
+        let Some(file_pos) = rest.find("@file:./") else {
+            continue;
+        };
+        let path_start = file_pos + "@file:".len(); // points at the leading "./"
+        let path_str = &rest[path_start..];
+        // The path ends at the first '#' (hash separator) or '"' (closing quote)
+        let path_end = path_str
+            .find(|c: char| c == '#' || c == '"')
+            .unwrap_or(path_str.len());
+        let rel = &path_str[..path_end];
+        if rel.is_empty() {
+            continue;
+        }
+        let abs = workspace_root.join(rel);
+        if !paths.contains(&abs) {
+            paths.push(abs);
+        }
+    }
+
+    paths
+}
+
 /// Parse a yarn berry (v8+) lockfile.
 ///
 /// Format:
@@ -700,6 +744,97 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .contains("@types-node-npm-20.0.0"));
+    }
+
+    // ── collect_file_protocol_paths tests ─────────────────────────────────────
+
+    #[test]
+    fn collect_file_protocol_paths_extracts_local_tarballs() {
+        // Mirrors a real yarn.lock resolution for an `@tanstack/react-start` RSC tarball.
+        let content = r#"__metadata:
+  version: 8
+
+"@tanstack/react-start@file:./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz::locator=ws%40workspace%3A.":
+  version: 0.0.3-rsc-tarball
+  resolution: "@tanstack/react-start@file:./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz#./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz::hash=e940e7&locator=ws%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"ms@npm:2.1.3":
+  version: 2.1.3
+  resolution: "ms@npm:2.1.3"
+  checksum: 10c0/abcdef
+  languageName: node
+  linkType: hard
+"#;
+        let root = std::path::Path::new("/workspace");
+        let paths = collect_file_protocol_paths(content, root);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(
+            paths[0],
+            root.join("./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz")
+        );
+    }
+
+    #[test]
+    fn collect_file_protocol_paths_deduplicates() {
+        // The same tarball appears twice (different package aliases) — must deduplicate.
+        let content = r#"__metadata:
+  version: 8
+
+"pkg-a@file:./tarballs/shared-1.0.0.tgz::locator=ws%40workspace%3A.":
+  resolution: "pkg-a@file:./tarballs/shared-1.0.0.tgz#./tarballs/shared-1.0.0.tgz::hash=abc"
+  languageName: node
+  linkType: hard
+
+"pkg-b@file:./tarballs/shared-1.0.0.tgz::locator=ws%40workspace%3A.":
+  resolution: "pkg-b@file:./tarballs/shared-1.0.0.tgz#./tarballs/shared-1.0.0.tgz::hash=abc"
+  languageName: node
+  linkType: hard
+"#;
+        let root = std::path::Path::new("/ws");
+        let paths = collect_file_protocol_paths(content, root);
+        assert_eq!(paths.len(), 1, "duplicate tarball path must be deduplicated");
+    }
+
+    #[test]
+    fn collect_file_protocol_paths_returns_empty_for_npm_only_lockfile() {
+        let content = r#"__metadata:
+  version: 8
+
+"ms@npm:2.1.3":
+  version: 2.1.3
+  resolution: "ms@npm:2.1.3"
+  checksum: 10c0/abcdef
+  languageName: node
+  linkType: hard
+"#;
+        let root = std::path::Path::new("/ws");
+        let paths = collect_file_protocol_paths(content, root);
+        assert!(paths.is_empty(), "no file: entries → empty result");
+    }
+
+    #[test]
+    fn collect_file_protocol_paths_multiple_unique_tarballs() {
+        let content = r#"__metadata:
+  version: 8
+
+"@tanstack/react-start@file:./tarballs/react-start.tgz::locator=ws%40workspace%3A.":
+  resolution: "@tanstack/react-start@file:./tarballs/react-start.tgz#./tarballs/react-start.tgz::hash=aaa"
+  languageName: node
+  linkType: hard
+
+"@tanstack/react-router@file:./tarballs/react-router.tgz::locator=ws%40workspace%3A.":
+  resolution: "@tanstack/react-router@file:./tarballs/react-router.tgz#./tarballs/react-router.tgz::hash=bbb"
+  languageName: node
+  linkType: hard
+"#;
+        let root = std::path::Path::new("/ws");
+        let paths = collect_file_protocol_paths(content, root);
+        assert_eq!(paths.len(), 2);
+        let path_strs: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        assert!(path_strs.iter().any(|s| s.contains("react-start.tgz")));
+        assert!(path_strs.iter().any(|s| s.contains("react-router.tgz")));
     }
 
     #[test]

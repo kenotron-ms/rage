@@ -211,10 +211,24 @@ impl EcosystemPlugin for TypeScriptPlugin {
 
         let yarn_lock = workspace_root.join("yarn.lock");
         if yarn_lock.is_file() {
+            // Include file: protocol tarball paths in the fingerprint inputs so that:
+            //   • Adding or removing local tarballs (file:./tarballs/foo.tgz) changes
+            //     the install cache key — preventing stale cache hits when tarballs
+            //     are absent or replaced without a corresponding yarn.lock update.
+            //   • root_task_fingerprint folds absent tarballs in as `missing:{path}`
+            //     (distinct from `present:{path}+bytes`), so a workspace where the
+            //     tarballs were previously present will correctly miss the cache and
+            //     re-run `yarn install` after they are removed.
+            let mut input_paths = vec![yarn_lock.clone()];
+            if let Ok(content) = std::fs::read_to_string(&yarn_lock) {
+                let file_deps =
+                    crate::lockfile::collect_file_protocol_paths(&content, workspace_root);
+                input_paths.extend(file_deps);
+            }
             return vec![plugin::RootTask {
                 name: "install".to_string(),
                 command: "yarn install".to_string(),
-                input_paths: vec![yarn_lock],
+                input_paths,
                 env_hash_inputs: env_hash_inputs.clone(),
             }];
         }
@@ -676,7 +690,86 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].name, "install");
         assert_eq!(tasks[0].command, "yarn install");
+        // yarn.lock only — no file: entries in this minimal lockfile
         assert_eq!(tasks[0].input_paths, vec![dir.path().join("yarn.lock")]);
+    }
+
+    /// When yarn.lock references `file:./tarballs/foo.tgz` local tarballs, those paths
+    /// must appear in `input_paths` so that the install-task fingerprint changes when
+    /// tarballs are added, removed, or replaced without a `yarn.lock` update.
+    #[test]
+    fn infer_root_tasks_includes_file_protocol_paths_in_input_paths() {
+        let dir = tempdir().unwrap();
+        let tarball_dir = dir.path().join("tarballs");
+        std::fs::create_dir_all(&tarball_dir).unwrap();
+        // Yarn lock with one file: protocol entry (mirrors real office-bohemia format)
+        let yarn_lock_content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"@tanstack/react-start@file:./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz::locator=ws%40workspace%3A.":
+  version: 0.0.3-rsc-tarball
+  resolution: "@tanstack/react-start@file:./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz#./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz::hash=e940e7&locator=ws%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"ms@npm:2.1.3":
+  version: 2.1.3
+  resolution: "ms@npm:2.1.3"
+  checksum: 10c0/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
+  languageName: node
+  linkType: hard
+"#;
+        std::fs::write(dir.path().join("yarn.lock"), yarn_lock_content.as_bytes()).unwrap();
+
+        let p = TypeScriptPlugin::new();
+        let tasks = p.infer_root_tasks(dir.path());
+        assert_eq!(tasks.len(), 1);
+
+        let task = &tasks[0];
+        assert_eq!(task.command, "yarn install");
+
+        // yarn.lock must always be first in input_paths
+        assert_eq!(task.input_paths[0], dir.path().join("yarn.lock"));
+
+        // The file: tarball path must also be present
+        let expected_tarball =
+            dir.path()
+                .join("./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz");
+        assert!(
+            task.input_paths.contains(&expected_tarball),
+            "file: tarball path must be in input_paths so its absence changes the fingerprint;\
+             got: {:?}",
+            task.input_paths
+        );
+    }
+
+    /// A yarn.lock with ONLY npm: packages must NOT add extra paths — same as before.
+    #[test]
+    fn infer_root_tasks_no_extra_paths_for_npm_only_lockfile() {
+        let dir = tempdir().unwrap();
+        let yarn_lock_content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"ms@npm:2.1.3":
+  version: 2.1.3
+  resolution: "ms@npm:2.1.3"
+  checksum: 10c0/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
+  languageName: node
+  linkType: hard
+"#;
+        std::fs::write(dir.path().join("yarn.lock"), yarn_lock_content.as_bytes()).unwrap();
+
+        let p = TypeScriptPlugin::new();
+        let tasks = p.infer_root_tasks(dir.path());
+        assert_eq!(tasks.len(), 1);
+        // Only yarn.lock — no extra paths for npm-only lockfiles
+        assert_eq!(
+            tasks[0].input_paths,
+            vec![dir.path().join("yarn.lock")],
+            "npm-only lockfile must not add extra input_paths"
+        );
     }
 
     #[test]

@@ -93,6 +93,20 @@ pub struct PluginConfig {
     pub input_globs: InputGlobsConfig,
 }
 
+/// Per-script pipeline configuration, mirroring lage's `pipeline` key.
+///
+/// Currently only supports `skip_packages` — a list of package names that
+/// should be silently excluded when building the task list for this script.
+/// Useful for packages whose `build` script is a guard/redirect rather than
+/// a real build step (e.g. buildless packages that ship plain JS from `src/`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default)]
+pub struct PipelineTaskConfig {
+    /// Package names to exclude from this script's task list.
+    /// Supports exact package names only (e.g. `"@scope/pkg"`).
+    pub skip_packages: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(default)]
 pub struct RageConfig {
@@ -101,6 +115,9 @@ pub struct RageConfig {
     pub cache: CacheConfig,
     pub policies: Vec<Policy>,
     pub plugins_config: std::collections::HashMap<String, PluginConfig>,
+    /// Per-script pipeline settings (skip_packages, etc.).
+    /// Keys are script names (e.g. `"build"`, `"test"`).
+    pub pipeline: std::collections::HashMap<String, PipelineTaskConfig>,
 }
 
 /// Load `rage.json` from the workspace root. Returns `None` if absent.
@@ -222,6 +239,52 @@ mod tests {
         let ts = cfg.plugins_config.get("rage-typescript").unwrap();
         assert_eq!(ts.input_globs.extend, vec!["../../tsconfig.base.json"]);
         assert_eq!(ts.input_globs.exclude, vec!["**/*.test.ts"]);
+    }
+
+    #[test]
+    fn parses_pipeline_skip_packages() {
+        let d = tmpdir();
+        let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
+        f.write_all(
+            br#"{
+            "pipeline": {
+                "build": {
+                    "skip_packages": ["@scope/pkg-a", "@scope/pkg-b"]
+                },
+                "test": {
+                    "skip_packages": ["@scope/pkg-c"]
+                }
+            }
+        }"#,
+        )
+        .unwrap();
+        let cfg = load_config(&d).unwrap().unwrap();
+        let build = cfg.pipeline.get("build").unwrap();
+        assert_eq!(
+            build.skip_packages,
+            vec!["@scope/pkg-a", "@scope/pkg-b"]
+        );
+        let test = cfg.pipeline.get("test").unwrap();
+        assert_eq!(test.skip_packages, vec!["@scope/pkg-c"]);
+    }
+
+    #[test]
+    fn pipeline_defaults_to_empty() {
+        let d = tmpdir();
+        let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
+        f.write_all(b"{}").unwrap();
+        let cfg = load_config(&d).unwrap().unwrap();
+        assert!(cfg.pipeline.is_empty());
+    }
+
+    #[test]
+    fn pipeline_skip_packages_defaults_to_empty_vec() {
+        let d = tmpdir();
+        let mut f = std::fs::File::create(d.join("rage.json")).unwrap();
+        f.write_all(br#"{"pipeline": {"build": {}}}"#).unwrap();
+        let cfg = load_config(&d).unwrap().unwrap();
+        let build = cfg.pipeline.get("build").unwrap();
+        assert!(build.skip_packages.is_empty());
     }
 
     #[test]

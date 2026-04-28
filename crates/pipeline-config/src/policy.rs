@@ -53,6 +53,7 @@ mod tests {
             cache: CacheConfig::default(),
             policies,
             plugins_config: HashMap::new(),
+            pipeline: HashMap::new(),
         }
     }
 
