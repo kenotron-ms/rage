@@ -376,6 +376,90 @@ pub fn inject_and_spawn(
     Ok(proc_handle)
 }
 
+/// Runs `cmd` in a sandboxed child process, recording all file-system accesses.
+///
+/// Flow:
+/// 1. Creates a named pipe for the injected DLL to report events over
+///    `\\\\.\\pipe\\rage_sandbox_{pid}_{nonce}`.
+/// 2. Locates `rage_sandbox.dll` via `RAGE_SANDBOX_DLL_PATH` or next to the
+///    current executable.  Returns an error with a descriptive message (and a
+///    build hint) if the DLL is not found.
+/// 3. Spawns the child in a suspended state, injects the DLL via
+///    `CreateRemoteThread(LoadLibraryW)`, then resumes the main thread.
+/// 4. Runs blocking Win32 work on a `tokio::task::spawn_blocking` thread:
+///    drains all [`AccessEvent`]s from the pipe, waits for the child process to
+///    exit, retrieves the exit code, and closes all handles.
+/// 5. Returns `RunResult { exit_code, path_set: PathSet::from_events(&events) }`.
+///
+/// # Errors
+///
+/// Returns `Err` if the DLL is missing, the pipe cannot be created, or
+/// `inject_and_spawn` fails.  The error messages are human-readable and include
+/// context sufficient to diagnose the problem.
+pub async fn run_sandboxed(
+    cmd: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+) -> anyhow::Result<RunResult> {
+    let dll_path = find_dll_path().unwrap_or_else(|_| PathBuf::from("rage_sandbox.dll"));
+
+    if !dll_path.exists() {
+        anyhow::bail!(
+            "sandbox DLL not found at `{}`: build `cargo build -p sandbox-windows-detours` first or set RAGE_SANDBOX_DLL_PATH",
+            dll_path.display()
+        );
+    }
+
+    let (pipe_handle, pipe_name) =
+        create_pipe().map_err(|e| anyhow::anyhow!("create named pipe: {}", e))?;
+
+    let mut full_env = env.to_vec();
+    full_env.push(("RAGE_PIPE_NAME".to_string(), pipe_name.clone()));
+
+    let proc_handle = inject_and_spawn(cmd, cwd, &full_env, &pipe_name, &dll_path)
+        .map_err(|e| anyhow::anyhow!("inject_and_spawn: {}", e))?;
+
+    // Windows HANDLEs are kernel-object indices that may be used from any
+    // thread; wrap them in a newtype that satisfies the `Send` bound required
+    // by `tokio::task::spawn_blocking`.
+    struct SendHandle(HANDLE);
+    // SAFETY: HANDLE values are valid on any thread — the kernel serialises
+    // all access to the underlying objects.
+    unsafe impl Send for SendHandle {}
+
+    let send_pipe = SendHandle(pipe_handle);
+    let send_proc = SendHandle(proc_handle);
+
+    let (events, exit_code) = tokio::task::spawn_blocking(move || {
+        let pipe = send_pipe.0;
+        let proc = send_proc.0;
+
+        // Drain all AccessEvents from the pipe.  Blocks until the DLL closes
+        // the write end (which happens when the process exits).
+        let events = read_events(pipe);
+
+        // Wait for the child process to exit (belt-and-suspenders after the
+        // pipe EOF), then collect the exit code and release both handles.
+        let mut raw_exit: u32 = 0;
+        // SAFETY: proc is a valid process handle; INFINITE waits indefinitely.
+        unsafe {
+            WaitForSingleObject(proc, INFINITE);
+            GetExitCodeProcess(proc, &mut raw_exit);
+            CloseHandle(pipe);
+            CloseHandle(proc);
+        }
+
+        (events, raw_exit as i32)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))?;
+
+    Ok(RunResult {
+        exit_code,
+        path_set: PathSet::from_events(&events),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +590,21 @@ mod tests {
             PathBuf::from("C:\\override\\rage_sandbox.dll"),
             "find_dll_path should return the env-var override path"
         );
+    }
+
+    /// Smoke-test for the public `run_sandboxed` entry point.
+    ///
+    /// Requires `rage_sandbox.dll` to be present (build
+    /// `cargo build -p sandbox-windows-detours` first or set
+    /// `RAGE_SANDBOX_DLL_PATH`).  The child runs `cmd /c exit 0` and the
+    /// expected exit code is 0.
+    #[tokio::test]
+    #[cfg(target_os = "windows")]
+    async fn run_sandboxed_cmd_exit_returns_zero() {
+        let result = run_sandboxed("cmd /c exit 0", Path::new("C:\\"), &[])
+            .await
+            .expect("run_sandboxed should not fail");
+        assert_eq!(result.exit_code, 0, "exit code should be 0");
     }
 
     /// Verifies that [`inject_and_spawn`] can create a child process, inject
