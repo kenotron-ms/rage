@@ -1,12 +1,13 @@
 use anyhow::bail;
+use std::path::Path;
 
 use crate::event::RunResult;
 
-/// Platform stub – returns an error on non-macOS systems.
+/// Platform stub — returns an error on unsupported operating systems.
 pub async fn run_sandboxed(
     _cmd: &str,
-    _cwd: &str,
-    _env: &[(&str, &str)],
+    _cwd: &Path,
+    _env: &[(String, String)],
 ) -> anyhow::Result<RunResult> {
-    bail!("rage sandbox is only supported on macOS in this phase")
+    bail!("rage sandbox is not supported on this platform")
 }
