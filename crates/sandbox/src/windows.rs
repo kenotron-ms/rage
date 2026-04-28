@@ -13,7 +13,6 @@
 //! 3. **Reads [`AccessEvent`]s** from the pipe until the child exits
 //!    (signalled by `ERROR_BROKEN_PIPE` or a zero-byte read).
 
-#[allow(unused_imports)]
 use crate::event::{AccessEvent, PathSet, RunResult};
 use crate::pipe_proto;
 use std::path::{Path, PathBuf};
@@ -22,8 +21,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE,
     INVALID_HANDLE_VALUE,
 };
-#[allow(unused_imports)]
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, FILE_FLAG_OVERLAPPED};
+use windows_sys::Win32::Storage::FileSystem::ReadFile;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, WriteProcessMemory, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
@@ -33,7 +31,6 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
     PIPE_WAIT,
 };
-#[allow(unused_imports)]
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeProcess, ResumeThread,
     TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
@@ -319,14 +316,24 @@ pub fn inject_and_spawn(
     // SAFETY: remote_buf points to dll_bytes of committed, writable memory in
     // the child; dll_wide is a live buffer of the correct length.
     let mut written: usize = 0;
-    unsafe {
+    let ok = unsafe {
         WriteProcessMemory(
             proc_handle,
             remote_buf,
             dll_wide.as_ptr().cast(),
             dll_bytes,
             &mut written,
-        );
+        )
+    };
+    if ok == 0 {
+        // WriteProcessMemory failed — the remote buffer has garbage; clean up.
+        unsafe {
+            VirtualFreeEx(proc_handle, remote_buf, 0, MEM_RELEASE);
+            TerminateProcess(proc_handle, 1);
+            CloseHandle(proc_handle);
+            CloseHandle(thread_handle);
+        }
+        return Err(std::io::Error::last_os_error());
     }
 
     // 10. Resolve LoadLibraryW from kernel32.dll in this process.
