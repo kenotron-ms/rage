@@ -6,8 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[lints]
-workspace = true
+# The Windows named-pipe server (windows.rs) requires unsafe Win32 API calls,
+# so we override the workspace `forbid` here with an explicit `allow`.
+# All other lint settings are kept identical to the workspace defaults.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
 
 [dependencies]
 anyhow = "1"
@@ -20,6 +26,18 @@ tempfile = "3"
 # Linux eBPF sandbox (Linux-only)
 [target.'cfg(target_os = "linux")'.dependencies]
 sandbox-linux-ebpf = { path = "../sandbox-linux-ebpf" }
+
+# Windows Detours sandbox
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 

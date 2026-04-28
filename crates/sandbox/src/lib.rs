@@ -38,6 +38,9 @@ pub mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::run_sandboxed;
 
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub mod unsupported;
 
