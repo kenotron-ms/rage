@@ -12,6 +12,7 @@ members = [
     "crates/cli",
     "crates/sandbox",
     "crates/sandbox-macos-dylib",
+    "crates/sandbox-windows-detours",
     "crates/plugin",
     "crates/plugin-typescript",
     "crates/sandbox-linux-ebpf",
