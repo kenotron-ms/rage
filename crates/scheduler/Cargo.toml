@@ -27,6 +27,7 @@
     blake3 = "1"
     walkdir = "2"
     pathdiff = { workspace = true }
+    sysinfo = { version = "0.38", default-features = true }
 
     [dev-dependencies]
     tempfile = "3"

@@ -391,11 +391,18 @@ pub async fn run_tasks_two_phase(
     artifact_store: Arc<artifact_store::LocalArtifactStore>,
     max_concurrency: Option<usize>,
 ) -> anyhow::Result<()> {
-    // One semaphore permit per allowed concurrent subprocess.
-    // Cache lookups and cache-hit replays proceed without acquiring a permit —
-    // only the actual subprocess execution is throttled.
+    // Layer 1 — process-count semaphore (CPU guard).
+    // One permit per allowed concurrent subprocess. Cache lookups and
+    // cache-hit replays proceed without acquiring a permit.
     let concurrency = effective_concurrency(max_concurrency);
     let semaphore = Arc::new(Semaphore::new(concurrency));
+
+    // Layer 2 — memory budget (RAM guard).
+    // Reads available system memory at startup; uses historical p75 peak-RSS
+    // per task as the admission estimate.  Waits when the estimated in-flight
+    // RSS approaches the capacity.  A task that has no history uses the
+    // default estimate (total_memory / 2*cpu_count).
+    let memory_budget = Arc::new(crate::resource_budget::MemoryBudget::from_system());
 
     let levels = compute_task_levels(dag, &tasks);
 
@@ -407,12 +414,14 @@ pub async fn run_tasks_two_phase(
             let plugin_clone = Arc::clone(&plugin);
             let store_clone = Arc::clone(&artifact_store);
             let sem_clone = Arc::clone(&semaphore);
+            let budget_clone = Arc::clone(&memory_budget);
             set.spawn(run_single_task_two_phase(
                 task,
                 cache_clone,
                 plugin_clone,
                 store_clone,
                 sem_clone,
+                budget_clone,
             ));
         }
 
@@ -470,6 +479,10 @@ async fn run_single_task_two_phase(
     // and cache-hit replays never hold this permit so warm builds are
     // fully parallel regardless of the concurrency cap.
     subprocess_semaphore: Arc<Semaphore>,
+    // Memory budget: waits when estimated in-flight RSS approaches the
+    // system memory capacity. Acquired just before spawning (like the
+    // semaphore), released after actual peak RSS is measured.
+    memory_budget: Arc<crate::resource_budget::MemoryBudget>,
 ) -> Result<(), RunError> {
     if task.is_root {
         return run_root_task_two_phase(task, cache, plugin.as_ref(), artifact_store).await;
@@ -543,7 +556,7 @@ async fn run_single_task_two_phase(
     // file I/O (tool-binary hash + glob walk). Keeping it off the tokio
     // worker-thread pool prevents all worker threads from blocking in
     // parallel when a full wave of package tasks starts at once.
-    let (cache_lookup_result, stored_pathset_reads) = {
+    let (cache_lookup_result, stored_pathset_reads, task_wf) = {
         let c2 = Arc::clone(&cache);
         let cmd2 = task.command.clone();
         let tp2 = tool_path.clone();
@@ -559,13 +572,17 @@ async fn run_single_task_two_phase(
                 tracked_env: &[],
                 dep_abi_fingerprints: &df2,
             };
-            match c2.lookup_with_pathset_reads(&wf_inputs) {
+            // Also surface the WF string so the cache-miss path can
+            // load/save historical memory stats keyed by the same hash.
+            let wf = cache::weak_fp::compute_weak_fingerprint(&wf_inputs);
+            let (hit, reads) = match c2.lookup_with_pathset_reads(&wf_inputs) {
                 Some((sf, entry, reads)) => (Some((sf, entry)), reads),
                 None => (None, vec![]),
-            }
+            };
+            (hit, reads, wf)
         })
         .await
-        .unwrap_or((None, vec![]))
+        .unwrap_or((None, vec![], String::new()))
     };
     if let Some((sf, _entry)) = cache_lookup_result {
         // Populate CAS from the stored pathset on cache hit (fire-and-forget).
@@ -598,17 +615,35 @@ async fn run_single_task_two_phase(
     }
 
     // Cache miss — execute.
-    // Acquire a concurrency permit before spawning the subprocess so we never
-    // exceed the configured (or CPU-count-derived) limit.  The permit is
-    // dropped automatically at the end of this block.
+    //
+    // Acquire BOTH admission controls before spawning:
+    //
+    //   1. Process-count semaphore  — caps concurrent subprocesses at CPU count
+    //      (or `maxConcurrency`).  Ensures the OS scheduler is not overwhelmed.
+    //
+    //   2. Memory budget reservation — waits when the sum of *estimated* in-flight
+    //      RSS would exceed 75 % of available system memory.  Uses p75 historical
+    //      peak-RSS from prior runs as the estimate (default: total/2*cpus).
+    //
+    // Neither permit is held during cache lookups or cache-hit replays, so
+    // warm builds remain fully parallel regardless of the concurrency cap.
+
     let _permit = subprocess_semaphore
         .acquire_owned()
         .await
         .expect("semaphore closed");
 
+    // Look up historical memory stats for this task and reserve budget.
+    let stats = cache::task_stats::load(cache.dir(), &task_wf);
+    let estimate_bytes = stats
+        .estimate_bytes()
+        .unwrap_or_else(|| memory_budget.default_estimate_bytes());
+    let memory_guard = memory_budget.reserve(estimate_bytes).await;
+
     eprintln!(
-        "[rage] {}#{} starting [sandbox={:?}]",
-        task.package_name, task.script_name, task.sandbox_mode
+        "[rage] {}#{} starting [sandbox={:?}] (est. {:.0} MB)",
+        task.package_name, task.script_name, task.sandbox_mode,
+        estimate_bytes as f64 / 1_048_576.0,
     );
     let start = Instant::now();
     let mut captured_stdout = String::new();
@@ -627,8 +662,8 @@ async fn run_single_task_two_phase(
                     .env("PATH", &new_path);
                 cmd
             };
-            let (code, out, err) =
-                spawn_capture_tee(builder)
+            let (code, out, err, peak_rss) =
+                spawn_capture_tee_tracked(builder)
                     .await
                     .map_err(|e| RunError::Spawn {
                         package: task.package_name.clone(),
@@ -637,6 +672,14 @@ async fn run_single_task_two_phase(
                     })?;
             captured_stdout = out;
             captured_stderr = err;
+            // Release memory reservation with *actual* peak (not just estimate)
+            // and update historical stats for future scheduling decisions.
+            if !task_wf.is_empty() {
+                let mut stats = cache::task_stats::load(cache.dir(), &task_wf);
+                stats.record(peak_rss);
+                let _ = cache::task_stats::save(cache.dir(), &task_wf, &stats);
+            }
+            memory_guard.release_with_actual(peak_rss);
             (code, StoredPathset::default())
         }
         _ => {
@@ -668,7 +711,7 @@ async fn run_single_task_two_phase(
                             .env("PATH", &new_path2);
                         cmd
                     };
-                    let (code, out, err) =
+                    let (code, out, err, _pid_fallback) =
                         spawn_capture_tee(builder2)
                             .await
                             .map_err(|e| RunError::Spawn {
@@ -1070,7 +1113,14 @@ fn run_postinstall_phase(
 /// while also collecting into memory buffers.
 ///
 /// Returns `(exit_code, stdout_utf8, stderr_utf8)`.
-async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String, String)> {
+/// Like `spawn_capture_tee` but concurrently tracks peak RSS via sysinfo.
+///
+/// The RSS monitor starts immediately after the process is spawned (not after
+/// it exits), giving accurate peak measurements even for short-lived tasks.
+/// Returns `(exit_code, stdout, stderr, peak_rss_bytes)`.
+async fn spawn_capture_tee_tracked(
+    mut builder: Command,
+) -> std::io::Result<(i32, String, String, u64)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Child;
 
@@ -1078,6 +1128,79 @@ async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String
     builder.stderr(std::process::Stdio::piped());
 
     let mut child: Child = builder.spawn()?;
+    let child_pid = child.id().unwrap_or(0);
+
+    // Start RSS monitor *before* awaiting the child so it can observe the
+    // process while it is running.
+    let rss_handle = crate::rss_monitor::track_peak_rss(child_pid);
+
+    let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
+    let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
+    let mut stdout_bytes: Vec<u8> = Vec::new();
+    let mut stderr_bytes: Vec<u8> = Vec::new();
+
+    // Drain both pipes concurrently while writing to real terminal.
+    let (r1, r2) = tokio::join!(
+        async {
+            let mut buf = [0u8; 8192];
+            let mut out = tokio::io::stdout();
+            loop {
+                match stdout_pipe.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        stdout_bytes.extend_from_slice(&buf[..n]);
+                        let _ = out.write_all(&buf[..n]).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            let _ = out.flush().await;
+            Ok(())
+        },
+        async {
+            let mut buf = [0u8; 8192];
+            let mut err = tokio::io::stderr();
+            loop {
+                match stderr_pipe.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        stderr_bytes.extend_from_slice(&buf[..n]);
+                        let _ = err.write_all(&buf[..n]).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            let _ = err.flush().await;
+            Ok(())
+        }
+    );
+    r1?;
+    r2?;
+
+    let status = child.wait().await?;
+    let code = status.code().unwrap_or(-1);
+
+    // Collect peak RSS — the monitor exits when it can no longer find the PID.
+    let peak_rss = rss_handle.await.unwrap_or(0);
+
+    Ok((
+        code,
+        String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        peak_rss,
+    ))
+}
+
+
+async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String, String, u32)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Child;
+
+    builder.stdout(std::process::Stdio::piped());
+    builder.stderr(std::process::Stdio::piped());
+
+    let mut child: Child = builder.spawn()?;
+    let child_pid = child.id().unwrap_or(0);
     let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
     let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
 
@@ -1129,6 +1252,7 @@ async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String
         code,
         String::from_utf8_lossy(&stdout_bytes).into_owned(),
         String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        child_pid,
     ))
 }
 

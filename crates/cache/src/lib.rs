@@ -12,6 +12,7 @@ pub mod pathset_store;
 pub mod provider;
 pub mod strong_fp;
 pub mod tool_hash;
+pub mod task_stats;
 pub mod two_phase;
 pub mod weak_fp;
 pub mod why_miss;
