@@ -268,10 +268,28 @@ pub fn store_manifest(
     Ok(true)
 }
 
+/// Store a sentinel marker indicating this postinstall script ran and produced no
+/// file-system changes.  On the next invocation `restore_manifest` will see this
+/// sentinel and return `Ok(true)` (= "cache hit, skip the script") without
+/// restoring any files.
+pub fn store_empty_sentinel(
+    key: &[u8; 32],
+    store: &artifact_store::LocalArtifactStore,
+) -> std::io::Result<()> {
+    let bytes = b"{\"empty\":true}";
+    store
+        .put_bytes_keyed(*key, bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
 /// Look up `key` in CAS. If absent, return `Ok(false)`. Otherwise deserialize the
 /// `PostinstallManifest` and restore all entries under `target_dir`, using hardlinks
 /// for regular files (with cross-device copy fallback) and symlinks for symlinks.
 /// Unix permission bits are restored on regular files.
+///
+/// A sentinel entry (`{"empty":true}`) written by `store_empty_sentinel` is detected
+/// before deserialisation: it means the script ran cleanly but produced no output
+/// files, so we return `Ok(true)` (cache hit, skip re-run) without touching the FS.
 pub fn restore_manifest(
     key: &[u8; 32],
     target_dir: &std::path::Path,
@@ -282,6 +300,11 @@ pub fn restore_manifest(
         Some(b) => b,
         None => return Ok(false),
     };
+    // Sentinel written by store_empty_sentinel: the script ran cleanly but changed
+    // nothing on disk.  Treat as a cache hit so we don't re-run every time.
+    if bytes == b"{\"empty\":true}" {
+        return Ok(true);
+    }
     let manifest: PostinstallManifest = serde_json::from_slice(&bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     for entry in &manifest {

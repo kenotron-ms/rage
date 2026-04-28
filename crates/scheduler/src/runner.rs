@@ -950,14 +950,14 @@ fn run_postinstall_phase(
 ) {
     use crate::postinstall_cache::{
         capture_dir, diff_manifests, postinstall_cas_key, restore_manifest, run_postinstall,
-        store_manifest,
+        store_empty_sentinel, store_manifest,
     };
 
     let tasks = plugin.postinstall_tasks(workspace_root);
     for pt in &tasks {
         let key = postinstall_cas_key(pt);
 
-        // Cache hit — restore files from CAS and skip running the script.
+        // Cache hit — restore files from CAS (or sentinel hit = no-op) and skip script.
         match restore_manifest(&key, &pt.cwd, store) {
             Ok(true) => {
                 eprintln!("[rage] {}#postinstall \u{2713} (restored from cache)", pt.package_name);
@@ -981,13 +981,32 @@ fn run_postinstall_phase(
             let delta = diff_manifests(&before, &after);
             match store_manifest(&key, &delta, store) {
                 Ok(true) => {
-                    eprintln!("[rage] {}#postinstall \u{2713} {:.2}s", pt.package_name, elapsed.as_secs_f64());
+                    eprintln!(
+                        "[rage] {}#postinstall \u{2713} {:.2}s",
+                        pt.package_name,
+                        elapsed.as_secs_f64()
+                    );
                 }
                 Ok(false) => {
-                    eprintln!("[rage] {}#postinstall (no cacheable changes) {:.2}s", pt.package_name, elapsed.as_secs_f64());
+                    // Bug 3 fix: store a sentinel so next run skips re-executing the script.
+                    if let Err(e) = store_empty_sentinel(&key, store) {
+                        eprintln!(
+                            "[rage] {}#postinstall sentinel error ({e}) \u{2014} will re-run next time",
+                            pt.package_name
+                        );
+                    } else {
+                        eprintln!(
+                            "[rage] {}#postinstall \u{2713} {:.2}s (no output files \u{2014} cached as no-op)",
+                            pt.package_name,
+                            elapsed.as_secs_f64()
+                        );
+                    }
                 }
                 Err(e) => {
-                    eprintln!("[rage] {}#postinstall capture error ({e}) \u{2014} ran but not cached", pt.package_name);
+                    eprintln!(
+                        "[rage] {}#postinstall capture error ({e}) \u{2014} ran but not cached",
+                        pt.package_name
+                    );
                 }
             }
         } else {
