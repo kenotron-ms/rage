@@ -375,6 +375,101 @@ async fn run_root_task_legacy(
 ///
 /// Returns the configured cap when set, otherwise one slot per logical CPU.
 /// Falls back to 4 if `available_parallelism` is unavailable (rare).
+// ── Build summary ─────────────────────────────────────────────────────────
+
+/// Per-task outcome recorded for the end-of-run summary.
+#[derive(Debug)]
+struct TaskRecord {
+    package: String,
+    script: String,
+    elapsed_ms: u64,
+    outcome: TaskOutcome,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TaskOutcome {
+    Built,   // cache miss — subprocess ran
+    Cached,  // two-phase cache hit
+    Failed,  // non-zero exit
+}
+
+/// Accumulates per-task records during the run; prints the summary at the end.
+#[derive(Debug, Default)]
+struct BuildSummary {
+    wall_start: Option<std::time::Instant>,
+    records: Vec<TaskRecord>,
+}
+
+impl BuildSummary {
+    fn start(&mut self) {
+        self.wall_start = Some(std::time::Instant::now());
+    }
+
+    fn record(&mut self, r: TaskRecord) {
+        self.records.push(r);
+    }
+
+    fn print(&self) {
+        let total_secs = self.wall_start
+            .map(|s| s.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+
+        // Only count package tasks (skip root tasks like workspace#install).
+        let pkg_records: Vec<&TaskRecord> = self.records.iter().collect();
+        if pkg_records.is_empty() { return; }
+
+        let built:  Vec<&TaskRecord> = pkg_records.iter().copied().filter(|r| r.outcome == TaskOutcome::Built).collect();
+        let cached: Vec<&TaskRecord> = pkg_records.iter().copied().filter(|r| r.outcome == TaskOutcome::Cached).collect();
+        let failed: Vec<&TaskRecord> = pkg_records.iter().copied().filter(|r| r.outcome == TaskOutcome::Failed).collect();
+
+        // Timing stats for built tasks only (cached replays are trivially fast).
+        let avg_build_ms: f64 = if built.is_empty() {
+            0.0
+        } else {
+            built.iter().map(|r| r.elapsed_ms as f64).sum::<f64>() / built.len() as f64
+        };
+
+        let p95_ms: f64 = if built.is_empty() {
+            0.0
+        } else {
+            let mut times: Vec<u64> = built.iter().map(|r| r.elapsed_ms).collect();
+            times.sort_unstable();
+            let idx = ((times.len() - 1) as f64 * 0.95) as usize;
+            times[idx] as f64
+        };
+
+        // Slowest 5 built tasks for the "slowest" line.
+        let mut slowest = built.clone();
+        slowest.sort_by(|a, b| b.elapsed_ms.cmp(&a.elapsed_ms));
+        let top: Vec<String> = slowest.iter().take(5)
+            .map(|r| format!("  {:.2}s  {}#{}", r.elapsed_ms as f64 / 1000.0, r.package, r.script))
+            .collect();
+
+        let sep = "─".repeat(60);
+        eprintln!("
+[rage] {sep}");
+        eprintln!(
+            "[rage]  tasks    {:>3} total  ·  {:>3} built  ·  {:>3} cached  ·  {:>3} failed",
+            pkg_records.len(), built.len(), cached.len(), failed.len()
+        );
+        if built.is_empty() {
+            eprintln!("[rage]  timing   {:.1}s total  (all cached)", total_secs);
+        } else {
+            eprintln!(
+                "[rage]  timing   {:.1}s total  ·  {:.2}s avg/build  ·  {:.2}s p95",
+                total_secs, avg_build_ms / 1000.0, p95_ms / 1000.0
+            );
+        }
+        if !top.is_empty() {
+            eprintln!("[rage]  slowest");
+            for line in &top { eprintln!("[rage]          {line}"); }
+        }
+        eprintln!("[rage] {sep}
+");
+    }
+}
+
+
 pub fn effective_concurrency(max_concurrency: Option<usize>) -> usize {
     max_concurrency.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -397,6 +492,10 @@ pub async fn run_tasks_two_phase(
     let concurrency = effective_concurrency(max_concurrency);
     let semaphore = Arc::new(Semaphore::new(concurrency));
 
+    // Build-run summary — collects per-task timings and prints a table at the end.
+    let summary = Arc::new(std::sync::Mutex::new(BuildSummary::default()));
+    summary.lock().unwrap().start();
+
     // Layer 2 — memory budget (RAM guard).
     // Reads available system memory at startup; uses historical p75 peak-RSS
     // per task as the admission estimate.  Waits when the estimated in-flight
@@ -415,6 +514,7 @@ pub async fn run_tasks_two_phase(
             let store_clone = Arc::clone(&artifact_store);
             let sem_clone = Arc::clone(&semaphore);
             let budget_clone = Arc::clone(&memory_budget);
+            let summary_clone = Arc::clone(&summary);
             set.spawn(run_single_task_two_phase(
                 task,
                 cache_clone,
@@ -422,6 +522,7 @@ pub async fn run_tasks_two_phase(
                 store_clone,
                 sem_clone,
                 budget_clone,
+                summary_clone,
             ));
         }
 
@@ -466,6 +567,7 @@ pub async fn run_tasks_two_phase(
         }
     }
 
+    summary.lock().unwrap().print();
     Ok(())
 }
 
@@ -483,6 +585,8 @@ async fn run_single_task_two_phase(
     // system memory capacity. Acquired just before spawning (like the
     // semaphore), released after actual peak RSS is measured.
     memory_budget: Arc<crate::resource_budget::MemoryBudget>,
+    // Shared build summary — records outcome + timing for the end-of-run table.
+    summary: Arc<std::sync::Mutex<BuildSummary>>,
 ) -> Result<(), RunError> {
     if task.is_root {
         return run_root_task_two_phase(task, cache, plugin.as_ref(), artifact_store).await;
@@ -491,6 +595,11 @@ async fn run_single_task_two_phase(
     use cache::pathset_store::StoredPathset;
     use cache::{CacheEntry, WeakFpInputs};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Timer starts here — covers both cache-hit replay and actual builds.
+    let task_timer = std::time::Instant::now();
+    let pkg_name = task.package_name.clone();
+    let script_name = task.script_name.clone();
 
     let tool_path = crate::node_path::which_first(&task.command, &task.cwd, &task.workspace_root)
         .unwrap_or_else(|| PathBuf::from("sh"));
@@ -611,6 +720,12 @@ async fn run_single_task_two_phase(
             "[rage] {}#{} \u{2713} (cached, two-phase)",
             task.package_name, task.script_name
         );
+        summary.lock().unwrap().record(TaskRecord {
+            package: pkg_name.clone(),
+            script: script_name.clone(),
+            elapsed_ms: task_timer.elapsed().as_millis() as u64,
+            outcome: TaskOutcome::Cached,
+        });
         return Ok(());
     }
 
@@ -794,12 +909,24 @@ async fn run_single_task_two_phase(
             task.script_name,
             elapsed.as_secs_f64()
         );
+        summary.lock().unwrap().record(TaskRecord {
+            package: pkg_name.clone(),
+            script: script_name.clone(),
+            elapsed_ms: elapsed_ms,
+            outcome: TaskOutcome::Built,
+        });
         Ok(())
     } else {
         eprintln!(
             "[rage] {}#{} \u{2717} FAILED (exit {exit_code})",
             task.package_name, task.script_name
         );
+        summary.lock().unwrap().record(TaskRecord {
+            package: pkg_name,
+            script: script_name,
+            elapsed_ms: elapsed_ms,
+            outcome: TaskOutcome::Failed,
+        });
         Err(RunError::TaskFailed {
             package: task.package_name,
             script: task.script_name,
@@ -1131,8 +1258,9 @@ async fn spawn_capture_tee_tracked(
     let child_pid = child.id().unwrap_or(0);
 
     // Start RSS monitor *before* awaiting the child so it can observe the
-    // process while it is running.
-    let rss_handle = crate::rss_monitor::track_peak_rss(child_pid);
+    // process while it is running.  The stop signal ensures the monitor
+    // terminates promptly after the child exits even if sysinfo has stale data.
+    let (rss_stop, rss_handle) = crate::rss_monitor::track_peak_rss(child_pid);
 
     let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
     let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
@@ -1180,7 +1308,8 @@ async fn spawn_capture_tee_tracked(
     let status = child.wait().await?;
     let code = status.code().unwrap_or(-1);
 
-    // Collect peak RSS — the monitor exits when it can no longer find the PID.
+    // Signal the RSS monitor that the process has exited, then collect peak.
+    rss_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let peak_rss = rss_handle.await.unwrap_or(0);
 
     Ok((

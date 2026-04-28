@@ -27,21 +27,32 @@ use tokio::time::interval;
 
 /// Spawn a background Tokio task that tracks peak RSS for `pid`.
 ///
-/// The returned `JoinHandle` resolves to the peak RSS in bytes once the
-/// process exits.  If the process is never observed (e.g. already gone),
-/// returns 0.
+/// Returns `(stop_signal, JoinHandle<peak_rss_bytes>)`.  Set `stop_signal`
+/// to `true` after the subprocess exits to guarantee the monitor terminates
+/// within one poll interval (100 ms) even if sysinfo retains stale data.
 ///
 /// # Cancel safety
 ///
-/// The background task does not hold any locks and does not open files —
-/// dropping the handle simply stops future polls (the task exits cleanly).
-pub fn track_peak_rss(pid: u32) -> tokio::task::JoinHandle<u64> {
-    tokio::task::spawn_blocking(move || {
+/// The monitor exits as soon as either (a) sysinfo reports the PID gone, or
+/// (b) `stop_signal` is set.  Both conditions are checked on every poll so
+/// the JoinHandle always resolves promptly.
+pub fn track_peak_rss(
+    pid: u32,
+) -> (std::sync::Arc<std::sync::atomic::AtomicBool>, tokio::task::JoinHandle<u64>) {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_clone = std::sync::Arc::clone(&stop);
+
+    let handle = tokio::task::spawn_blocking(move || {
         let mut sys = System::new();
         let sysinfo_pid = Pid::from_u32(pid);
         let mut peak_bytes: u64 = 0;
 
         loop {
+            // Stop as soon as the caller signals us (process has exited).
+            if stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+
             // sysinfo 0.38: (targets, include_thread_tasks, kind)
             sys.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&[sysinfo_pid]),
@@ -53,14 +64,16 @@ pub fn track_peak_rss(pid: u32) -> tokio::task::JoinHandle<u64> {
                 Some(proc) => {
                     peak_bytes = peak_bytes.max(proc.memory());
                 }
-                None => break, // process exited
+                None => break, // process gone from OS table
             }
 
             std::thread::sleep(Duration::from_millis(100));
         }
 
         peak_bytes
-    })
+    });
+
+    (stop, handle)
 }
 
 #[cfg(test)]
