@@ -182,7 +182,7 @@ async fn run_build(d: &DesiredState) -> Result<Vec<TaskRecord>> {
             )
         })
         .collect();
-    let result = scheduler::run_tasks(&dag, tasks.clone(), None).await;
+    let result = scheduler::run_tasks(&dag, tasks.clone(), None, None, None).await;
     for t in &tasks {
         let key = format!("{}#{}", t.package_name, t.script_name);
         let elapsed = start_per

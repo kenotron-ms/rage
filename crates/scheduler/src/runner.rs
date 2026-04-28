@@ -142,10 +142,16 @@ pub fn compute_task_levels(dag: &WorkspaceDag, tasks: &[Task]) -> Vec<Vec<Task>>
 ///
 /// For each wave, all tasks run concurrently. Waves run sequentially.
 /// On any task failure, the wave is aborted and the error is returned.
+///
+/// `plugin` and `artifact_store` are optional. When provided, postinstall
+/// scripts are run after any root task (e.g. `yarn install`) completes —
+/// this is the code path taken when `--no-cache` is passed on the CLI.
 pub async fn run_tasks(
     dag: &WorkspaceDag,
     tasks: Vec<Task>,
     cache: Option<std::sync::Arc<dyn cache::CacheProvider>>,
+    plugin: Option<std::sync::Arc<dyn plugin::EcosystemPlugin>>,
+    artifact_store: Option<std::sync::Arc<artifact_store::LocalArtifactStore>>,
 ) -> anyhow::Result<()> {
     let levels = compute_task_levels(dag, &tasks);
 
@@ -154,7 +160,9 @@ pub async fn run_tasks(
 
         for task in level {
             let cache_clone = cache.clone();
-            set.spawn(run_single_task(task, cache_clone));
+            let plugin_clone = plugin.clone();
+            let store_clone = artifact_store.clone();
+            set.spawn(run_single_task(task, cache_clone, plugin_clone, store_clone));
         }
 
         let mut first_error: Option<RunError> = None;
@@ -190,9 +198,11 @@ pub async fn run_tasks(
 async fn run_single_task(
     task: Task,
     cache: Option<std::sync::Arc<dyn cache::CacheProvider>>,
+    plugin: Option<std::sync::Arc<dyn plugin::EcosystemPlugin>>,
+    artifact_store: Option<std::sync::Arc<artifact_store::LocalArtifactStore>>,
 ) -> Result<(), RunError> {
     if task.is_root {
-        return run_root_task_legacy(task, cache).await;
+        return run_root_task_legacy(task, cache, plugin, artifact_store).await;
     }
 
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -278,6 +288,8 @@ async fn run_single_task(
 async fn run_root_task_legacy(
     task: Task,
     cache: Option<std::sync::Arc<dyn cache::CacheProvider>>,
+    plugin: Option<std::sync::Arc<dyn plugin::EcosystemPlugin>>,
+    artifact_store: Option<std::sync::Arc<artifact_store::LocalArtifactStore>>,
 ) -> Result<(), RunError> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -334,6 +346,10 @@ async fn run_root_task_legacy(
             task.script_name,
             elapsed.as_secs_f64()
         );
+        // Run postinstall scripts when plugin + store were supplied (--no-cache path).
+        if let (Some(p), Some(s)) = (&plugin, &artifact_store) {
+            run_postinstall_phase(p.as_ref(), &task.workspace_root, s.as_ref());
+        }
         Ok(())
     } else {
         let code = status.code().unwrap_or(-1);
@@ -1452,7 +1468,7 @@ mod tests {
         };
         let pkg = mk_pkg("test-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
-        run_tasks(&dag, vec![task], None).await.unwrap();
+        run_tasks(&dag, vec![task], None, None, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1473,7 +1489,7 @@ mod tests {
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
-        let err = run_tasks(&dag, vec![task], None).await.unwrap_err();
+        let err = run_tasks(&dag, vec![task], None, None, None).await.unwrap_err();
         assert!(err.to_string().contains("failing-pkg"));
     }
 
@@ -1518,7 +1534,7 @@ mod tests {
         ];
         let packages = vec![mk_pkg("a", &[]), mk_pkg("b", &[])];
         let dag = build_dag(packages).unwrap();
-        run_tasks(&dag, tasks, None).await.unwrap();
+        run_tasks(&dag, tasks, None, None, None).await.unwrap();
         assert!(file_a.exists(), "task a should have run");
         assert!(file_b.exists(), "task b should have run");
     }
@@ -1552,7 +1568,7 @@ mod tests {
         let dag = build_dag(vec![pkg]).unwrap();
 
         // First run — should execute and write to cache
-        run_tasks(&dag, vec![task.clone()], cache.clone())
+        run_tasks(&dag, vec![task.clone()], cache.clone(), None, None)
             .await
             .unwrap();
 
@@ -1568,7 +1584,7 @@ mod tests {
         );
 
         // Second run — should be a cache hit (same fingerprint)
-        run_tasks(&dag, vec![task], cache).await.unwrap();
+        run_tasks(&dag, vec![task], cache, None, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1590,7 +1606,7 @@ mod tests {
         let pkg = mk_pkg("uncached-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
         // None = no cache — should just execute
-        run_tasks(&dag, vec![task], None).await.unwrap();
+        run_tasks(&dag, vec![task], None, None, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1612,7 +1628,7 @@ mod tests {
         };
         let pkg = mk_pkg("smoke", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
-        run_tasks(&dag, vec![task], None).await.unwrap();
+        run_tasks(&dag, vec![task], None, None, None).await.unwrap();
     }
 
     #[tokio::test]

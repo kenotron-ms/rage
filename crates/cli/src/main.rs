@@ -441,9 +441,27 @@ async fn cmd_run(
     eprintln!("Running '{}' across {} packages", script, tasks.len());
 
     if no_cache {
-        scheduler::run_tasks(&dag, tasks, None)
-            .await
-            .with_context(|| format!("'{script}' run failed"))?;
+        // Even without caching, postinstall scripts must run after install.
+        // Build the same plugin + store that the two-phase path uses.
+        let cache_dir_for_store = resolve_cache_dir(root);
+        let store_root_nocache = cache_dir_for_store
+            .parent() // ~/.rage
+            .map(|p| p.join("artifacts"))
+            .unwrap_or_else(|| cache_dir_for_store.join("artifacts"));
+        std::fs::create_dir_all(&store_root_nocache).ok();
+        let artifact_store_nocache =
+            std::sync::Arc::new(artifact_store::LocalArtifactStore::new(&store_root_nocache));
+        let plugin_arc_nocache: std::sync::Arc<dyn plugin::EcosystemPlugin> =
+            std::sync::Arc::new(plugin_typescript::TypeScriptPlugin::new());
+        scheduler::run_tasks(
+            &dag,
+            tasks,
+            None,
+            Some(plugin_arc_nocache),
+            Some(artifact_store_nocache),
+        )
+        .await
+        .with_context(|| format!("'{script}' run failed"))?;
     } else {
         let cache_dir = resolve_cache_dir(root);
         let two_phase = std::sync::Arc::new(
