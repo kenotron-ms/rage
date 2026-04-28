@@ -67,8 +67,7 @@ pub fn read_pm_script_policy(workspace_root: &Path) -> ScriptPolicy {
                 let raw_value = trimmed[eq_pos + 1..].trim();
                 // Trim any leading `=` characters from the value.
                 let value = raw_value.trim_start_matches('=').trim();
-                if key.eq_ignore_ascii_case("ignore-scripts")
-                    && value.eq_ignore_ascii_case("true")
+                if key.eq_ignore_ascii_case("ignore-scripts") && value.eq_ignore_ascii_case("true")
                 {
                     return ScriptPolicy::AllDisabled;
                 }
@@ -259,10 +258,7 @@ mod tests {
             "# yarn configuration\nenableScripts: false\n",
         )
         .unwrap();
-        assert_eq!(
-            read_pm_script_policy(dir.path()),
-            ScriptPolicy::AllDisabled
-        );
+        assert_eq!(read_pm_script_policy(dir.path()), ScriptPolicy::AllDisabled);
     }
 
     #[test]
@@ -273,10 +269,7 @@ mod tests {
             "; npm config\nignore-scripts=true\n",
         )
         .unwrap();
-        assert_eq!(
-            read_pm_script_policy(dir.path()),
-            ScriptPolicy::AllDisabled
-        );
+        assert_eq!(read_pm_script_policy(dir.path()), ScriptPolicy::AllDisabled);
     }
 
     #[test]
@@ -334,9 +327,7 @@ mod tests {
         std::fs::create_dir_all(&pkg_dir).unwrap();
 
         let manifest = if let Some(script) = postinstall {
-            format!(
-                r#"{{"name":"{name}","scripts":{{"postinstall":"{script}"}}}}"#
-            )
+            format!(r#"{{"name":"{name}","scripts":{{"postinstall":"{script}"}}}}"#)
         } else {
             format!(r#"{{"name":"{name}"}}"#)
         };
@@ -351,7 +342,11 @@ mod tests {
         write_pkg(dir.path(), "lodash", None);
 
         let mut results = scan_postinstall_scripts(dir.path());
-        assert_eq!(results.len(), 1, "expected exactly one result, got: {results:?}");
+        assert_eq!(
+            results.len(),
+            1,
+            "expected exactly one result, got: {results:?}"
+        );
         let task = results.pop().unwrap();
         assert_eq!(task.package_name, "esbuild");
         assert_eq!(task.script, "node install.js");
@@ -363,7 +358,11 @@ mod tests {
         write_pkg(dir.path(), "@prisma/client", Some("prisma generate"));
 
         let results = scan_postinstall_scripts(dir.path());
-        assert_eq!(results.len(), 1, "expected exactly one result, got: {results:?}");
+        assert_eq!(
+            results.len(),
+            1,
+            "expected exactly one result, got: {results:?}"
+        );
         assert_eq!(results[0].package_name, "@prisma/client");
         assert_eq!(results[0].script, "prisma generate");
     }
@@ -383,7 +382,11 @@ mod tests {
         write_pkg(dir.path(), "ok", Some("noop"));
 
         let results = scan_postinstall_scripts(dir.path());
-        assert_eq!(results.len(), 1, "expected exactly one result, got: {results:?}");
+        assert_eq!(
+            results.len(),
+            1,
+            "expected exactly one result, got: {results:?}"
+        );
         assert_eq!(results[0].package_name, "ok");
     }
 
@@ -429,5 +432,4 @@ mod tests {
         assert_eq!(result.len(), 1, "NeverList should exclude 'bcrypt'");
         assert_eq!(result[0].package_name, "esbuild");
     }
-
 }

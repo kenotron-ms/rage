@@ -1141,7 +1141,10 @@ async fn pnpm_second_run_restores_from_cas_after_node_modules_wipe() {
         let n = name.to_string_lossy();
         if n.starts_with('@') {
             for sub in std::fs::read_dir(entry.path()).unwrap().flatten() {
-                assert!(sub.path().is_dir(), "scoped pkg {sub:?} must be a directory");
+                assert!(
+                    sub.path().is_dir(),
+                    "scoped pkg {sub:?} must be a directory"
+                );
                 found_scoped = true;
             }
         }

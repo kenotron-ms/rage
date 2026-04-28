@@ -60,7 +60,10 @@ impl HubDag {
         for task in &task_nodes {
             rdeps.entry(task.task_id.clone()).or_default();
             for dep in &task.depends_on {
-                rdeps.entry(dep.clone()).or_default().insert(task.task_id.clone());
+                rdeps
+                    .entry(dep.clone())
+                    .or_default()
+                    .insert(task.task_id.clone());
             }
         }
 
@@ -88,19 +91,24 @@ impl HubDag {
     /// Returns a clone of the task node if one was available.
     pub fn dispatch_next(&mut self, worker_id: &str) -> Option<TaskNode> {
         let task_id = self.ready_queue.pop_front()?;
-        self.states.insert(task_id.clone(), TaskState::Dispatched(worker_id.to_string()));
+        self.states.insert(
+            task_id.clone(),
+            TaskState::Dispatched(worker_id.to_string()),
+        );
         self.tasks.get(&task_id).cloned()
     }
 
     /// Mark a task as completed. Returns task_ids that are now Ready.
     pub fn mark_complete(&mut self, task_id: &str) -> Vec<String> {
-        self.states.insert(task_id.to_string(), TaskState::Completed);
+        self.states
+            .insert(task_id.to_string(), TaskState::Completed);
         self.unblock_dependents(task_id)
     }
 
     /// Mark a task as failed. Returns task_ids that are now Ready (if any).
     pub fn mark_failed(&mut self, task_id: &str, error: &str) -> Vec<String> {
-        self.states.insert(task_id.to_string(), TaskState::Failed(error.to_string()));
+        self.states
+            .insert(task_id.to_string(), TaskState::Failed(error.to_string()));
         // In simple mode: unblock dependents anyway (they'll fail too when trying to run)
         // For now, we don't unblock dependents of failed tasks.
         Vec::new()
@@ -109,7 +117,8 @@ impl HubDag {
     fn unblock_dependents(&mut self, completed_task: &str) -> Vec<String> {
         let mut newly_ready = Vec::new();
 
-        let dependents: Vec<String> = self.rdeps
+        let dependents: Vec<String> = self
+            .rdeps
             .get(completed_task)
             .cloned()
             .unwrap_or_default()
@@ -127,9 +136,10 @@ impl HubDag {
                 None => continue,
             };
 
-            let all_done = task.depends_on.iter().all(|dep| {
-                matches!(self.states.get(dep), Some(TaskState::Completed))
-            });
+            let all_done = task
+                .depends_on
+                .iter()
+                .all(|dep| matches!(self.states.get(dep), Some(TaskState::Completed)));
 
             if all_done {
                 self.states.insert(dep_task_id.clone(), TaskState::Ready);
@@ -143,14 +153,16 @@ impl HubDag {
 
     /// Returns true when all tasks are complete or failed.
     pub fn is_done(&self) -> bool {
-        self.states.values().all(|s| {
-            matches!(s, TaskState::Completed | TaskState::Failed(_))
-        })
+        self.states
+            .values()
+            .all(|s| matches!(s, TaskState::Completed | TaskState::Failed(_)))
     }
 
     /// Returns true if any task has failed.
     pub fn has_failure(&self) -> bool {
-        self.states.values().any(|s| matches!(s, TaskState::Failed(_)))
+        self.states
+            .values()
+            .any(|s| matches!(s, TaskState::Failed(_)))
     }
 
     /// Returns the first failed task ID and error, if any.
@@ -170,7 +182,13 @@ impl HubDag {
 
     /// Returns task stats.
     pub fn stats(&self) -> DagStats {
-        let mut stats = DagStats { pending: 0, ready: 0, dispatched: 0, completed: 0, failed: 0 };
+        let mut stats = DagStats {
+            pending: 0,
+            ready: 0,
+            dispatched: 0,
+            completed: 0,
+            failed: 0,
+        };
         for state in self.states.values() {
             match state {
                 TaskState::Pending => stats.pending += 1,
@@ -206,7 +224,11 @@ mod tests {
     #[test]
     fn dag_dispatches_leaves_first() {
         // a → b → c (a must run before b, b before c)
-        let tasks = vec![task("a", vec![]), task("b", vec!["a"]), task("c", vec!["b"])];
+        let tasks = vec![
+            task("a", vec![]),
+            task("b", vec!["a"]),
+            task("c", vec!["b"]),
+        ];
         let mut dag = HubDag::new(tasks);
 
         let t = dag.dispatch_next("worker1").unwrap();

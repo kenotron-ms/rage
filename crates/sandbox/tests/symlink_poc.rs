@@ -43,9 +43,7 @@ fn analyze_paths(label: &str, term: &str, reads: &[PathBuf], writes: &[PathBuf])
             let s = p.to_string_lossy();
             let has_version = s.contains('@');
             let has_pnpm = s.contains(".pnpm");
-            println!(
-                "  READ  {s}  [version_in_path={has_version}] [pnpm_store={has_pnpm}]"
-            );
+            println!("  READ  {s}  [version_in_path={has_version}] [pnpm_store={has_pnpm}]");
         }
     }
 
@@ -72,7 +70,10 @@ fn analyze_paths(label: &str, term: &str, reads: &[PathBuf], writes: &[PathBuf])
 
     println!();
     println!("  SUMMARY for '{label}':");
-    println!("    total reads containing '{term}':             {}", ms_reads.len());
+    println!(
+        "    total reads containing '{term}':             {}",
+        ms_reads.len()
+    );
     println!("    version-bearing paths ('{term}@<ver>'):      {version_paths}");
     println!("    symlink-only paths  (node_modules/{term}):   {symlink_paths}");
     println!("    pnpm resolved paths (.pnpm/{term}@<ver>/..): {resolved_paths}");
@@ -154,7 +155,12 @@ async fn pnpm_symlink_poc() {
         println!("  {}", p.display());
     }
 
-    analyze_paths("pnpm", "ms", &result.path_set.reads, &result.path_set.writes);
+    analyze_paths(
+        "pnpm",
+        "ms",
+        &result.path_set.reads,
+        &result.path_set.writes,
+    );
 
     assert_eq!(result.exit_code, 0, "node should exit 0");
 }
@@ -183,7 +189,10 @@ async fn yarn_symlink_poc() {
         .args(["-la", cwd.join("node_modules/ms").to_str().unwrap()])
         .output()
         .unwrap();
-    println!("[yarn] node_modules/ms: {}", String::from_utf8_lossy(&ls.stdout).trim());
+    println!(
+        "[yarn] node_modules/ms: {}",
+        String::from_utf8_lossy(&ls.stdout).trim()
+    );
 
     let cmd = format!(
         r#"{node} -e "const ms = require('ms'); console.log(ms('2 days')); console.log(require.resolve('ms'));""#
@@ -204,7 +213,12 @@ async fn yarn_symlink_poc() {
         println!("  {}", p.display());
     }
 
-    analyze_paths("yarn", "ms", &result.path_set.reads, &result.path_set.writes);
+    analyze_paths(
+        "yarn",
+        "ms",
+        &result.path_set.reads,
+        &result.path_set.writes,
+    );
 
     assert_eq!(result.exit_code, 0, "node should exit 0");
 }
@@ -232,7 +246,10 @@ async fn npm_symlink_poc() {
         .args(["-la", cwd.join("node_modules/ms").to_str().unwrap()])
         .output()
         .unwrap();
-    println!("[npm] node_modules/ms: {}", String::from_utf8_lossy(&ls.stdout).trim());
+    println!(
+        "[npm] node_modules/ms: {}",
+        String::from_utf8_lossy(&ls.stdout).trim()
+    );
 
     let cmd = format!(
         r#"{node} -e "const ms = require('ms'); console.log(ms('2 days')); console.log(require.resolve('ms'));""#
@@ -342,23 +359,24 @@ async fn workspace_symlink_poc() {
         println!("  {}", p.display());
     }
 
-    let nm_path_seen = result.path_set.reads.iter().any(|p| {
-        p.to_string_lossy()
-            .contains("node_modules/@scope/my-lib")
-    });
-    let resolved_seen = result.path_set.reads.iter().any(|p| {
-        p.to_string_lossy().contains("packages/my-lib")
-    });
+    let nm_path_seen = result
+        .path_set
+        .reads
+        .iter()
+        .any(|p| p.to_string_lossy().contains("node_modules/@scope/my-lib"));
+    let resolved_seen = result
+        .path_set
+        .reads
+        .iter()
+        .any(|p| p.to_string_lossy().contains("packages/my-lib"));
 
     println!("\n  WORKSPACE SUMMARY:");
-    println!(
-        "    node_modules/@scope/my-lib seen (symlink path): {nm_path_seen}"
-    );
-    println!(
-        "    packages/my-lib seen (resolved/source path):    {resolved_seen}"
-    );
+    println!("    node_modules/@scope/my-lib seen (symlink path): {nm_path_seen}");
+    println!("    packages/my-lib seen (resolved/source path):    {resolved_seen}");
     if resolved_seen && !nm_path_seen {
-        println!("    → VERDICT: sandbox follows symlinks fully (sees source, not node_modules path)");
+        println!(
+            "    → VERDICT: sandbox follows symlinks fully (sees source, not node_modules path)"
+        );
     } else if nm_path_seen && !resolved_seen {
         println!("    → VERDICT: sandbox records symlink path only (does NOT follow to source)");
     } else if nm_path_seen && resolved_seen {

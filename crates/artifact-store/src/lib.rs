@@ -66,7 +66,12 @@ pub fn capture_package(
         Ok(())
     }
 
-    walk(&pkg_ref.package_root, &pkg_ref.package_root, store, &mut files)?;
+    walk(
+        &pkg_ref.package_root,
+        &pkg_ref.package_root,
+        store,
+        &mut files,
+    )?;
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     Ok(PackageArtifact {
@@ -153,7 +158,10 @@ mod tests {
                 name: "ms".to_string(),
                 version: "2.1.3".to_string(),
                 files: vec![
-                    (PathBuf::from("index.js"), ContentHash::of(b"console.log(1)")),
+                    (
+                        PathBuf::from("index.js"),
+                        ContentHash::of(b"console.log(1)"),
+                    ),
                     (PathBuf::from("package.json"), ContentHash::of(b"{}")),
                 ],
             }],
@@ -175,8 +183,16 @@ mod tests {
         let pkg_dir = tempfile::tempdir().unwrap();
         let pkg_root = pkg_dir.path().join("ms");
         std::fs::create_dir_all(pkg_root.join("lib")).unwrap();
-        std::fs::write(pkg_root.join("index.js"), b"module.exports = function ms(s){return s}").unwrap();
-        std::fs::write(pkg_root.join("package.json"), br#"{"name":"ms","version":"2.1.3"}"#).unwrap();
+        std::fs::write(
+            pkg_root.join("index.js"),
+            b"module.exports = function ms(s){return s}",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_root.join("package.json"),
+            br#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
         std::fs::write(pkg_root.join("lib/util.js"), b"// util").unwrap();
 
         let store = LocalArtifactStore::new(store_dir.path());
@@ -268,7 +284,11 @@ mod tests {
         for (name, version) in pkgs {
             let root = src.path().join(name);
             std::fs::create_dir_all(&root).unwrap();
-            std::fs::write(root.join("index.js"), format!("// {name}@{version}").as_bytes()).unwrap();
+            std::fs::write(
+                root.join("index.js"),
+                format!("// {name}@{version}").as_bytes(),
+            )
+            .unwrap();
             std::fs::write(
                 root.join("package.json"),
                 format!(r#"{{"name":"{name}","version":"{version}"}}"#).as_bytes(),
@@ -297,7 +317,11 @@ mod tests {
             for (rel, hash) in &artifact.files {
                 let p = nm.join(&artifact.name).join(rel);
                 let bytes = std::fs::read(&p).unwrap();
-                assert_eq!(ContentHash::of(&bytes), *hash, "file {p:?} content mismatch");
+                assert_eq!(
+                    ContentHash::of(&bytes),
+                    *hash,
+                    "file {p:?} content mismatch"
+                );
             }
         }
     }

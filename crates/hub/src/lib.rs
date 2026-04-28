@@ -17,5 +17,5 @@ pub mod proto {
 }
 
 pub use dag::{HubDag, TaskNode};
-pub use rendezvous::{HubAddr, read_hub_addr_with_timeout, write_hub_addr};
+pub use rendezvous::{read_hub_addr_with_timeout, write_hub_addr, HubAddr};
 pub use server::HubServer;

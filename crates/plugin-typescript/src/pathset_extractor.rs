@@ -30,7 +30,9 @@ pub fn extract_pnpm_packages(
 
     for p in pathset_reads {
         let s = p.to_string_lossy();
-        let Some(caps) = re.captures(&s) else { continue };
+        let Some(caps) = re.captures(&s) else {
+            continue;
+        };
         let dir_name = caps.name("dir_name").unwrap().as_str().to_string();
         let version = caps.name("version").unwrap().as_str().to_string();
 
@@ -66,7 +68,9 @@ pub fn extract_flat_packages(
 
     let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for p in pathset_reads {
-        let Ok(rel) = p.strip_prefix(&nm_prefix) else { continue };
+        let Ok(rel) = p.strip_prefix(&nm_prefix) else {
+            continue;
+        };
         let s = rel.to_string_lossy();
         if s.starts_with(".pnpm/") || s.starts_with(".bin/") || s.starts_with(".cache/") {
             continue;
@@ -267,7 +271,9 @@ mod tests {
         let refs = extract_pnpm_packages(&reads, ws);
         assert_eq!(refs.len(), 2, "expected ms + typescript, got {refs:?}");
         assert!(refs.iter().any(|r| r.name == "ms" && r.version == "2.1.3"));
-        assert!(refs.iter().any(|r| r.name == "typescript" && r.version == "5.3.2"));
+        assert!(refs
+            .iter()
+            .any(|r| r.name == "typescript" && r.version == "5.3.2"));
 
         let ms = refs.iter().find(|r| r.name == "ms").unwrap();
         assert_eq!(
@@ -310,7 +316,10 @@ mod tests {
             PathBuf::from("/ws/node_modules/@scope/my-lib/index.ts"),
         ];
         let refs = extract_pnpm_packages(&reads, Path::new("/ws"));
-        assert!(refs.is_empty(), "workspace packages must NOT be captured, got {refs:?}");
+        assert!(
+            refs.is_empty(),
+            "workspace packages must NOT be captured, got {refs:?}"
+        );
     }
 
     #[test]
@@ -350,7 +359,9 @@ mod tests {
         let refs = extract_flat_packages(&reads, ws, &ws.join("package-lock.json"));
         assert_eq!(refs.len(), 2, "got {refs:?}");
         assert!(refs.iter().any(|r| r.name == "ms" && r.version == "2.1.3"));
-        assert!(refs.iter().any(|r| r.name == "lodash" && r.version == "4.17.21"));
+        assert!(refs
+            .iter()
+            .any(|r| r.name == "lodash" && r.version == "4.17.21"));
     }
 
     #[test]
