@@ -3,7 +3,6 @@ use crate::transport::{DaemonServer, DaemonStream};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
 
 /// Boxed async future type alias used by the `Handler` type.
 pub mod futures_response_box {
@@ -25,14 +24,12 @@ where
     Fut: std::future::Future<Output = DaemonResponse> + Send + 'static,
 {
     let handler = Arc::new(handler);
-    let pending = Arc::new(Mutex::new(Vec::<tokio::task::JoinHandle<()>>::new()));
     loop {
         let stream = server.accept().await?;
         let h = handler.clone();
-        let join = tokio::spawn(async move {
+        tokio::spawn(async move {
             let _ = handle_client(stream, h.as_ref()).await;
         });
-        pending.lock().await.push(join);
     }
 }
 
