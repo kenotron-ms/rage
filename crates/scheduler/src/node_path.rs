@@ -115,7 +115,9 @@ fn resolve_version_dir(base: &Path, version: &str) -> Option<PathBuf> {
 }
 
 pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
 
     // 1. fnm — honor $FNM_DIR, fall back to ~/.local/share/fnm
     let fnm_root = std::env::var_os("FNM_DIR")
@@ -163,6 +165,67 @@ pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
             let candidate = version_dir.join("bin");
             if candidate.is_dir() {
                 return Some(candidate);
+            }
+        }
+    }
+
+    // Volta on Unix: $VOLTA_HOME/bin or ~/.volta/bin.
+    if let Some(ref home) = home {
+        let volta_bin = std::env::var_os("VOLTA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".volta"))
+            .join("bin");
+        if volta_bin.is_dir() {
+            return Some(volta_bin);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // fnm on Windows: %FNM_DIR% (if set) or %LOCALAPPDATA%\fnm.
+        // Layout: <fnm>\node-versions\v{ver}\installation\
+        // (no `bin/` subdirectory — node.exe sits directly in `installation\`.)
+        let fnm_dir = std::env::var_os("FNM_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|p| PathBuf::from(p).join("fnm"))
+            });
+        if let Some(fnm_dir) = fnm_dir {
+            let versions_dir = fnm_dir.join("node-versions");
+            if let Some(ver_dir) = resolve_version_dir(&versions_dir, version) {
+                let bin = ver_dir.join("installation");
+                if bin.is_dir() {
+                    return Some(bin);
+                }
+            }
+        }
+
+        // nvm-windows: %NVM_HOME% or %APPDATA%\nvm.
+        // Layout: <nvm>\v{ver}\ (node.exe directly in version dir)
+        let nvm_home = std::env::var_os("NVM_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("nvm"))
+            });
+        if let Some(nvm_dir) = nvm_home {
+            if let Some(ver_dir) = resolve_version_dir(&nvm_dir, version) {
+                if ver_dir.is_dir() {
+                    return Some(ver_dir);
+                }
+            }
+        }
+
+        // Volta on Windows: %VOLTA_HOME%\bin or %LOCALAPPDATA%\Volta\bin.
+        let volta_bin = std::env::var_os("VOLTA_HOME")
+            .map(|p| PathBuf::from(p).join("bin"))
+            .or_else(|| {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|p| PathBuf::from(p).join("Volta").join("bin"))
+            });
+        if let Some(bin) = volta_bin {
+            if bin.is_dir() {
+                return Some(bin);
             }
         }
     }
@@ -354,6 +417,27 @@ mod tests {
         bin
     }
 
+    fn fake_fnm_windows(local_app_data: &Path, version: &str) -> PathBuf {
+        let dir = local_app_data
+            .join("fnm/node-versions")
+            .join(format!("v{version}"))
+            .join("installation");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fake_nvm_windows(app_data: &Path, version: &str) -> PathBuf {
+        let dir = app_data.join("nvm").join(format!("v{version}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fake_volta_windows(local_app_data: &Path) -> PathBuf {
+        let dir = local_app_data.join("Volta/bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn fake_asdf(home: &Path, version: &str) -> PathBuf {
         let bin = home.join(".asdf/installs/nodejs").join(version).join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -369,19 +453,25 @@ mod tests {
         bin
     }
 
-    /// Run a closure with `HOME` (and `FNM_DIR`/`NVM_DIR` cleared) pointing
-    /// at `home`, restoring the originals afterwards.
+    /// Serialises all env-var-mutating tests in this module so they never
+    /// race against each other (process-wide env is global mutable state).
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run a closure with `HOME` (and `FNM_DIR`/`NVM_DIR`/`VOLTA_HOME` cleared)
+    /// pointing at `home`, restoring the originals afterwards.
     ///
-    /// NOTE: edition 2021 — set_var / remove_var are safe functions here.
-    /// Tests in this module must be run sequentially (default for `cargo test --lib`
-    /// with no explicit `#[test(parallel)]`).
+    /// Acquires `ENV_MUTEX` for the duration so concurrent tests cannot
+    /// observe inconsistent env state.
     fn with_home<F: FnOnce()>(home: &Path, f: F) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prev_home = std::env::var_os("HOME");
         let prev_fnm = std::env::var_os("FNM_DIR");
         let prev_nvm = std::env::var_os("NVM_DIR");
+        let prev_volta_home = std::env::var_os("VOLTA_HOME");
         std::env::set_var("HOME", home);
         std::env::remove_var("FNM_DIR");
         std::env::remove_var("NVM_DIR");
+        std::env::remove_var("VOLTA_HOME");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         match prev_home {
             Some(v) => std::env::set_var("HOME", v),
@@ -395,6 +485,61 @@ mod tests {
             Some(v) => std::env::set_var("NVM_DIR", v),
             None => std::env::remove_var("NVM_DIR"),
         }
+        match prev_volta_home {
+            Some(v) => std::env::set_var("VOLTA_HOME", v),
+            None => std::env::remove_var("VOLTA_HOME"),
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    /// Run a closure with `LOCALAPPDATA` and `APPDATA` set to the given paths,
+    /// with `FNM_DIR`, `NVM_HOME`, `VOLTA_HOME`, and `USERPROFILE` removed.
+    /// Restores all six variables afterwards (panic-safe).
+    fn with_windows_env<F: FnOnce()>(local_app_data: &Path, app_data: &Path, f: F) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_local_app_data = std::env::var_os("LOCALAPPDATA");
+        let prev_app_data = std::env::var_os("APPDATA");
+        let prev_fnm_dir = std::env::var_os("FNM_DIR");
+        let prev_nvm_home = std::env::var_os("NVM_HOME");
+        let prev_volta_home = std::env::var_os("VOLTA_HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+
+        std::env::set_var("LOCALAPPDATA", local_app_data);
+        std::env::set_var("APPDATA", app_data);
+        std::env::remove_var("FNM_DIR");
+        std::env::remove_var("NVM_HOME");
+        std::env::remove_var("VOLTA_HOME");
+        std::env::remove_var("USERPROFILE");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        match prev_local_app_data {
+            Some(v) => std::env::set_var("LOCALAPPDATA", v),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+        match prev_app_data {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
+        }
+        match prev_fnm_dir {
+            Some(v) => std::env::set_var("FNM_DIR", v),
+            None => std::env::remove_var("FNM_DIR"),
+        }
+        match prev_nvm_home {
+            Some(v) => std::env::set_var("NVM_HOME", v),
+            None => std::env::remove_var("NVM_HOME"),
+        }
+        match prev_volta_home {
+            Some(v) => std::env::set_var("VOLTA_HOME", v),
+            None => std::env::remove_var("VOLTA_HOME"),
+        }
+        match prev_userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
@@ -644,5 +789,134 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = which_first("definitely_not_a_real_tool_xyz", dir.path(), dir.path());
         assert_eq!(result, None);
+    }
+
+    // ── Windows-specific version-manager tests ───────────────────────────────
+
+    #[test]
+    #[cfg(windows)]
+    fn finds_fnm_windows_default_path() {
+        let tmp = tempdir().unwrap();
+        let local_app_data = tmp.path().join("LocalAppData");
+        let app_data = tmp.path().join("AppData");
+        std::fs::create_dir_all(&local_app_data).unwrap();
+        std::fs::create_dir_all(&app_data).unwrap();
+        let expected = fake_fnm_windows(&local_app_data, "18.20.4");
+        with_windows_env(&local_app_data, &app_data, || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(expected.clone()));
+        });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn finds_fnm_windows_via_fnm_dir_env() {
+        let tmp = tempdir().unwrap();
+        let local_app_data = tmp.path().join("LocalAppData");
+        let app_data = tmp.path().join("AppData");
+        let custom_fnm = tmp.path().join("custom_fnm");
+        std::fs::create_dir_all(&local_app_data).unwrap();
+        std::fs::create_dir_all(&app_data).unwrap();
+        let bin = custom_fnm
+            .join("node-versions")
+            .join("v18.20.4")
+            .join("installation");
+        std::fs::create_dir_all(&bin).unwrap();
+        with_windows_env(&local_app_data, &app_data, || {
+            let prev_fnm_dir = std::env::var_os("FNM_DIR");
+            std::env::set_var("FNM_DIR", &custom_fnm);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert_eq!(find_version_manager_bin("18.20.4"), Some(bin.clone()));
+            }));
+            match prev_fnm_dir {
+                Some(v) => std::env::set_var("FNM_DIR", v),
+                None => std::env::remove_var("FNM_DIR"),
+            }
+            if let Err(e) = result {
+                std::panic::resume_unwind(e);
+            }
+        });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn finds_nvm_windows_default_path() {
+        let tmp = tempdir().unwrap();
+        let local_app_data = tmp.path().join("LocalAppData");
+        let app_data = tmp.path().join("AppData");
+        std::fs::create_dir_all(&local_app_data).unwrap();
+        std::fs::create_dir_all(&app_data).unwrap();
+        let expected = fake_nvm_windows(&app_data, "18.20.4");
+        with_windows_env(&local_app_data, &app_data, || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(expected.clone()));
+        });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn finds_volta_windows() {
+        let tmp = tempdir().unwrap();
+        let local_app_data = tmp.path().join("LocalAppData");
+        let app_data = tmp.path().join("AppData");
+        std::fs::create_dir_all(&local_app_data).unwrap();
+        std::fs::create_dir_all(&app_data).unwrap();
+        let expected = fake_volta_windows(&local_app_data);
+        with_windows_env(&local_app_data, &app_data, || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(expected.clone()));
+        });
+    }
+
+    #[test]
+    fn finds_volta_unix() {
+        let home = tempfile::tempdir().unwrap();
+        let volta_bin = home.path().join(".volta").join("bin");
+        std::fs::create_dir_all(&volta_bin).unwrap();
+        with_home(home.path(), || {
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(volta_bin.clone()));
+        });
+    }
+
+    // ── Cross-platform USERPROFILE fallback test ─────────────────────────────
+
+    #[test]
+    fn userprofile_used_as_home_fallback() {
+        let tmp = tempdir().unwrap();
+        let userprofile = tmp.path().join("userprofile");
+        let fnm_bin = userprofile
+            .join(".local/share/fnm/node-versions/v18.20.4/installation/bin");
+        std::fs::create_dir_all(&fnm_bin).unwrap();
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_fnm_dir = std::env::var_os("FNM_DIR");
+
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", &userprofile);
+        std::env::remove_var("FNM_DIR");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq!(
+                find_version_manager_bin("18.20.4"),
+                Some(fnm_bin.clone())
+            );
+        }));
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        match prev_fnm_dir {
+            Some(v) => std::env::set_var("FNM_DIR", v),
+            None => std::env::remove_var("FNM_DIR"),
+        }
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 }
