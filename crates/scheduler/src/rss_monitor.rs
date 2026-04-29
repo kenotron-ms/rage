@@ -92,9 +92,13 @@ mod tests {
             .expect("failed to spawn test subprocess");
 
         let pid = child.id().expect("no pid");
-        let (_stop, handle) = track_peak_rss(pid);
+        let (stop, handle) = track_peak_rss(pid);
 
         let _ = child.wait_with_output().await;
+        // Signal the monitor to stop (matches the pattern in runner.rs; ensures
+        // the blocking task exits within one poll interval even if sysinfo has
+        // stale data for the reaped process).
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let peak = handle.await.unwrap_or(0);
 
         // We can't guarantee a minimum RSS (the process may be too short-lived
