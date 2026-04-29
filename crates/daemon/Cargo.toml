@@ -17,6 +17,8 @@ tokio = { version = "1", features = ["full"] }
 notify = "6"
 blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+pin-project-lite = "0.2"
+thiserror = "1"
 
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"

@@ -9,6 +9,7 @@ pub mod messages;
 pub mod reconciler;
 pub mod socket;
 pub mod state;
+pub mod transport;
 pub mod watcher;
 
 pub use daemon::Daemon;
