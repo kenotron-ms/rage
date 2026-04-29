@@ -5,3 +5,21 @@ Cargo.lock.bak
 
 # Git worktrees (local feature branches with isolated state)
 .worktrees/
+
+# rage build cache (fingerprint files, pathsets, snapshots)
+.rage-cache/
+
+# Build artifact store (content-addressable cache)
+/artifacts/
+
+# Wrangler (Cloudflare Workers) — account cache and credentials
+.wrangler/
+
+# Python / Ruff
+.ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local scratch / work directories
+/work/
