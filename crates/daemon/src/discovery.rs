@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiscoveryFile {
     pub pid: u32,
-    pub unix_socket: PathBuf,
+    pub endpoint: String,
     pub http_port: u16,
     pub start_time: String, // ISO-8601
     pub version: String,
@@ -35,10 +35,6 @@ pub fn discovery_path(workspace: &Path) -> Result<PathBuf> {
     Ok(daemons_dir()?.join(format!("{}.json", workspace_hash(workspace))))
 }
 
-pub fn socket_path(workspace: &Path) -> Result<PathBuf> {
-    Ok(daemons_dir()?.join(format!("{}.sock", workspace_hash(workspace))))
-}
-
 pub fn write_discovery(workspace: &Path, d: &DiscoveryFile) -> Result<()> {
     let path = discovery_path(workspace)?;
     let json = serde_json::to_string_pretty(d).context("serialising DiscoveryFile")?;
@@ -60,12 +56,11 @@ pub fn read_discovery(workspace: &Path) -> Result<Option<DiscoveryFile>> {
     }
 }
 
-/// Deletes the `.json` discovery file and the `.sock` file (if present).
+/// Deletes the `.json` discovery file for this workspace. Best-effort.
+/// The transport-level endpoint (Unix socket file or Windows named pipe)
+/// is owned and cleaned up by `DaemonServer` itself.
 pub fn delete_discovery(workspace: &Path) -> Result<()> {
     let json_path = discovery_path(workspace)?;
-    let sock_path = socket_path(workspace)?;
-
-    // Remove the JSON discovery file; ignore not-found
     match std::fs::remove_file(&json_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -74,16 +69,6 @@ pub fn delete_discovery(workspace: &Path) -> Result<()> {
                 .with_context(|| format!("deleting discovery file {}", json_path.display()))
         }
     }
-
-    // Remove the socket file; ignore not-found
-    match std::fs::remove_file(&sock_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(e).with_context(|| format!("deleting socket file {}", sock_path.display()))
-        }
-    }
-
     Ok(())
 }
 
@@ -128,7 +113,11 @@ mod tests {
 
         let d = DiscoveryFile {
             pid: 12345,
-            unix_socket: tmp.path().join("daemon.sock"),
+            endpoint: tmp
+                .path()
+                .join("daemon.sock")
+                .to_string_lossy()
+                .into_owned(),
             http_port: 8080,
             start_time: "2026-04-24T00:00:00Z".to_string(),
             version: "0.0.0".to_string(),

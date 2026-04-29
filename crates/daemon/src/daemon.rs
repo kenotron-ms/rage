@@ -1,7 +1,7 @@
 use crate::discovery::{self, DiscoveryFile};
 use crate::messages::{DaemonMessage, DaemonResponse};
 use crate::reconciler::{self, ReconcilerHandle};
-use crate::socket::UnixSocketServer;
+use crate::transport::DaemonServer;
 use crate::watcher::FileWatcher;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -21,14 +21,13 @@ impl Daemon {
     }
 
     pub async fn run(self) -> Result<()> {
-        let socket_path = discovery::socket_path(&self.workspace)?;
-        let server = UnixSocketServer::bind(&socket_path)?;
+        let (server, endpoint) = DaemonServer::bind(&self.workspace)?;
         let (http_listener, http_port) = crate::http::bind_dynamic()
             .await
             .context("binding HTTP listener")?;
         let discovery_file = DiscoveryFile {
             pid: std::process::id(),
-            unix_socket: socket_path.clone(),
+            endpoint: endpoint.clone(),
             http_port,
             start_time: chrono::Utc::now().to_rfc3339(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -85,35 +84,34 @@ impl Daemon {
                 }
             });
         }
-        server
-            .serve({
+        crate::socket::serve(server, {
+            let handle = handle.clone();
+            let activity = last_activity.clone();
+            move |msg: DaemonMessage| {
                 let handle = handle.clone();
-                let activity = last_activity.clone();
-                move |msg: DaemonMessage| {
-                    let handle = handle.clone();
-                    let activity = activity.clone();
-                    async move {
-                        *activity.lock().await = std::time::Instant::now();
-                        match msg {
-                            DaemonMessage::SetDesiredState(d) => handle.set_desired(d),
-                            DaemonMessage::RetryTask { package, script } => {
-                                handle.retry_task(package, script)
-                            }
-                            DaemonMessage::Shutdown => {
-                                std::process::exit(0);
-                            }
-                            DaemonMessage::GetState => {}
+                let activity = activity.clone();
+                async move {
+                    *activity.lock().await = std::time::Instant::now();
+                    match msg {
+                        DaemonMessage::SetDesiredState(d) => handle.set_desired(d),
+                        DaemonMessage::RetryTask { package, script } => {
+                            handle.retry_task(package, script)
                         }
-                        let arc = handle.state();
-                        let s = arc.lock().await;
-                        DaemonResponse {
-                            state: s.state.kind,
-                            tasks: s.tasks.clone(),
+                        DaemonMessage::Shutdown => {
+                            std::process::exit(0);
                         }
+                        DaemonMessage::GetState => {}
+                    }
+                    let arc = handle.state();
+                    let s = arc.lock().await;
+                    DaemonResponse {
+                        state: s.state.kind,
+                        tasks: s.tasks.clone(),
                     }
                 }
-            })
-            .await
+            }
+        })
+        .await
     }
 }
 

@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use daemon::transport::{daemon_connect, DaemonError, DaemonStream};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -194,7 +195,15 @@ async fn main() -> Result<()> {
             to,
         } => {
             let root = resolve_workspace(workspace_pos, workspace);
-            cmd_run(&root, &script, no_cache, since.as_deref(), affected, to.as_deref()).await
+            cmd_run(
+                &root,
+                &script,
+                no_cache,
+                since.as_deref(),
+                affected,
+                to.as_deref(),
+            )
+            .await
         }
         Command::Daemon {
             workspace,
@@ -287,21 +296,28 @@ fn cmd_graph(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Connect to the workspace's daemon, spawning it if necessary.
+async fn ensure_daemon(root: &Path) -> Result<DaemonStream> {
+    match daemon_connect(root).await {
+        Ok(stream) => Ok(stream),
+        Err(DaemonError::NotRunning) | Err(DaemonError::Stale) => {
+            spawn_detached_daemon(root)?;
+            for _ in 0..50 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Ok(stream) = daemon_connect(root).await {
+                    return Ok(stream);
+                }
+            }
+            anyhow::bail!("daemon failed to start within 5 seconds")
+        }
+        Err(DaemonError::Transport(e)) => Err(anyhow::anyhow!("daemon transport error: {e}")),
+    }
+}
+
 async fn cmd_dev(root: &Path, script: &str, target: Option<Vec<String>>) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-    let socket_path = daemon::discovery::socket_path(root)?;
-    if !socket_path.exists() {
-        spawn_detached_daemon(root)?;
-        for _ in 0..50 {
-            if socket_path.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }
-    let stream = UnixStream::connect(&socket_path).await?;
-    let (read, mut write) = stream.into_split();
+    let stream = ensure_daemon(root).await?;
+    let (read, mut write) = tokio::io::split(stream);
     let msg = serde_json::json!({
         "type": "SetDesiredState",
         "workspace": root,
@@ -322,14 +338,24 @@ async fn cmd_dev(root: &Path, script: &str, target: Option<Vec<String>>) -> Resu
 
 async fn cmd_status(root: &Path) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-    let socket_path = daemon::discovery::socket_path(root)?;
-    if !socket_path.exists() {
-        eprintln!("no daemon running for {}", root.display());
-        return Ok(());
-    }
-    let stream = UnixStream::connect(&socket_path).await?;
-    let (read, mut write) = stream.into_split();
+    let stream = match daemon_connect(root).await {
+        Ok(s) => s,
+        Err(DaemonError::NotRunning) => {
+            eprintln!("no daemon running for {}", root.display());
+            return Ok(());
+        }
+        Err(DaemonError::Stale) => {
+            eprintln!(
+                "no daemon running for {} (stale discovery file removed)",
+                root.display()
+            );
+            return Ok(());
+        }
+        Err(DaemonError::Transport(e)) => {
+            return Err(anyhow::anyhow!("daemon transport error: {e}"));
+        }
+    };
+    let (read, mut write) = tokio::io::split(stream);
     write.write_all(b"{\"type\":\"GetState\"}\n").await?;
     write.shutdown().await.ok();
     let mut lines = BufReader::new(read).lines();
