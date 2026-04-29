@@ -9,6 +9,7 @@ pub mod postinstall_cache;
 pub mod resource_budget;
 pub mod rss_monitor;
 pub mod runner;
+pub mod shell;
 pub mod task;
 
 pub use runner::{compute_task_levels, run_tasks, run_tasks_two_phase, RunError};

@@ -80,6 +80,7 @@ pub fn track_peak_rss(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn tracks_own_process_rss() {
         // Spin up a short-lived subprocess that just sleeps for 200 ms,
@@ -91,7 +92,7 @@ mod tests {
             .expect("failed to spawn test subprocess");
 
         let pid = child.id().expect("no pid");
-        let handle = track_peak_rss(pid);
+        let (_stop, handle) = track_peak_rss(pid);
 
         let _ = child.wait_with_output().await;
         let peak = handle.await.unwrap_or(0);
@@ -104,7 +105,7 @@ mod tests {
     #[tokio::test]
     async fn returns_zero_for_nonexistent_pid() {
         // PID 0 is not a valid user process on macOS or Linux.
-        let handle = track_peak_rss(0);
+        let (_stop, handle) = track_peak_rss(0);
         let peak = handle.await.unwrap_or(0);
         assert_eq!(peak, 0, "nonexistent pid should yield 0 bytes");
     }

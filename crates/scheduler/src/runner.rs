@@ -233,9 +233,7 @@ async fn run_single_task(
 
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(&task.command)
+    let status = crate::shell::command(&task.command)
         .current_dir(&task.cwd)
         .env("PATH", &new_path)
         .status()
@@ -311,9 +309,7 @@ async fn run_root_task_legacy(
     let start = Instant::now();
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(&task.command)
+    let status = crate::shell::command(&task.command)
         .current_dir(&task.cwd)
         .env("PATH", &new_path)
         .status()
@@ -907,10 +903,8 @@ async fn run_single_task_two_phase(
             let new_path =
                 crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
             let builder = {
-                let mut cmd = Command::new("sh");
-                cmd.arg("-c")
-                    .arg(&task.command)
-                    .current_dir(&task.cwd)
+                let mut cmd = crate::shell::command(&task.command);
+                cmd.current_dir(&task.cwd)
                     .env("PATH", &new_path);
                 cmd
             };
@@ -957,10 +951,8 @@ async fn run_single_task_two_phase(
                         &system_path2,
                     );
                     let builder2 = {
-                        let mut cmd = Command::new("sh");
-                        cmd.arg("-c")
-                            .arg(&task.command)
-                            .current_dir(&task.cwd)
+                        let mut cmd = crate::shell::command(&task.command);
+                        cmd.current_dir(&task.cwd)
                             .env("PATH", &new_path2);
                         cmd
                     };
@@ -1194,9 +1186,7 @@ async fn run_root_task_two_phase(
     let start = Instant::now();
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(&task.command)
+    let status = crate::shell::command(&task.command)
         .current_dir(&task.cwd)
         .env("PATH", &new_path)
         .status()

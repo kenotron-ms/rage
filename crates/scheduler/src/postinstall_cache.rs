@@ -194,9 +194,7 @@ pub fn run_postinstall(
 ) -> std::io::Result<bool> {
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, workspace_root, &system_path);
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&task.script)
+    let status = crate::shell::std_command(&task.script)
         .current_dir(&task.cwd)
         .env("PATH", new_path)
         .status()?;
