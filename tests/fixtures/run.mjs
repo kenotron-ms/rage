@@ -30,9 +30,9 @@ const FIXTURES = [
     steps: [
       { run: true },
       { assert: { 'pkg-a': 1, 'pkg-b': 1, 'pkg-c': 1, 'pkg-d': 1 } },
-      { mutate: 'packages/pkg-a/src/index.ts', append: '\n// cache-bust' },
+      { mutate: 'packages/pkg-a/src/index.ts', append: '\nexport const _cacheBust = 1;' },
       { run: true },
-      { assert: { 'pkg-a': 2, 'pkg-b': 2, 'pkg-c': 2, 'pkg-d': 1 } },
+      { assert: { 'pkg-a': 2, 'pkg-b': 2, 'pkg-c': 1, 'pkg-d': 1 } },
     ],
   },
   {
@@ -128,6 +128,13 @@ async function executeStep(step, fixtureDir, fixtureName) {
       if (!ok) allPassed = false;
     }
     return allPassed;
+  }
+
+  if (step.mutate !== undefined) {
+    const filePath = join(fixtureDir, step.mutate);
+    appendFileSync(filePath, step.append ?? '\n// cache-bust');
+    console.log(`  Mutated ${step.mutate}`);
+    return true;
   }
 
   console.error('  FAIL: unknown step type');

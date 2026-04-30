@@ -1530,7 +1530,7 @@ fn resolve_output_globs(cwd: &std::path::Path, output_globs: &[String]) -> Vec<s
     // since scheduler depends on cache which depends on globset, we can
     // use a simple path-matching approach here.
     let mut results = Vec::new();
-    const SKIP_DIRS: &[&str] = &["node_modules", "target", "dist", ".git"];
+    const SKIP_DIRS: &[&str] = &["node_modules", "target", ".git"];
 
     for entry in WalkDir::new(cwd)
         .into_iter()
