@@ -44,7 +44,7 @@ pub struct DagStats {
 /// In-memory task dependency graph and state machine.
 pub struct HubDag {
     tasks: HashMap<String, TaskNode>,
-    states: HashMap<String, TaskState>,
+    pub(crate) states: HashMap<String, TaskState>,
     /// task_id → set of task_ids that depend on it (reverse deps)
     rdeps: HashMap<String, HashSet<String>>,
     /// queue of Ready tasks in approximate topological order
@@ -105,13 +105,46 @@ impl HubDag {
         self.unblock_dependents(task_id)
     }
 
-    /// Mark a task as failed. Returns task_ids that are now Ready (if any).
+    /// Mark a task as failed and transitively fail all tasks that depend on it.
+    /// Returns the list of newly-failed task IDs (NOT including `task_id` itself).
     pub fn mark_failed(&mut self, task_id: &str, error: &str) -> Vec<String> {
         self.states
             .insert(task_id.to_string(), TaskState::Failed(error.to_string()));
-        // In simple mode: unblock dependents anyway (they'll fail too when trying to run)
-        // For now, we don't unblock dependents of failed tasks.
-        Vec::new()
+
+        let mut newly_failed: Vec<String> = Vec::new();
+        let mut frontier: VecDeque<String> = VecDeque::new();
+        frontier.push_back(task_id.to_string());
+
+        while let Some(current) = frontier.pop_front() {
+            let dependents: Vec<String> = self
+                .rdeps
+                .get(&current)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+
+            for dep_id in dependents {
+                // Only cascade into tasks that haven't already settled.
+                match self.states.get(&dep_id) {
+                    Some(TaskState::Completed) | Some(TaskState::Failed(_)) => continue,
+                    _ => {}
+                }
+                self.states.insert(
+                    dep_id.clone(),
+                    TaskState::Failed(format!("dependency {current} failed")),
+                );
+                newly_failed.push(dep_id.clone());
+                frontier.push_back(dep_id);
+            }
+        }
+
+        // Drop any cascaded-failed tasks from the ready queue so they aren't dispatched.
+        let states_ref = &self.states;
+        self.ready_queue
+            .retain(|id| !matches!(states_ref.get(id), Some(TaskState::Failed(_))));
+
+        newly_failed
     }
 
     fn unblock_dependents(&mut self, completed_task: &str) -> Vec<String> {
@@ -273,5 +306,62 @@ mod tests {
         let (id, err) = dag.first_failure().unwrap();
         assert_eq!(id, "a");
         assert!(err.contains("exit code 1"));
+    }
+
+    #[test]
+    fn mark_failed_cascades_to_dependents() {
+        // a -> b -> c, plus d (independent of a/b/c).
+        // When a fails, b and c must also be marked Failed transitively.
+        // d must remain Ready.  is_done() must return true.
+        let tasks = vec![
+            task("a", vec![]),
+            task("b", vec!["a"]),
+            task("c", vec!["b"]),
+            task("d", vec![]),
+        ];
+        let mut dag = HubDag::new(tasks);
+
+        // Dispatch and fail a.
+        let dispatched = dag.dispatch_next("w1").unwrap();
+        assert!(dispatched.task_id == "a" || dispatched.task_id == "d");
+        // Drive deterministically: keep dispatching until we've pulled "a", then fail it.
+        let mut ids_dispatched = vec![dispatched.task_id.clone()];
+        if dispatched.task_id != "a" {
+            let next = dag.dispatch_next("w2").unwrap();
+            ids_dispatched.push(next.task_id.clone());
+        }
+        dag.mark_failed("a", "boom");
+
+        // b and c must now be Failed (transitive cascade).
+        assert!(
+            matches!(dag.states.get("b"), Some(TaskState::Failed(_))),
+            "b should cascade to Failed when its dep a fails, got {:?}",
+            dag.states.get("b")
+        );
+        assert!(
+            matches!(dag.states.get("c"), Some(TaskState::Failed(_))),
+            "c should cascade to Failed transitively, got {:?}",
+            dag.states.get("c")
+        );
+
+        // d is independent and must NOT be touched.
+        let d_state = dag.states.get("d").unwrap();
+        assert!(
+            matches!(d_state, TaskState::Ready | TaskState::Dispatched(_) | TaskState::Completed),
+            "d should be unaffected by a's failure, got {:?}",
+            d_state
+        );
+
+        // After completing/failing whatever's left of d, the DAG must report done.
+        if matches!(d_state, TaskState::Ready) {
+            let _ = dag.dispatch_next("w3");
+        }
+        if matches!(dag.states.get("d"), Some(TaskState::Dispatched(_))) {
+            dag.mark_complete("d");
+        }
+        assert!(
+            dag.is_done(),
+            "is_done() must be true once every task is Completed or Failed"
+        );
     }
 }
