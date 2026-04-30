@@ -1,0 +1,11 @@
+{
+  "name": "@fix-ep/pkg-a",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc --build && node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});const n=+(fs.existsSync('dist/run-count.txt')?fs.readFileSync('dist/run-count.txt','utf8').trim():'0')+1;fs.writeFileSync('dist/run-count.txt',String(n))\""
+  },
+  "dependencies": {}
+}
