@@ -1283,3 +1283,59 @@ fn diamond_dep_fixture_structure() {
         "pkg-app must depend on pkg-b"
     );
 }
+
+// ── Lockfile audit ────────────────────────────────────────────────────────────
+
+/// Every independent fixture workspace must have its own `pnpm-lock.yaml`.
+///
+/// These lockfiles are checked in so that CI can install dependencies
+/// reproducibly without network access.  If a fixture is missing its lockfile,
+/// run `pnpm install` inside that directory and commit the result.
+#[test]
+fn fixture_lockfiles_all_present() {
+    let fixtures = e2e_fixtures_dir();
+    let expected = [
+        "cache-correctness",
+        "diamond-dep",
+        "distributed",
+        "error-propagation",
+        "partial-rebuild",
+    ];
+
+    for name in &expected {
+        let lockfile = fixtures.join(name).join("pnpm-lock.yaml");
+        assert!(
+            lockfile.exists(),
+            "missing lockfile: {}\n\
+             Fix: cd tests/fixtures/{} && pnpm install",
+            lockfile.display(),
+            name
+        );
+    }
+}
+
+/// There must be no stray `pnpm-lock.yaml` or `node_modules` directly under
+/// `tests/fixtures/`.  Each fixture is an independent pnpm workspace; there
+/// is no parent workspace at `tests/fixtures/` level.
+#[test]
+fn no_stray_files_at_fixtures_root() {
+    let fixtures = e2e_fixtures_dir();
+
+    let stray_lockfile = fixtures.join("pnpm-lock.yaml");
+    assert!(
+        !stray_lockfile.exists(),
+        "stray file found: {}\n\
+         Fix: rm -f {}",
+        stray_lockfile.display(),
+        stray_lockfile.display()
+    );
+
+    let stray_nm = fixtures.join("node_modules");
+    assert!(
+        !stray_nm.exists(),
+        "stray directory found: {}\n\
+         Fix: rm -rf {}",
+        stray_nm.display(),
+        stray_nm.display()
+    );
+}
