@@ -1153,3 +1153,74 @@ async fn pnpm_second_run_restores_from_cas_after_node_modules_wipe() {
         eprintln!("note: pnpm fixture has no scoped packages — scoped layout assertion skipped");
     }
 }
+
+// ── diamond-dep fixture structure test ────────────────────────────────────────
+
+fn e2e_fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap() // crates/
+        .parent()
+        .unwrap() // workspace root
+        .join("tests")
+        .join("fixtures")
+}
+
+#[test]
+fn diamond_dep_fixture_structure() {
+    let base = e2e_fixtures_dir().join("diamond-dep");
+
+    // Root files
+    assert!(base.join("package.json").exists(), "missing diamond-dep/package.json");
+    assert!(base.join("pnpm-workspace.yaml").exists(), "missing diamond-dep/pnpm-workspace.yaml");
+    assert!(base.join("tsconfig.base.json").exists(), "missing diamond-dep/tsconfig.base.json");
+    assert!(base.join(".gitignore").exists(), "missing diamond-dep/.gitignore");
+
+    // Four packages
+    let pkgs = base.join("packages");
+    for pkg in &["pkg-shared", "pkg-a", "pkg-b", "pkg-app"] {
+        let p = pkgs.join(pkg);
+        assert!(p.exists(), "missing package directory: {pkg}");
+        assert!(p.join("package.json").exists(), "missing {pkg}/package.json");
+        assert!(p.join("tsconfig.json").exists(), "missing {pkg}/tsconfig.json");
+        assert!(p.join("src").join("index.ts").exists(), "missing {pkg}/src/index.ts");
+    }
+
+    // Verify scope names in package.json files
+    let root_pkg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(base.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(root_pkg["name"], "@fix-dd/root", "root package name mismatch");
+
+    // Verify diamond dependency graph via package.json dependencies
+    let pkg_a: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(pkgs.join("pkg-a").join("package.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        pkg_a["dependencies"]["@fix-dd/pkg-shared"].as_str().is_some(),
+        "pkg-a must depend on pkg-shared"
+    );
+
+    let pkg_b: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(pkgs.join("pkg-b").join("package.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        pkg_b["dependencies"]["@fix-dd/pkg-shared"].as_str().is_some(),
+        "pkg-b must depend on pkg-shared"
+    );
+
+    let pkg_app: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(pkgs.join("pkg-app").join("package.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        pkg_app["dependencies"]["@fix-dd/pkg-a"].as_str().is_some(),
+        "pkg-app must depend on pkg-a"
+    );
+    assert!(
+        pkg_app["dependencies"]["@fix-dd/pkg-b"].as_str().is_some(),
+        "pkg-app must depend on pkg-b"
+    );
+}
