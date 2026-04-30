@@ -78,6 +78,76 @@ function assert(condition, message) {
   }
 }
 
+const installed = new Set();
+
+function ensureInstalled(fixtureDir) {
+  if (installed.has(fixtureDir)) return;
+  console.log('Installing pnpm deps in ' + fixtureDir + '...');
+  execSync('pnpm install --frozen-lockfile', { cwd: fixtureDir, stdio: 'inherit' });
+  installed.add(fixtureDir);
+}
+
+function runRage(fixtureDir, { expectFailure = false } = {}) {
+  try {
+    execSync(`"${RAGE_BIN}" run build "${fixtureDir}"`, { cwd: fixtureDir, stdio: 'inherit' });
+    if (expectFailure) {
+      console.error('  FAIL: rage exited zero but expected non-zero');
+      return false;
+    } else {
+      return true;
+    }
+  } catch (e) {
+    if (expectFailure) {
+      console.log('  PASS: rage exited non-zero as expected');
+      return true;
+    } else {
+      console.error('  FAIL: ' + e.message);
+      return false;
+    }
+  }
+}
+
+// --- Core step executor ---
+
+async function executeStep(step, fixtureDir, fixtureName) {
+  if (step.run !== undefined) {
+    ensureInstalled(fixtureDir);
+    return runRage(fixtureDir, { expectFailure: step.expectFailure ?? false });
+  }
+
+  if (step.assert !== undefined) {
+    let allPassed = true;
+    for (const [pkg, expected] of Object.entries(step.assert)) {
+      const actual = readCounter(fixtureDir, pkg);
+      let ok;
+      if (expected === null) {
+        ok = assert(actual === null, `${pkg}: counter file must be absent (got ${actual})`);
+      } else {
+        ok = assert(actual === expected, `${pkg}: counter=${actual}, expected=${expected}`);
+      }
+      if (!ok) allPassed = false;
+    }
+    return allPassed;
+  }
+
+  console.error('  FAIL: unknown step type');
+  return false;
+}
+
+// --- Fixture runner ---
+
+async function runFixture(fixture) {
+  const fixtureDir = join(__dirname, fixture.name);
+  console.log('\n=== ' + fixture.name + ' ===');
+
+  // Standard mode
+  for (const step of fixture.steps) {
+    const ok = await executeStep(step, fixtureDir, fixture.name);
+    if (!ok) return false;
+  }
+  return true;
+}
+
 // --- Entry point ---
 
 async function main() {
@@ -100,7 +170,37 @@ async function main() {
     process.exit(allOk ? 0 : 1);
   }
 
-  // TODO: implement in Task 3
+  // Parse --fixture <name> flag
+  const args = process.argv.slice(2);
+  let fixtureName = null;
+  const fixtureIdx = args.indexOf('--fixture');
+  if (fixtureIdx !== -1) {
+    fixtureName = args[fixtureIdx + 1];
+  }
+
+  const toRun = fixtureName
+    ? FIXTURES.filter(f => f.name === fixtureName)
+    : FIXTURES;
+
+  if (toRun.length === 0) {
+    console.error('No fixture found: ' + fixtureName);
+    process.exit(1);
+  }
+
+  const failures = [];
+  for (const fixture of toRun) {
+    const ok = await runFixture(fixture);
+    if (!ok) failures.push(fixture.name);
+  }
+
+  console.log('\n=== SUMMARY ===');
+  if (failures.length === 0) {
+    console.log('All ' + toRun.length + ' fixture(s) PASSED.');
+    process.exit(0);
+  } else {
+    console.error('FAILED: ' + failures.join(', '));
+    process.exit(1);
+  }
 }
 
 main().catch(err => {
