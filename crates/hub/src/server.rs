@@ -26,7 +26,7 @@ struct HubState {
 /// The hub gRPC server.
 #[derive(Clone)]
 pub struct HubServer {
-    pub(crate) state: Arc<Mutex<HubState>>,
+    state: Arc<Mutex<HubState>>,
     token: String,
     notify: Arc<Notify>,
     workspace: PathBuf,
