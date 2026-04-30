@@ -1,1 +1,8 @@
-{"name": "@fix-cc/root", "version": "1.0.0", "private": true}
+{
+  "name": "@fix-cc/root",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
