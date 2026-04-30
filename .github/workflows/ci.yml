@@ -216,5 +216,11 @@ jobs:
       - name: Run Windows smoke test
         run: |
           $env:RAGE_CACHE_DIR = "C:\Temp\rage-ci-cache"
-          .\target\release\rage.exe run build . 2>&1 | Select-String "workspace|FAILED|cached|restored"
+          $output = .\target\release\rage.exe run build . 2>&1
+          $rageExit = $LASTEXITCODE
+          $output | Select-String "workspace|FAILED|cached|restored"
+          if ($rageExit -ne 0) {
+            Write-Host "rage.exe exited with $rageExit"
+            exit $rageExit
+          }
         shell: pwsh
