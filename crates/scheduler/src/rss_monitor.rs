@@ -21,9 +21,8 @@
 //! when actual usage is lower than estimated — mirroring BuildXL's
 //! live-resource-feedback loop.
 
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use std::time::Duration;
-use tokio::time::interval;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Spawn a background Tokio task that tracks peak RSS for `pid`.
 ///
@@ -38,7 +37,10 @@ use tokio::time::interval;
 /// the JoinHandle always resolves promptly.
 pub fn track_peak_rss(
     pid: u32,
-) -> (std::sync::Arc<std::sync::atomic::AtomicBool>, tokio::task::JoinHandle<u64>) {
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tokio::task::JoinHandle<u64>,
+) {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_clone = std::sync::Arc::clone(&stop);
 

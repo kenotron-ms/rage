@@ -430,8 +430,7 @@ mod tests {
         let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
 
         let skip = vec!["@fixture/core".to_string()];
-        let tasks =
-            build_task_list_filtered(&dag, "build", &root, &plugins, &skip).unwrap();
+        let tasks = build_task_list_filtered(&dag, "build", &root, &plugins, &skip).unwrap();
 
         assert!(
             tasks.iter().all(|t| t.package_name != "@fixture/core"),
@@ -466,12 +465,11 @@ mod tests {
             policies: vec![],
             plugins_config: HashMap::new(),
             pipeline,
-                    max_concurrency: None,
+            max_concurrency: None,
         };
 
         let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
-        let tasks =
-            build_task_list_with_config(&dag, "build", &root, &plugins, &cfg).unwrap();
+        let tasks = build_task_list_with_config(&dag, "build", &root, &plugins, &cfg).unwrap();
 
         assert!(
             tasks.iter().all(|t| t.package_name != "@fixture/core"),

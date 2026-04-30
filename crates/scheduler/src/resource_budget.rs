@@ -69,14 +69,16 @@ impl MemoryBudget {
     /// so the budget naturally shrinks on busy machines.
     pub fn from_system() -> Self {
         use sysinfo::{MemoryRefreshKind, RefreshKind, System};
-        let mut sys =
-            System::new_with_specifics(RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()));
+        let mut sys = System::new_with_specifics(
+            RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+        );
         sys.refresh_memory();
 
         let total = sys.total_memory();
         let available = sys.available_memory().max(1);
-        let cpu_count =
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as u64;
+        let cpu_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4) as u64;
 
         // 75 % of currently-available memory
         let capacity = available * 3 / 4;
@@ -168,14 +170,15 @@ fn release_budget(state: &Mutex<BudgetState>, notify: &Notify, bytes: u64) {
 }
 
 impl MemoryGuard {
-    /// Release the reservation using `actual_peak_bytes` for accounting.
+    /// Release the reservation using the original estimate for accounting.
     ///
-    /// If `actual_peak_bytes` is 0 (measurement failed), the original
-    /// estimate is used.  After this call, the guard is a no-op on drop.
-    pub fn release_with_actual(mut self, actual_peak_bytes: u64) {
+    /// `actual_peak_bytes` is accepted for future statistics tracking but the
+    /// full reserved amount is always freed from `committed_bytes`; the
+    /// reservation was for the *estimate*, not the actual usage.
+    /// After this call, the guard is a no-op on drop.
+    pub fn release_with_actual(mut self, _actual_peak_bytes: u64) {
         if let Some((state, notify, reserved)) = self.inner.take() {
-            let amount = if actual_peak_bytes > 0 { actual_peak_bytes } else { reserved };
-            release_budget(&state, &notify, amount);
+            release_budget(&state, &notify, reserved);
         }
     }
 }
@@ -258,12 +261,9 @@ mod tests {
         // Release one task → the waiter should now proceed
         drop(g1);
         // g2 still holds 512 MB; remaining = 512 MB > 1 MB needed
-        let g3 = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            b.reserve(1_048_576),
-        )
-        .await
-        .expect("should get budget after g1 released");
+        let g3 = tokio::time::timeout(std::time::Duration::from_millis(100), b.reserve(1_048_576))
+            .await
+            .expect("should get budget after g1 released");
         drop(g2);
         drop(g3);
         assert_eq!(b.committed_bytes(), 0);

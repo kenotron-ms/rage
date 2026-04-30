@@ -187,10 +187,7 @@ pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
         // (no `bin/` subdirectory — node.exe sits directly in `installation\`.)
         let fnm_dir = std::env::var_os("FNM_DIR")
             .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|p| PathBuf::from(p).join("fnm"))
-            });
+            .or_else(|| std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("fnm")));
         if let Some(fnm_dir) = fnm_dir {
             let versions_dir = fnm_dir.join("node-versions");
             if let Some(ver_dir) = resolve_version_dir(&versions_dir, version) {
@@ -205,9 +202,7 @@ pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
         // Layout: <nvm>\v{ver}\ (node.exe directly in version dir)
         let nvm_home = std::env::var_os("NVM_HOME")
             .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("nvm"))
-            });
+            .or_else(|| std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("nvm")));
         if let Some(nvm_dir) = nvm_home {
             if let Some(ver_dir) = resolve_version_dir(&nvm_dir, version) {
                 if ver_dir.is_dir() {
@@ -220,8 +215,7 @@ pub fn find_version_manager_bin(version: &str) -> Option<PathBuf> {
         let volta_bin = std::env::var_os("VOLTA_HOME")
             .map(|p| PathBuf::from(p).join("bin"))
             .or_else(|| {
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|p| PathBuf::from(p).join("Volta").join("bin"))
+                std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("Volta").join("bin"))
             });
         if let Some(bin) = volta_bin {
             if bin.is_dir() {
@@ -881,8 +875,7 @@ mod tests {
     fn userprofile_used_as_home_fallback() {
         let tmp = tempdir().unwrap();
         let userprofile = tmp.path().join("userprofile");
-        let fnm_bin = userprofile
-            .join(".local/share/fnm/node-versions/v18.20.4/installation/bin");
+        let fnm_bin = userprofile.join(".local/share/fnm/node-versions/v18.20.4/installation/bin");
         std::fs::create_dir_all(&fnm_bin).unwrap();
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -896,10 +889,7 @@ mod tests {
         std::env::remove_var("FNM_DIR");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assert_eq!(
-                find_version_manager_bin("18.20.4"),
-                Some(fnm_bin.clone())
-            );
+            assert_eq!(find_version_manager_bin("18.20.4"), Some(fnm_bin.clone()));
         }));
 
         match prev_home {

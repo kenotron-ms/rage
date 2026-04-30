@@ -34,9 +34,7 @@ pub fn collect_file_protocol_paths(lockfile_content: &str, workspace_root: &Path
         let path_start = file_pos + "@file:".len(); // points at the leading "./"
         let path_str = &rest[path_start..];
         // The path ends at the first '#' (hash separator) or '"' (closing quote)
-        let path_end = path_str
-            .find(|c: char| c == '#' || c == '"')
-            .unwrap_or(path_str.len());
+        let path_end = path_str.find(['#', '"']).unwrap_or(path_str.len());
         let rel = &path_str[..path_end];
         if rel.is_empty() {
             continue;
@@ -794,7 +792,11 @@ mod tests {
 "#;
         let root = std::path::Path::new("/ws");
         let paths = collect_file_protocol_paths(content, root);
-        assert_eq!(paths.len(), 1, "duplicate tarball path must be deduplicated");
+        assert_eq!(
+            paths.len(),
+            1,
+            "duplicate tarball path must be deduplicated"
+        );
     }
 
     #[test]
@@ -832,7 +834,10 @@ mod tests {
         let root = std::path::Path::new("/ws");
         let paths = collect_file_protocol_paths(content, root);
         assert_eq!(paths.len(), 2);
-        let path_strs: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let path_strs: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
         assert!(path_strs.iter().any(|s| s.contains("react-start.tgz")));
         assert!(path_strs.iter().any(|s| s.contains("react-router.tgz")));
     }

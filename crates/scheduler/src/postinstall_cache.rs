@@ -7,7 +7,6 @@
 //! Restore uses hardlinks from CAS and `set_permissions`. An empty delta returns
 //! `Ok(false)` without touching the CAS. Deletions are not tracked.
 
-
 /// Whether a filesystem entry is a regular file or a symlink.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileKind {
@@ -100,12 +99,12 @@ pub fn capture_dir(
 
 /// Return the subset of `after` whose entries are new or changed relative to `before`.
 /// Deletions (paths only in `before`) are not returned.
-pub fn diff_manifests(
-    before: &[ManifestEntry],
-    after: &[ManifestEntry],
-) -> PostinstallManifest {
+pub fn diff_manifests(before: &[ManifestEntry], after: &[ManifestEntry]) -> PostinstallManifest {
     let before_map: std::collections::HashMap<&std::path::PathBuf, (&[u8; 32], u32, &FileKind)> =
-        before.iter().map(|e| (&e.rel_path, (&e.content_hash, e.mode, &e.kind))).collect();
+        before
+            .iter()
+            .map(|e| (&e.rel_path, (&e.content_hash, e.mode, &e.kind)))
+            .collect();
     after
         .iter()
         .filter(|e| match before_map.get(&e.rel_path) {
@@ -177,10 +176,6 @@ mod key_tests {
     }
 }
 
-
-
-
-
 /// Run `task.script` via `sh -c` in `task.cwd`, with `node_modules/.bin` on PATH.
 ///
 /// `workspace_root` is needed to build the full PATH (package-local + workspace-root
@@ -244,8 +239,6 @@ mod run_tests {
     }
 }
 
-
-
 /// Serialize `delta` as JSON and store it in `store` under the postinstall `key`.
 ///
 /// Returns `Ok(false)` without writing anything when `delta` is empty — this prevents
@@ -277,7 +270,7 @@ pub fn store_empty_sentinel(
     let bytes = b"{\"empty\":true}";
     store
         .put_bytes_keyed(*key, bytes)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .map_err(std::io::Error::other)
 }
 
 /// Look up `key` in CAS. If absent, return `Ok(false)`. Otherwise deserialize the
@@ -320,10 +313,7 @@ pub fn restore_manifest(
                         std::fs::copy(&cas_path, &dest)?;
                     }
                 }
-                std::fs::set_permissions(
-                    &dest,
-                    std::fs::Permissions::from_mode(entry.mode),
-                )?;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(entry.mode))?;
             }
             FileKind::Symlink(target) => {
                 let _ = std::fs::remove_file(&dest);
@@ -333,16 +323,6 @@ pub fn restore_manifest(
     }
     Ok(true)
 }
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod manifest_type_tests {
@@ -388,7 +368,10 @@ mod manifest_type_tests {
         let manifest: PostinstallManifest = vec![];
         let json = serde_json::to_string(&manifest).expect("serialize");
         let decoded: PostinstallManifest = serde_json::from_str(&json).expect("deserialize");
-        assert!(decoded.is_empty(), "expected empty manifest after roundtrip");
+        assert!(
+            decoded.is_empty(),
+            "expected empty manifest after roundtrip"
+        );
     }
 }
 
@@ -408,7 +391,10 @@ mod capture_dir_tests {
         let store = make_store(store_dir.path());
         let nonexistent = store_dir.path().join("does_not_exist");
         let manifest = capture_dir(&nonexistent, &store).unwrap();
-        assert!(manifest.is_empty(), "expected empty manifest for nonexistent dir, got {manifest:?}");
+        assert!(
+            manifest.is_empty(),
+            "expected empty manifest for nonexistent dir, got {manifest:?}"
+        );
     }
 
     #[test]
@@ -424,7 +410,12 @@ mod capture_dir_tests {
         std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let manifest = capture_dir(pkg_dir.path(), &store).unwrap();
-        assert_eq!(manifest.len(), 1, "expected 1 entry, got {}", manifest.len());
+        assert_eq!(
+            manifest.len(),
+            1,
+            "expected 1 entry, got {}",
+            manifest.len()
+        );
 
         let entry = &manifest[0];
         assert_eq!(entry.rel_path, PathBuf::from("hello.txt"));
@@ -470,11 +461,18 @@ mod capture_dir_tests {
             .find(|e| e.rel_path == std::path::Path::new("link.txt"))
             .expect("link.txt entry not found in manifest");
 
-        assert_eq!(link_entry.content_hash, [0u8; 32], "symlink should have zeroed hash");
+        assert_eq!(
+            link_entry.content_hash, [0u8; 32],
+            "symlink should have zeroed hash"
+        );
         assert_eq!(link_entry.mode, 0, "symlink mode should be 0");
         match &link_entry.kind {
             FileKind::Symlink(target) => {
-                assert_eq!(target, &PathBuf::from("real.txt"), "symlink target mismatch");
+                assert_eq!(
+                    target,
+                    &PathBuf::from("real.txt"),
+                    "symlink target mismatch"
+                );
             }
             FileKind::Regular => panic!("expected Symlink variant, got Regular"),
         }
@@ -490,7 +488,12 @@ mod capture_dir_tests {
         std::fs::write(pkg_dir.path().join("bin/esbuild"), b"binary").unwrap();
 
         let manifest = capture_dir(pkg_dir.path(), &store).unwrap();
-        assert_eq!(manifest.len(), 1, "expected 1 entry, got {}", manifest.len());
+        assert_eq!(
+            manifest.len(),
+            1,
+            "expected 1 entry, got {}",
+            manifest.len()
+        );
         assert_eq!(
             manifest[0].rel_path,
             PathBuf::from("bin/esbuild"),
@@ -525,7 +528,10 @@ mod diff_manifests_tests {
     #[test]
     fn both_empty_yields_empty() {
         let delta = diff_manifests(&[], &[]);
-        assert!(delta.is_empty(), "expected empty delta for two empty manifests");
+        assert!(
+            delta.is_empty(),
+            "expected empty delta for two empty manifests"
+        );
     }
 
     #[test]
@@ -566,7 +572,10 @@ mod diff_manifests_tests {
     fn deletion_not_tracked() {
         let before = vec![reg("a.txt", [1u8; 32], 0o644)];
         let delta = diff_manifests(&before, &[]);
-        assert!(delta.is_empty(), "expected empty delta (deletions not tracked)");
+        assert!(
+            delta.is_empty(),
+            "expected empty delta (deletions not tracked)"
+        );
     }
 
     #[test]
@@ -588,7 +597,10 @@ mod diff_manifests_tests {
         let before = vec![lnk("link", "target")];
         let after = vec![lnk("link", "target")];
         let delta = diff_manifests(&before, &after);
-        assert!(delta.is_empty(), "expected empty delta for unchanged symlink");
+        assert!(
+            delta.is_empty(),
+            "expected empty delta for unchanged symlink"
+        );
     }
 }
 
@@ -610,7 +622,10 @@ mod store_manifest_tests {
 
         let result = store_manifest(&key, &vec![], &store).unwrap();
         assert!(!result, "empty delta should return false");
-        assert!(!store.contains_raw_key(&key), "nothing should be written for empty delta");
+        assert!(
+            !store.contains_raw_key(&key),
+            "nothing should be written for empty delta"
+        );
     }
 
     #[test]
@@ -628,11 +643,18 @@ mod store_manifest_tests {
 
         let result = store_manifest(&key, &delta, &store).unwrap();
         assert!(result, "non-empty delta should return true");
-        assert!(store.contains_raw_key(&key), "key should exist in CAS after store");
+        assert!(
+            store.contains_raw_key(&key),
+            "key should exist in CAS after store"
+        );
 
         let bytes = store.get_bytes_by_raw_key(&key).unwrap().unwrap();
         let manifest: PostinstallManifest = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(manifest.len(), 1, "expected 1 entry in deserialized manifest");
+        assert_eq!(
+            manifest.len(),
+            1,
+            "expected 1 entry in deserialized manifest"
+        );
         assert_eq!(manifest[0].rel_path, PathBuf::from("bin/tool"));
         assert_eq!(manifest[0].mode, 0o755);
     }
@@ -654,7 +676,11 @@ mod store_manifest_tests {
         assert!(first, "first write should return true");
 
         let second = store_manifest(&key, &delta, &store);
-        assert!(second.is_ok(), "second write with same key should not error, got: {:?}", second);
+        assert!(
+            second.is_ok(),
+            "second write with same key should not error, got: {:?}",
+            second
+        );
     }
 }
 
@@ -700,7 +726,10 @@ mod restore_manifest_tests {
         assert!(result, "should return true on cache hit");
 
         let restored_path = target.path().join("lib/foo.node");
-        assert!(restored_path.is_file(), "lib/foo.node should be a regular file");
+        assert!(
+            restored_path.is_file(),
+            "lib/foo.node should be a regular file"
+        );
         assert_eq!(
             std::fs::read(&restored_path).unwrap(),
             content,

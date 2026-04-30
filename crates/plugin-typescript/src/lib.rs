@@ -733,9 +733,9 @@ mod tests {
         assert_eq!(task.input_paths[0], dir.path().join("yarn.lock"));
 
         // The file: tarball path must also be present
-        let expected_tarball =
-            dir.path()
-                .join("./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz");
+        let expected_tarball = dir
+            .path()
+            .join("./tarballs/tanstack-react-start-0.0.3-rsc-tarball.tgz");
         assert!(
             task.input_paths.contains(&expected_tarball),
             "file: tarball path must be in input_paths so its absence changes the fingerprint;\

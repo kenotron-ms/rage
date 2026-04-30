@@ -3859,6 +3859,7 @@ dependencies = [
  "anyhow",
  "hostname",
  "prost",
+ "scheduler",
  "serde",
  "serde_json",
  "tokio",
