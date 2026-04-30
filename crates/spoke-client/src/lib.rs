@@ -139,9 +139,7 @@ impl SpokeClient {
 
     async fn execute(&self, item: &proto::WorkItem) -> anyhow::Result<()> {
         let pkg_dir = self.workspace_root.join(&item.package_path);
-        let status = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&item.command)
+        let status = scheduler::shell::command(&item.command)
             .current_dir(&pkg_dir)
             .status()
             .await?;
