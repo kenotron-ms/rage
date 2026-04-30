@@ -206,6 +206,13 @@ jobs:
           copy target\release\sandbox_windows_detours.dll target\release\rage_sandbox.dll
         shell: cmd
 
+      - name: Run Windows sandbox integration test
+        run: |
+          cargo test -p sandbox --test windows_integration -- --include-ignored --nocapture
+        env:
+          RAGE_SANDBOX_DLL_PATH: ${{ github.workspace }}\target\release\rage_sandbox.dll
+        shell: pwsh
+
       - name: Run Windows smoke test
         run: |
           $env:RAGE_CACHE_DIR = "C:\Temp\rage-ci-cache"
