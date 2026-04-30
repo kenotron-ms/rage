@@ -7,5 +7,7 @@
   "scripts": {
     "build": "exit 1"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@fix-ep/pkg-a": "workspace:*"
+  }
 }

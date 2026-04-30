@@ -14,7 +14,11 @@ importers:
 
   packages/pkg-a: {}
 
-  packages/pkg-b: {}
+  packages/pkg-b:
+    dependencies:
+      '@fix-ep/pkg-a':
+        specifier: workspace:*
+        version: link:../pkg-a
 
   packages/pkg-c:
     dependencies:
