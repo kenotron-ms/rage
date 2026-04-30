@@ -59,11 +59,47 @@ const FIXTURES = [
   },
 ];
 
-// Helpers go here (Task 2+)
+// --- Helpers ---
+
+function readCounter(fixtureDir, pkg) {
+  const filePath = join(fixtureDir, 'packages', pkg, 'dist', 'run-count.txt');
+  if (!existsSync(filePath)) return null;
+  const raw = readFileSync(filePath, 'utf8');
+  return parseInt(raw.trim(), 10);
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    console.error('  FAIL: ' + message);
+    return false;
+  } else {
+    console.log('  PASS: ' + message);
+    return true;
+  }
+}
 
 // --- Entry point ---
 
 async function main() {
+  if (process.env.RUN_SELF_TEST) {
+    let allOk = true;
+
+    allOk = assert(true === true, 'assert(true) returns true') && allOk;
+
+    const negative = assert(false, 'this fail message is expected');
+    if (negative !== false) {
+      allOk = false;
+      console.error('ERROR: assert(false) should have returned false, got: ' + negative);
+    } else {
+      console.log('PASS: assert(false) returned false (the FAIL above is expected)');
+    }
+
+    const counterResult = readCounter('/tmp/__definitely_does_not_exist__', 'pkg-x');
+    allOk = assert(counterResult === null, `readCounter on missing path returns null (got ${counterResult})`) && allOk;
+
+    process.exit(allOk ? 0 : 1);
+  }
+
   // TODO: implement in Task 3
 }
 
