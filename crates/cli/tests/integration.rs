@@ -1156,6 +1156,65 @@ async fn pnpm_second_run_restores_from_cas_after_node_modules_wipe() {
 
 // ── diamond-dep fixture structure test ────────────────────────────────────────
 
+#[test]
+fn distributed_fixture_structure() {
+    let base = e2e_fixtures_dir().join("distributed");
+
+    // Root files
+    assert!(base.join("package.json").exists(), "missing distributed/package.json");
+    assert!(base.join("pnpm-workspace.yaml").exists(), "missing distributed/pnpm-workspace.yaml");
+    assert!(base.join("tsconfig.base.json").exists(), "missing distributed/tsconfig.base.json");
+    assert!(base.join(".gitignore").exists(), "missing distributed/.gitignore");
+
+    // Five packages
+    let pkgs = base.join("packages");
+    for pkg in &["pkg-a", "pkg-b", "pkg-c", "pkg-d", "pkg-e"] {
+        let p = pkgs.join(pkg);
+        assert!(p.exists(), "missing package directory: {pkg}");
+        assert!(p.join("package.json").exists(), "missing {pkg}/package.json");
+        assert!(p.join("tsconfig.json").exists(), "missing {pkg}/tsconfig.json");
+        assert!(p.join("src").join("index.ts").exists(), "missing {pkg}/src/index.ts");
+    }
+
+    // Verify scope name in root package.json
+    let root_pkg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(base.join("package.json")).unwrap())
+            .unwrap();
+    assert_eq!(root_pkg["name"], "@fix-dist/root", "root package name mismatch");
+
+    // Verify dependency graph via package.json files
+    let pkg_c: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(pkgs.join("pkg-c").join("package.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        pkg_c["dependencies"]["@fix-dist/pkg-a"].as_str().is_some(),
+        "pkg-c must depend on pkg-a"
+    );
+
+    let pkg_d: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(pkgs.join("pkg-d").join("package.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        pkg_d["dependencies"]["@fix-dist/pkg-b"].as_str().is_some(),
+        "pkg-d must depend on pkg-b"
+    );
+
+    let pkg_e: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(pkgs.join("pkg-e").join("package.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        pkg_e["dependencies"]["@fix-dist/pkg-c"].as_str().is_some(),
+        "pkg-e must depend on pkg-c"
+    );
+    assert!(
+        pkg_e["dependencies"]["@fix-dist/pkg-d"].as_str().is_some(),
+        "pkg-e must depend on pkg-d"
+    );
+}
+
 fn e2e_fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
