@@ -107,6 +107,33 @@ function runRage(fixtureDir, { expectFailure = false } = {}) {
   }
 }
 
+async function runDistributed(fixtureDir) {
+  const addrFile = join(fixtureDir, '.rage-hub-addr.json');
+  const hub = spawn(RAGE_BIN, ['hub', '--workspace', fixtureDir, '--addr-file', addrFile], { cwd: fixtureDir, stdio: 'inherit' });
+  const spoke = spawn(RAGE_BIN, ['spoke', '--workspace', fixtureDir, '--addr-file', addrFile], { cwd: fixtureDir, stdio: 'inherit' });
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      hub.kill();
+      spoke.kill();
+      console.error('  FAIL: distributed run timed out after 120s');
+      resolve(false);
+    }, 120_000);
+
+    hub.on('close', (code) => {
+      clearTimeout(timer);
+      spoke.kill();
+      if (code === 0) {
+        console.log('  PASS: hub exited 0 (DAG complete)');
+        resolve(true);
+      } else {
+        console.error(`  FAIL: hub exited ${code}`);
+        resolve(false);
+      }
+    });
+  });
+}
+
 // --- Core step executor ---
 
 async function executeStep(step, fixtureDir, fixtureName) {
@@ -146,6 +173,19 @@ async function executeStep(step, fixtureDir, fixtureName) {
 async function runFixture(fixture) {
   const fixtureDir = join(__dirname, fixture.name);
   console.log('\n=== ' + fixture.name + ' ===');
+
+  if (fixture.mode === 'distributed') {
+    ensureInstalled(fixtureDir);
+    const runOk = await runDistributed(fixtureDir);
+    if (!runOk) return false;
+    for (const step of fixture.steps) {
+      if (step.assert !== undefined) {
+        const ok = await executeStep(step, fixtureDir, fixture.name);
+        if (!ok) return false;
+      }
+    }
+    return true;
+  }
 
   // Standard mode
   for (const step of fixture.steps) {

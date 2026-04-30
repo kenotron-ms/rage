@@ -23,3 +23,6 @@ __pycache__/
 
 # Local scratch / work directories
 /work/
+
+# Distributed build hub rendezvous file (runtime artifact, written by rage hub --addr-file)
+.rage-hub-addr.json

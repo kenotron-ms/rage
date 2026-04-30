@@ -74,11 +74,39 @@ impl HubServer {
 
     pub async fn serve(self, addr: SocketAddr) -> anyhow::Result<()> {
         eprintln!("[rage-hub] listening on {addr}");
+        let state_for_shutdown = Arc::clone(&self.state);
+        let state_for_result = Arc::clone(&self.state);
+        let notify = Arc::clone(&self.notify);
+
+        // Shutdown signal: fires when the DAG is done (all tasks complete or failed).
+        let shutdown = async move {
+            loop {
+                // Wake every 500ms or when notified by complete().
+                tokio::time::timeout(Duration::from_millis(500), notify.notified())
+                    .await
+                    .ok();
+                if state_for_shutdown.lock().await.dag.is_done() {
+                    return;
+                }
+            }
+        };
+
         Server::builder()
             .add_service(self.into_service())
-            .serve(addr)
+            .serve_with_shutdown(addr, shutdown)
             .await
             .map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))?;
+
+        // Check final DAG state and return success/failure accordingly.
+        let s = state_for_result.lock().await;
+        if s.dag.has_failure() {
+            let (id, err) = s
+                .dag
+                .first_failure()
+                .map(|(i, e)| (i.to_string(), e.to_string()))
+                .unwrap_or_else(|| ("unknown".to_string(), "build failed".to_string()));
+            anyhow::bail!("build failed: task {id} — {err}");
+        }
         Ok(())
     }
 }
