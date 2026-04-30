@@ -806,7 +806,12 @@ async fn cmd_hub(
         task_nodes.len()
     );
 
-    let hub = HubServer::new(task_nodes, token.clone(), build_id.clone());
+    let hub = HubServer::new(
+        task_nodes,
+        token.clone(),
+        build_id.clone(),
+        workspace.to_path_buf(),
+    );
 
     // Write rendezvous file if requested
     if let Some(file) = &addr_file {

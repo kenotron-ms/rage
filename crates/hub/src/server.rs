@@ -7,6 +7,7 @@ use crate::proto::{
     PingRequest, PingResponse, WorkItem, WorkerInfo,
 };
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,13 +26,19 @@ struct HubState {
 /// The hub gRPC server.
 #[derive(Clone)]
 pub struct HubServer {
-    state: Arc<Mutex<HubState>>,
+    pub(crate) state: Arc<Mutex<HubState>>,
     token: String,
     notify: Arc<Notify>,
+    workspace: PathBuf,
 }
 
 impl HubServer {
-    pub fn new(tasks: Vec<TaskNode>, token: String, build_id: String) -> Self {
+    pub fn new(
+        tasks: Vec<TaskNode>,
+        token: String,
+        build_id: String,
+        workspace: PathBuf,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(HubState {
                 dag: HubDag::new(tasks),
@@ -39,6 +46,21 @@ impl HubServer {
             })),
             token,
             notify: Arc::new(Notify::new()),
+            workspace,
+        }
+    }
+
+    pub(crate) fn build_work_item(&self, task: &TaskNode) -> WorkItem {
+        WorkItem {
+            task_id: task.task_id.clone(),
+            package_name: task.package_name.clone(),
+            script_name: task.script_name.clone(),
+            command: task.command.clone(),
+            workspace_root: self.workspace.to_string_lossy().to_string(),
+            package_path: task.package_path.clone(),
+            input_refs: vec![],
+            cache_backend_url: String::new(),
+            env: std::collections::HashMap::new(),
         }
     }
 
@@ -78,6 +100,7 @@ impl Coordinator for HubServer {
         let worker_id = info.worker_id.clone();
         let state = Arc::clone(&self.state);
         let notify = Arc::clone(&self.notify);
+        let self_for_stream = self.clone();
 
         let stream = async_stream::stream! {
             loop {
@@ -87,17 +110,7 @@ impl Coordinator for HubServer {
                     if s.dag.is_done() {
                         break;
                     }
-                    s.dag.dispatch_next(&worker_id).map(|task| WorkItem {
-                        task_id: task.task_id.clone(),
-                        package_name: task.package_name.clone(),
-                        script_name: task.script_name.clone(),
-                        command: task.command.clone(),
-                        workspace_root: "/workspace".to_string(),
-                        package_path: task.package_path.clone(),
-                        input_refs: vec![],
-                        cache_backend_url: String::new(),
-                        env: std::collections::HashMap::new(),
-                    })
+                    s.dag.dispatch_next(&worker_id).map(|task| self_for_stream.build_work_item(&task))
                 };
 
                 if let Some(item) = work_item {
@@ -223,5 +236,50 @@ impl Coordinator for HubServer {
             pending_tasks: (stats.pending + stats.ready + stats.dispatched) as u32,
             build_id: s.build_id.clone(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dag::TaskNode;
+    use std::path::PathBuf;
+
+    fn one_task() -> Vec<TaskNode> {
+        vec![TaskNode {
+            task_id: "pkg-a#build".to_string(),
+            package_name: "pkg-a".to_string(),
+            script_name: "build".to_string(),
+            command: "echo hi".to_string(),
+            package_path: "packages/pkg-a".to_string(),
+            depends_on: vec![],
+        }]
+    }
+
+    #[tokio::test]
+    async fn work_item_carries_real_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace: PathBuf = tmp.path().to_path_buf();
+
+        let hub = HubServer::new(
+            one_task(),
+            "tok".to_string(),
+            "build-1".to_string(),
+            workspace.clone(),
+        );
+
+        let task = {
+            let mut state = hub.state.lock().await;
+            state.dag.dispatch_next("worker-1").unwrap()
+        };
+
+        let work_item = hub.build_work_item(&task);
+
+        assert_eq!(
+            work_item.workspace_root,
+            workspace.to_string_lossy().to_string(),
+            "WorkItem.workspace_root must reflect the real workspace path, \
+             not a hardcoded \"/workspace\""
+        );
     }
 }
