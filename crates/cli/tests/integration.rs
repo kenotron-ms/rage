@@ -829,6 +829,7 @@ fn stage_pnpm_workspace(dir: &std::path::Path) {
 
 /// Write a fake `pnpm` shim to `bin_dir` that records its argv to
 /// `bin_dir/pnpm.log` and exits 0. Returns `bin_dir` for PATH prepending.
+#[cfg(unix)]
 fn install_pnpm_shim(bin_dir: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(bin_dir).unwrap();
@@ -846,6 +847,7 @@ fn install_pnpm_shim(bin_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg(unix)]
 fn run_pnpm_install_runs_before_package_builds() {
     let work = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
@@ -892,6 +894,7 @@ fn run_pnpm_install_runs_before_package_builds() {
 }
 
 #[test]
+#[cfg(unix)]
 fn run_pnpm_install_is_cached_on_second_run() {
     let work = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
