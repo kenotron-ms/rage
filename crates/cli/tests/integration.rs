@@ -806,6 +806,7 @@ fn rage_dev_starts_daemon_and_returns_quickly() {
 /// - pnpm-workspace.yaml referencing packages/*
 /// - pnpm-lock.yaml so the TypeScript plugin detects pnpm
 /// - one package `@fixture/install-test` with a `build` script
+#[cfg(unix)]
 fn stage_pnpm_workspace(dir: &std::path::Path) {
     std::fs::write(
         dir.join("package.json"),
