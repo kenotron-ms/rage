@@ -27,15 +27,58 @@ use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress
 use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
 };
+// In windows-sys 0.59, PIPE_ACCESS_INBOUND is typed as FILE_FLAGS_AND_ATTRIBUTES
+// and lives in Win32::Storage::FileSystem, not Win32::System::Pipes.
+use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_ACCESS_INBOUND, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-    PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeProcess, ResumeThread,
     TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
     STARTUPINFOW,
 };
+
+/// HANDLE wrapper that satisfies the `Send` bound required by
+/// `tokio::task::spawn_blocking`.
+///
+/// # Safety
+///
+/// HANDLE values are kernel-object references valid on any thread; the Windows
+/// kernel serialises all access.  The wrapper must NOT be cloned — each
+/// `SendHandle` must have exactly one owner at a time.
+struct SendHandle(HANDLE);
+// SAFETY: see doc comment above.
+unsafe impl Send for SendHandle {}
+
+/// Blocking work for [`run_sandboxed`]: drain the pipe and wait for the child.
+///
+/// Defined as a free function (not a closure) so that the `spawn_blocking`
+/// closure only captures whole `SendHandle` values, which are `Send`.  With
+/// Rust 2021 precision capture a closure that accesses `handle.0` captures the
+/// inner `*mut c_void` field — which is **not** `Send`.  Passing `SendHandle`
+/// as a by-value function argument forces whole-struct capture instead.
+fn do_pipe_blocking(pipe_wrapper: SendHandle, proc_wrapper: SendHandle) -> (Vec<AccessEvent>, i32) {
+    let pipe = pipe_wrapper.0;
+    let proc_h = proc_wrapper.0;
+
+    // Drain all AccessEvents from the pipe. Blocks until the DLL closes
+    // the write end (which happens when the process exits).
+    let events = read_events(pipe);
+
+    // Wait for the child process to exit (belt-and-suspenders after pipe EOF),
+    // then collect the exit code and release both handles.
+    let mut raw_exit: u32 = 0;
+    // SAFETY: proc_h is a valid process handle; INFINITE waits indefinitely.
+    unsafe {
+        WaitForSingleObject(proc_h, INFINITE);
+        GetExitCodeProcess(proc_h, &mut raw_exit);
+        CloseHandle(pipe);
+        CloseHandle(proc_h);
+    }
+
+    (events, raw_exit as i32)
+}
 
 /// Creates a new inbound, synchronous, byte-mode named pipe instance.
 ///
@@ -368,7 +411,7 @@ pub fn inject_and_spawn(
             &mut remote_tid,
         )
     };
-    if remote_thread != 0 {
+    if !remote_thread.is_null() {
         // Wait up to 5 s for LoadLibrary to finish, then release the thread handle.
         // SAFETY: remote_thread is a valid thread handle returned by CreateRemoteThread.
         unsafe {
@@ -432,37 +475,15 @@ pub async fn run_sandboxed(
     let proc_handle = inject_and_spawn(cmd, cwd, &full_env, &pipe_name, &dll_path)
         .map_err(|e| anyhow::anyhow!("inject_and_spawn: {}", e))?;
 
-    // Windows HANDLEs are kernel-object indices that may be used from any
-    // thread; wrap them in a newtype that satisfies the `Send` bound required
-    // by `tokio::task::spawn_blocking`.
-    struct SendHandle(HANDLE);
-    // SAFETY: HANDLE values are valid on any thread — the kernel serialises
-    // all access to the underlying objects.
-    unsafe impl Send for SendHandle {}
-
     let send_pipe = SendHandle(pipe_handle);
     let send_proc = SendHandle(proc_handle);
 
+    // `do_pipe_blocking` is a free function (not a closure) so the closure
+    // only captures whole `SendHandle` values — which are `Send`.  A closure
+    // that accesses `handle.0` directly would capture the inner `*mut c_void`
+    // field (not `Send`) due to Rust 2021 precision closure capture.
     let (events, exit_code) = tokio::task::spawn_blocking(move || {
-        let pipe = send_pipe.0;
-        let proc = send_proc.0;
-
-        // Drain all AccessEvents from the pipe.  Blocks until the DLL closes
-        // the write end (which happens when the process exits).
-        let events = read_events(pipe);
-
-        // Wait for the child process to exit (belt-and-suspenders after the
-        // pipe EOF), then collect the exit code and release both handles.
-        let mut raw_exit: u32 = 0;
-        // SAFETY: proc is a valid process handle; INFINITE waits indefinitely.
-        unsafe {
-            WaitForSingleObject(proc, INFINITE);
-            GetExitCodeProcess(proc, &mut raw_exit);
-            CloseHandle(pipe);
-            CloseHandle(proc);
-        }
-
-        (events, raw_exit as i32)
+        do_pipe_blocking(send_pipe, send_proc)
     })
     .await
     .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))?;

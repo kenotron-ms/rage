@@ -19,8 +19,12 @@ crate-type = ["cdylib"]
 
 [target.'cfg(windows)'.dependencies]
 retour = { version = "0.3", features = ["static-detour"] }
+# Note: in windows-sys 0.59, CreateFileW is gated behind Win32_Security
+# (it takes *const SECURITY_ATTRIBUTES).  GetCurrentProcessId likewise
+# requires Win32_Security on some configurations.  Add it unconditionally.
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_LibraryLoader",

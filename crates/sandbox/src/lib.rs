@@ -34,20 +34,24 @@ pub mod server;
 
 /// Platform implementations — exactly one `run_sandboxed` is active.
 ///
-/// macOS   → DYLD_INSERT_LIBRARIES sandbox
-/// Linux   → eBPF tracepoint sandbox
-/// Windows → Detours DLL injection sandbox
-/// Other   → unsupported stub (returns an error)
+/// macOS              → DYLD_INSERT_LIBRARIES sandbox
+/// Linux + ebpf feat  → eBPF tracepoint sandbox (requires nightly + bpf-linker)
+/// Linux - ebpf feat  → unsupported stub (returns an error; safe for CI / loose mode)
+/// Windows            → Detours DLL injection sandbox
+/// Other              → unsupported stub (returns an error)
 #[cfg(target_os = "macos")]
 pub mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::run_sandboxed;
 
-#[cfg(target_os = "linux")]
+// Linux eBPF sandbox: only compiled when the `ebpf` feature is enabled.
+// Without the feature the `unsupported` stub is used instead, which means
+// CI builds and loose-mode runs work without nightly Rust or bpf-linker.
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
 pub mod linux;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
 pub use linux::run_sandboxed;
 
 #[cfg(target_os = "windows")]
@@ -56,10 +60,19 @@ pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::run_sandboxed;
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+// Use the unsupported stub on:
+//   • Linux without the `ebpf` feature (CI builds, loose-mode)
+//   • Any other OS that is not macOS, Linux, or Windows
+#[cfg(any(
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_os = "linux", not(feature = "ebpf"))
+))]
 pub mod unsupported;
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(any(
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_os = "linux", not(feature = "ebpf"))
+))]
 pub use unsupported::run_sandboxed;
 
 pub use event::{PathSet, RunResult};

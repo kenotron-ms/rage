@@ -15,6 +15,13 @@ unsafe_code = "allow"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# eBPF is opt-in: production Linux builds enable it with `--features sandbox/ebpf`.
+# CI builds that don't need eBPF (e2e-smoke, build-release) leave it disabled,
+# which avoids the nightly-toolchain + bpf-linker requirement.
+[features]
+default = []
+ebpf = ["dep:sandbox-linux-ebpf"]
+
 [dependencies]
 anyhow = "1"
 byteorder = "1"
@@ -23,14 +30,17 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
 
-# Linux eBPF sandbox (Linux-only)
+# Linux eBPF sandbox (Linux-only, opt-in via the `ebpf` feature)
 [target.'cfg(target_os = "linux")'.dependencies]
-sandbox-linux-ebpf = { path = "../sandbox-linux-ebpf" }
+sandbox-linux-ebpf = { path = "../sandbox-linux-ebpf", optional = true }
 
 # Windows Detours sandbox
+# Note: in windows-sys 0.59, CreateNamedPipeW, CreateProcessW, CreateRemoteThread,
+# and CreateFileW are all gated behind #[cfg(feature = "Win32_Security")].
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_IO",
