@@ -69,7 +69,7 @@ unsafe fn wide_ptr_to_string(ptr: *const u16) -> Option<String> {
         len += 1;
     }
     let slice = std::slice::from_raw_parts(ptr, len);
-    Some(String::from_utf16_lossy(slice).into_owned())
+    Some(String::from_utf16_lossy(slice).to_string())
 }
 
 /// Extract the object name from an `OBJECT_ATTRIBUTES` pointer (64-bit layout).
@@ -126,7 +126,7 @@ unsafe fn oa_to_string(oa_ptr: *const u8) -> Option<String> {
 
     let char_count = (length_bytes / 2) as usize;
     let slice = std::slice::from_raw_parts(buffer_ptr, char_count);
-    Some(String::from_utf16_lossy(slice).into_owned())
+    Some(String::from_utf16_lossy(slice).to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +287,9 @@ pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
         let create_file_w: CreateFileWFn = std::mem::transmute(create_file_w_addr);
 
         HookCreateFileW
-            .initialize(create_file_w, hook_create_file_w)
+            .initialize(create_file_w, |a, b, c, d, e, f, g| {
+                hook_create_file_w(a, b, c, d, e, f, g)
+            })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
             .enable()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -306,7 +308,9 @@ pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
         let nt_create_file: NtCreateFileFn = std::mem::transmute(nt_create_file_addr);
 
         HookNtCreateFile
-            .initialize(nt_create_file, hook_nt_create_file)
+            .initialize(nt_create_file, |a, b, c, d, e, f, g, h, i, j, k| {
+                hook_nt_create_file(a, b, c, d, e, f, g, h, i, j, k)
+            })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
             .enable()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
