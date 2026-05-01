@@ -317,7 +317,7 @@ mod windows_impl {
     }
 
     use crate::discovery;
-    use anyhow::{Context, Result};
+    use anyhow::{Context as _, Result};
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::net::windows::named_pipe::ServerOptions;

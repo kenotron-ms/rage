@@ -496,9 +496,10 @@ pub async fn run_sandboxed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows_sys::Win32::Foundation::GENERIC_WRITE;
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        GENERIC_WRITE, OPEN_EXISTING,
+        OPEN_EXISTING,
     };
 
     /// Verifies that [`create_pipe`] returns a valid pipe handle and a pipe
