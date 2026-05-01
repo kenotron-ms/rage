@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Proof of concept: does rage's DYLD sandbox record symlink paths or resolved
 //! paths when Node.js imports a package via pnpm's virtual store?
 //!

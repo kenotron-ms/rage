@@ -43,6 +43,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Rust nightly (Windows - required for Detours DLL)
+        if: matrix.os == 'windows-latest'
+        run: rustup toolchain install nightly --component rustfmt clippy
+        shell: bash
+
       - name: Install protoc (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y protobuf-compiler
@@ -66,10 +71,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace ${{ matrix.exclude_flags }} --all-targets -- -D warnings
         shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: ${{ matrix.os == 'windows-latest' && 'nightly' || 'stable' }}
 
       - name: Run tests
         run: cargo test --workspace ${{ matrix.exclude_flags }}
         shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: ${{ matrix.os == 'windows-latest' && 'nightly' || 'stable' }}
 
   # Build the release binary to catch any linker/feature-flag issues
   build:
@@ -217,8 +226,8 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Rust toolchain (for DLL build)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust nightly toolchain (for Detours DLL - retour crate requires nightly)
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -275,6 +284,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Rust nightly (Windows - required for Detours DLL)
+        if: matrix.os == 'windows-latest'
+        run: rustup toolchain install nightly
+        shell: bash
+
       - name: Install protoc (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y protobuf-compiler
@@ -303,6 +317,8 @@ jobs:
       - name: Build rage
         run: cargo build --workspace ${{ matrix.exclude_flags }}
         shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: ${{ matrix.os == 'windows-latest' && 'nightly' || 'stable' }}
 
       - name: Run e2e fixture smoke tests
         run: node tests/fixtures/run.mjs
