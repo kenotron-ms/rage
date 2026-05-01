@@ -367,19 +367,20 @@ async fn run_root_task_legacy(
     }
 }
 
-/// Execute tasks in wave-parallel order using `TwoPhaseCache`.
-///
-/// For each wave, all tasks run concurrently. Waves run sequentially.
-/// On any task failure, the wave is aborted via `JoinSet::abort_all` and the
-/// error is returned.
-/// Resolve the effective subprocess concurrency limit.
-///
-/// Returns the configured cap when set, otherwise one slot per logical CPU.
-/// Falls back to 4 if `available_parallelism` is unavailable (rare).
+// Execute tasks in wave-parallel order using `TwoPhaseCache`.
+//
+// For each wave, all tasks run concurrently. Waves run sequentially.
+// On any task failure, the wave is aborted via `JoinSet::abort_all` and the
+// error is returned.
+// Resolve the effective subprocess concurrency limit.
+//
+// Returns the configured cap when set, otherwise one slot per logical CPU.
+// Falls back to 4 if `available_parallelism` is unavailable (rare).
 // ── Build summary ─────────────────────────────────────────────────────────
 
 /// Per-task outcome recorded for the end-of-run summary.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct TaskRecord {
     package: String,
     script: String,
@@ -728,6 +729,7 @@ pub async fn run_tasks_two_phase(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_single_task_two_phase(
     task: Task,
     cache: Arc<cache::TwoPhaseCache>,
