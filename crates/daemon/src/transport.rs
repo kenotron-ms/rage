@@ -7,6 +7,7 @@
 
 #[allow(unused_imports)]
 use crate::discovery::{self, DiscoveryFile};
+#[cfg(unix)]
 use anyhow::Result;
 use std::path::Path;
 use thiserror::Error;
@@ -391,9 +392,8 @@ mod windows_impl {
     pub async fn daemon_connect(
         workspace: &Path,
     ) -> std::result::Result<DaemonStream, DaemonError> {
-        let disc = discovery::read_discovery(workspace).map_err(|e| {
-            DaemonError::Transport(std::io::Error::new(std::io::ErrorKind::Other, e))
-        })?;
+        let disc = discovery::read_discovery(workspace)
+            .map_err(|e| DaemonError::Transport(std::io::Error::other(e.to_string())))?;
         let Some(disc) = disc else {
             return Err(DaemonError::NotRunning);
         };
@@ -449,6 +449,6 @@ mod windows_compile_tests {
             Box<dyn std::future::Future<Output = std::result::Result<DaemonStream, DaemonError>>>,
         >;
         // Just verify daemon_connect is exported at the module level (used via pub use).
-        let _ = daemon_connect as fn(&std::path::Path) -> _;
+        // daemon_connect is exported via pub use windows_impl::daemon_connect
     }
 }
