@@ -583,16 +583,18 @@ mod tests {
             unsafe { CloseHandle(client) };
         });
 
-        // Wait for the writer to finish connecting, writing, and closing before
-        // calling read_events — this ensures ConnectNamedPipe sees
-        // ERROR_PIPE_CONNECTED (client already connected) and ReadFile drains
-        // the buffered data before receiving ERROR_BROKEN_PIPE.
+        // Read events first — ConnectNamedPipe in read_events blocks until the
+        // writer thread connects, then reads all data, returns when the writer
+        // closes its handle (ERROR_BROKEN_PIPE). Do NOT join the writer thread
+        // first: that would close the client handle before ConnectNamedPipe
+        // is called, causing ConnectNamedPipe to return a non-CONNECTED error
+        // and read_events to return empty.
+        let events = read_events(handle);
+
+        // Now wait for the writer thread to complete (it should already be done).
         writer_thread
             .join()
             .expect("writer thread should not panic");
-
-        // Read all events from the server side.
-        let events = read_events(handle);
 
         // Clean up the server handle.
         // SAFETY: handle is a valid, open pipe handle.
@@ -634,6 +636,7 @@ mod tests {
     /// expected exit code is 0.
     #[tokio::test]
     #[cfg(target_os = "windows")]
+    #[ignore = "requires rage_sandbox.dll — build `cargo build -p sandbox-windows-detours` first"]
     async fn run_sandboxed_cmd_exit_returns_zero() {
         let result = run_sandboxed("cmd /c exit 0", Path::new("C:\\"), &[])
             .await
