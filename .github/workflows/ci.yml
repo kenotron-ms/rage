@@ -45,6 +45,11 @@ jobs:
         run: rustup toolchain install nightly --component rust-src
         shell: bash
 
+      - name: Install bpf-linker (Linux eBPF build)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo install bpf-linker
+        shell: bash
+
       - name: Install protoc (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y protobuf-compiler
@@ -98,6 +103,11 @@ jobs:
       - name: Install nightly Rust + rust-src (Linux eBPF build)
         if: matrix.os == 'ubuntu-latest'
         run: rustup toolchain install nightly --component rust-src
+        shell: bash
+
+      - name: Install bpf-linker (Linux eBPF build)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo install bpf-linker
         shell: bash
 
       - name: Install protoc (Ubuntu)
@@ -282,6 +292,11 @@ jobs:
       - name: Install nightly Rust + rust-src (Linux eBPF build)
         if: matrix.os == 'ubuntu-latest'
         run: rustup toolchain install nightly --component rust-src
+        shell: bash
+
+      - name: Install bpf-linker (Linux eBPF build)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo install bpf-linker
         shell: bash
 
       - name: Install protoc (Ubuntu)
