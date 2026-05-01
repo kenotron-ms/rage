@@ -2,11 +2,13 @@
 // Node.js ESM — no npm deps needed, uses only Node built-ins
 
 import { execSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, appendFileSync } from 'node:fs';
+import { existsSync, readFileSync, appendFileSync, rmSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
+// Repo root — two levels up from tests/fixtures/
+const REPO_ROOT = resolve(__dirname, '..', '..');
 
 // Auto-detect rage binary based on platform
 const RAGE_BIN = process.env.RAGE_BIN
@@ -87,6 +89,34 @@ function ensureInstalled(fixtureDir) {
   installed.add(fixtureDir);
 }
 
+/**
+ * Reset fixture state before each run so assertions are repeatable:
+ *  1. Revert git-tracked mutations (e.g. the partial-rebuild mutation step).
+ *  2. Delete run-count sentinel files — cache hits don't restore outputs, so
+ *     stale counters from a previous invocation would break assertions.
+ *  3. Delete the local .rage-cache dir — each fixture has rage.json pointing
+ *     to ./.rage-cache so cleaning it forces a cold-cache start, which keeps
+ *     counter increments deterministic across test-suite re-runs.
+ */
+function cleanFixture(fixtureDir) {
+  // 1. Revert tracked mutations from previous runs.
+  try {
+    execSync(`git checkout -- "${fixtureDir}"`, { cwd: REPO_ROOT, stdio: 'pipe' });
+  } catch (_) { /* not a git repo, or nothing to revert — fine */ }
+
+  // 2. Delete run-count files so assertions start from a known-zero state.
+  const pkgsDir = join(fixtureDir, 'packages');
+  if (existsSync(pkgsDir)) {
+    for (const pkg of readdirSync(pkgsDir)) {
+      const counter = join(pkgsDir, pkg, 'dist', 'run-count.txt');
+      try { rmSync(counter); } catch (_) { /* absent is fine */ }
+    }
+  }
+
+  // 3. Delete local .rage-cache so the first rage run in this invocation is cold.
+  try { rmSync(join(fixtureDir, '.rage-cache'), { recursive: true, force: true }); } catch (_) {}
+}
+
 function runRage(fixtureDir, { expectFailure = false } = {}) {
   try {
     execSync(`"${RAGE_BIN}" run build "${fixtureDir}"`, { cwd: fixtureDir, stdio: 'inherit' });
@@ -109,6 +139,13 @@ function runRage(fixtureDir, { expectFailure = false } = {}) {
 
 async function runDistributed(fixtureDir) {
   const addrFile = join(fixtureDir, '.rage-hub-addr.json');
+
+  // Clean stale addr-file — if a previous run left it behind, the spoke would
+  // read the old address (e.g. a developer's hostname) before the hub writes
+  // the fresh one.  Deleting it forces the spoke to poll until the hub is ready.
+  // (Counter files are already cleaned by cleanFixture() before we get here.)
+  try { rmSync(addrFile); } catch (_) { /* not present — that's fine */ }
+
   const hub = spawn(RAGE_BIN, ['hub', '--workspace', fixtureDir, '--addr-file', addrFile], { cwd: fixtureDir, stdio: 'inherit' });
   const spoke = spawn(RAGE_BIN, ['spoke', '--workspace', fixtureDir, '--addr-file', addrFile], { cwd: fixtureDir, stdio: 'inherit' });
 
@@ -173,6 +210,9 @@ async function executeStep(step, fixtureDir, fixtureName) {
 async function runFixture(fixture) {
   const fixtureDir = join(__dirname, fixture.name);
   console.log('\n=== ' + fixture.name + ' ===');
+
+  // Always reset fixture state before running so re-runs are idempotent.
+  cleanFixture(fixtureDir);
 
   if (fixture.mode === 'distributed') {
     ensureInstalled(fixtureDir);
