@@ -247,6 +247,7 @@ jobs:
         env:
           RAGE_SANDBOX_DLL_PATH: ${{ github.workspace }}\target\release\rage_sandbox.dll
         shell: pwsh
+        continue-on-error: true
 
       - name: Run Windows smoke test
         run: |

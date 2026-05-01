@@ -79,7 +79,13 @@ mod tests {
     fn dll_main_attach_without_env_var_does_not_panic() {
         use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
         std::env::remove_var("RAGE_PIPE_NAME");
-        let result = unsafe { super::DllMain(0, DLL_PROCESS_ATTACH, std::ptr::null_mut()) };
+        let result = unsafe {
+            super::DllMain(
+                std::ptr::null_mut(),
+                DLL_PROCESS_ATTACH,
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(result, 1, "DllMain must return TRUE");
     }
 }

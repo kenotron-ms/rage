@@ -262,6 +262,7 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 /// - A module handle cannot be obtained (`GetModuleHandleW` returns 0).
 /// - A function address cannot be resolved (`GetProcAddress` returns `None`).
 /// - A detour cannot be initialized or enabled (retour returns an error).
+#[allow(clippy::manual_c_str_literals)]
 pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
     // 1. Connect to the named pipe — propagate any error immediately.
     let client = PipeClient::connect(pipe_name)?;
