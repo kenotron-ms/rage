@@ -9,6 +9,7 @@
 use crate::discovery::{self, DiscoveryFile};
 #[cfg(unix)]
 use anyhow::Result;
+#[cfg(unix)]
 use std::path::Path;
 use thiserror::Error;
 
@@ -364,7 +365,7 @@ mod windows_impl {
 
         pub async fn accept(&mut self) -> Result<DaemonStream> {
             // Take the pre-created instance and wait for a client to connect.
-            let mut current = self
+            let current = self
                 .next
                 .take()
                 .context("DaemonServer::accept called without a pre-created pipe instance")?;
@@ -442,13 +443,7 @@ mod windows_compile_tests {
 
     #[allow(dead_code)]
     fn assert_daemon_connect_signature() {
-        // Verify daemon_connect has the correct signature.
-        let _connect_fn: fn(
-            &std::path::Path,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = std::result::Result<DaemonStream, DaemonError>>>,
-        >;
-        // Just verify daemon_connect is exported at the module level (used via pub use).
-        // daemon_connect is exported via pub use windows_impl::daemon_connect
+        // daemon_connect is exported via pub use windows_impl::daemon_connect.
+        // Signature verified by integration: fn(&Path) -> impl Future<Output = Result<...>>
     }
 }
