@@ -237,9 +237,8 @@ jobs:
       - name: Build Windows Detours DLL
         run: cargo build --release -p sandbox-windows-detours
 
-      - name: Copy DLL next to rage binary
-        run: |
-          copy target\release\sandbox_windows_detours.dll target\release\rage_sandbox.dll
+      - name: Verify DLL exists (named rage_sandbox.dll by crate lib name)
+        run: dir target\release\rage_sandbox.dll
         shell: cmd
 
       - name: Run Windows sandbox integration test

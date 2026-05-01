@@ -136,6 +136,7 @@ pub fn create_pipe() -> std::io::Result<(HANDLE, String)> {
 /// Returns an empty `Vec` if the client fails to connect (and the error is
 /// not `ERROR_PIPE_CONNECTED`, which means the client connected before this
 /// function was called — a normal race the caller need not worry about).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
     // SAFETY: pipe is a valid HANDLE and null is a valid lpOverlapped value
     // for synchronous (non-overlapped) named-pipe I/O.
@@ -186,28 +187,18 @@ pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
 
         // Drain all complete wire records from the accumulation buffer.
         let mut offset = 0;
-        loop {
-            match pipe_proto::decode_event(&raw_buf[offset..]) {
-                Some((event, consumed)) => {
-                    events.push(event);
-                    offset += consumed;
-                }
-                None => break,
-            }
+        while let Some((event, consumed)) = pipe_proto::decode_event(&raw_buf[offset..]) {
+            events.push(event);
+            offset += consumed;
         }
         raw_buf.drain(..offset);
     }
 
     // Drain any trailing complete records that arrived before the pipe closed.
     let mut offset = 0;
-    loop {
-        match pipe_proto::decode_event(&raw_buf[offset..]) {
-            Some((event, consumed)) => {
-                events.push(event);
-                offset += consumed;
-            }
-            None => break,
-        }
+    while let Some((event, consumed)) = pipe_proto::decode_event(&raw_buf[offset..]) {
+        events.push(event);
+        offset += consumed;
     }
 
     events
@@ -269,6 +260,7 @@ pub fn find_dll_path() -> std::io::Result<PathBuf> {
 /// process), so `LoadLibraryW`'s virtual address obtained from the calling
 /// process is valid in the target process.
 #[allow(clippy::transmute_undefined_repr)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn inject_and_spawn(
     cmd: &str,
     cwd: &Path,

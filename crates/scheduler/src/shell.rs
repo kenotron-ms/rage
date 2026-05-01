@@ -16,10 +16,18 @@ pub fn command(cmd: &str) -> tokio::process::Command {
 
 /// Build a `tokio::process::Command` that runs `cmd` through the platform shell.
 /// On Unix this is `sh -c <cmd>`. On Windows this is `cmd /c <cmd>`.
+///
+/// On Windows, we use `raw_arg` to pass the command string verbatim to cmd.exe
+/// without Rust's `CommandLineToArgvW`-style escaping.  cmd.exe and
+/// `CommandLineToArgvW` use different quoting rules; using `.arg()` would
+/// double-escape inner quotes (turning `"script"` into `\"script\"`), which
+/// causes cmd.exe to mis-parse `&&`-chained scripts like npm build commands.
 #[cfg(windows)]
 pub fn command(cmd: &str) -> tokio::process::Command {
+    use std::os::windows::process::CommandExt;
     let mut c = tokio::process::Command::new("cmd");
-    c.arg("/c").arg(cmd);
+    c.arg("/c");
+    c.as_std_mut().raw_arg(cmd);
     c
 }
 
@@ -38,10 +46,15 @@ pub fn std_command(cmd: &str) -> std::process::Command {
 /// Use this from synchronous code paths where a Tokio runtime is not available
 /// (for example, the postinstall cache). On Unix this is `sh -c <cmd>`; on
 /// Windows this is `cmd /c <cmd>`.
+///
+/// On Windows, we use `raw_arg` to pass the command string verbatim to cmd.exe
+/// (see [`command`] for the full rationale).
 #[cfg(windows)]
 pub fn std_command(cmd: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
     let mut c = std::process::Command::new("cmd");
-    c.arg("/c").arg(cmd);
+    c.arg("/c");
+    c.raw_arg(cmd);
     c
 }
 
