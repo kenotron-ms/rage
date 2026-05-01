@@ -100,7 +100,7 @@ pub fn create_pipe() -> std::io::Result<(HANDLE, String)> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos() as u64
-        ^ (pid as u64 * 0x517C_C1B7_2722_0A95);
+        ^ (pid as u64).wrapping_mul(0x517C_C1B7_2722_0A95);
 
     let name = format!("\\\\.\\pipe\\rage_sandbox_{}_{}", pid, nonce);
 
@@ -239,7 +239,7 @@ pub fn find_dll_path() -> std::io::Result<PathBuf> {
 /// * `cwd`        — Working directory for the child process.
 /// * `env`        — Environment variables forwarded to the child.
 /// * `_pipe_name` — Named-pipe path the DLL will use (passed via `env`; this
-///                  parameter is reserved for future direct use).
+///   parameter is reserved for future direct use).
 /// * `dll_path`   — Path to `rage_sandbox.dll` to inject.
 ///
 /// # Returns
@@ -261,6 +261,9 @@ pub fn find_dll_path() -> std::io::Result<PathBuf> {
 /// process is valid in the target process.
 #[allow(clippy::transmute_undefined_repr)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[allow(clippy::manual_c_str_literals)]
+#[allow(clippy::missing_transmute_annotations)]
+#[allow(clippy::doc_overindented_list_items)]
 pub fn inject_and_spawn(
     cmd: &str,
     cwd: &Path,
