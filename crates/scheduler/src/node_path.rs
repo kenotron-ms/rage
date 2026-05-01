@@ -411,6 +411,7 @@ mod tests {
         bin
     }
 
+    #[cfg(windows)]
     fn fake_fnm_windows(local_app_data: &Path, version: &str) -> PathBuf {
         let dir = local_app_data
             .join("fnm/node-versions")
@@ -420,12 +421,14 @@ mod tests {
         dir
     }
 
+    #[cfg(windows)]
     fn fake_nvm_windows(app_data: &Path, version: &str) -> PathBuf {
         let dir = app_data.join("nvm").join(format!("v{version}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
+    #[cfg(windows)]
     fn fake_volta_windows(local_app_data: &Path) -> PathBuf {
         let dir = local_app_data.join("Volta/bin");
         std::fs::create_dir_all(&dir).unwrap();
@@ -491,6 +494,7 @@ mod tests {
     /// Run a closure with `LOCALAPPDATA` and `APPDATA` set to the given paths,
     /// with `FNM_DIR`, `NVM_HOME`, `VOLTA_HOME`, and `USERPROFILE` removed.
     /// Restores all six variables afterwards (panic-safe).
+    #[cfg(windows)]
     fn with_windows_env<F: FnOnce()>(local_app_data: &Path, app_data: &Path, f: F) {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prev_local_app_data = std::env::var_os("LOCALAPPDATA");
