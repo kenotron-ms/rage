@@ -40,6 +40,23 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install nightly Rust + rust-src (Linux eBPF build)
+        if: matrix.os == 'ubuntu-latest'
+        run: rustup toolchain install nightly --component rust-src
+        shell: bash
+
+      - name: Install protoc (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install protoc --yes
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -77,6 +94,23 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly Rust + rust-src (Linux eBPF build)
+        if: matrix.os == 'ubuntu-latest'
+        run: rustup toolchain install nightly --component rust-src
+        shell: bash
+
+      - name: Install protoc (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install protoc --yes
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -244,6 +278,23 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly Rust + rust-src (Linux eBPF build)
+        if: matrix.os == 'ubuntu-latest'
+        run: rustup toolchain install nightly --component rust-src
+        shell: bash
+
+      - name: Install protoc (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install protoc --yes
 
       - uses: pnpm/action-setup@v4
         with:
