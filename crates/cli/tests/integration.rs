@@ -263,7 +263,7 @@ fn second_run_uses_cache() {
         workspace.path().join("rage.json"),
         format!(
             r#"{{ "cache": {{ "backend": "local", "dir": "{}" }} }}"#,
-            cache_dir.path().to_string_lossy()
+            cache_dir.path().to_string_lossy().replace('\\', "\\\\")
         ),
     )
     .unwrap();
@@ -450,7 +450,7 @@ fn default_run_uses_two_phase_cache() {
         workspace.path().join("rage.json"),
         format!(
             r#"{{ "cache": {{ "backend": "local", "dir": "{}" }} }}"#,
-            cache_dir.path().to_string_lossy()
+            cache_dir.path().to_string_lossy().replace('\\', "\\\\")
         ),
     )
     .unwrap();
@@ -606,7 +606,7 @@ fn rage_run_loads_rage_json_cache_dir() {
         workspace.path().join("rage.json"),
         format!(
             r#"{{ "cache": {{ "backend": "local", "dir": "{}" }} }}"#,
-            cache_dir.path().to_string_lossy()
+            cache_dir.path().to_string_lossy().replace('\\', "\\\\")
         ),
     )
     .unwrap();
@@ -966,6 +966,7 @@ fn run_pnpm_install_is_cached_on_second_run() {
 // ── node PATH injection unit test ─────────────────────────────────────────────
 
 #[test]
+#[cfg(unix)]
 fn js_task_path_includes_node_modules_bin() {
     use std::fs;
     use tempfile::tempdir;
