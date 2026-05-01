@@ -140,11 +140,8 @@ impl SpokeClient {
     async fn execute(&self, item: &proto::WorkItem) -> anyhow::Result<()> {
         let pkg_dir = self.workspace_root.join(&item.package_path);
         let system_path = std::env::var("PATH").unwrap_or_default();
-        let node_path = scheduler::node_path::build_node_path(
-            &pkg_dir,
-            &self.workspace_root,
-            &system_path,
-        );
+        let node_path =
+            scheduler::node_path::build_node_path(&pkg_dir, &self.workspace_root, &system_path);
         let status = scheduler::shell::command(&item.command)
             .current_dir(&pkg_dir)
             .env("PATH", node_path)

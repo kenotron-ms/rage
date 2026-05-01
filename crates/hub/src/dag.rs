@@ -347,7 +347,10 @@ mod tests {
         // d is independent and must NOT be touched.
         let d_state = dag.states.get("d").unwrap();
         assert!(
-            matches!(d_state, TaskState::Ready | TaskState::Dispatched(_) | TaskState::Completed),
+            matches!(
+                d_state,
+                TaskState::Ready | TaskState::Dispatched(_) | TaskState::Completed
+            ),
             "d should be unaffected by a's failure, got {:?}",
             d_state
         );

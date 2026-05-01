@@ -236,7 +236,10 @@ pub fn inject_and_spawn(
     // 1. Build the command line as a null-terminated UTF-16 string.
     //    CreateProcessW requires a *mut u16 (it may modify the buffer).
     let cmd_str = format!("cmd /c {cmd}");
-    let mut cmd_wide: Vec<u16> = cmd_str.encode_utf16().chain(std::iter::once(0u16)).collect();
+    let mut cmd_wide: Vec<u16> = cmd_str
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .collect();
 
     // 2. Build the environment block: each entry is "KEY=VALUE\0", followed
     //    by an extra '\0' double-null terminator.
@@ -250,7 +253,10 @@ pub fn inject_and_spawn(
 
     // 3. Current working directory as null-terminated UTF-16.
     let cwd_str = cwd.to_string_lossy();
-    let cwd_wide: Vec<u16> = cwd_str.encode_utf16().chain(std::iter::once(0u16)).collect();
+    let cwd_wide: Vec<u16> = cwd_str
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .collect();
 
     // 4. Initialise STARTUPINFOW (all fields zeroed, then cb set) and
     //    PROCESS_INFORMATION (fully zeroed; filled in by CreateProcessW).
@@ -504,8 +510,7 @@ mod tests {
         // Encode the pipe name as null-terminated UTF-16 for the Win32 API
         // used inside the thread (thread closures can't borrow &str across
         // thread boundaries without Arc/String).
-        let pipe_name_wide: Vec<u16> =
-            name.encode_utf16().chain(std::iter::once(0u16)).collect();
+        let pipe_name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0u16)).collect();
 
         let writer_thread = std::thread::spawn(move || {
             // Connect to the server end as a write-only client.
@@ -566,16 +571,22 @@ mod tests {
         // calling read_events — this ensures ConnectNamedPipe sees
         // ERROR_PIPE_CONNECTED (client already connected) and ReadFile drains
         // the buffered data before receiving ERROR_BROKEN_PIPE.
-        writer_thread.join().expect("writer thread should not panic");
+        writer_thread
+            .join()
+            .expect("writer thread should not panic");
 
         // Read all events from the server side.
         let events = read_events(handle);
 
         // Clean up the server handle.
         // SAFETY: handle is a valid, open pipe handle.
-        unsafe { CloseHandle(handle) }; 
+        unsafe { CloseHandle(handle) };
 
-        assert_eq!(events.len(), 1, "expected exactly one event, got: {events:?}");
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly one event, got: {events:?}"
+        );
         match &events[0] {
             AccessEvent::Read { path, pid } => {
                 assert_eq!(path, "C:\\test.txt", "path mismatch");

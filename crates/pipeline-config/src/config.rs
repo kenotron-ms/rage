@@ -273,10 +273,7 @@ mod tests {
         .unwrap();
         let cfg = load_config(&d).unwrap().unwrap();
         let build = cfg.pipeline.get("build").unwrap();
-        assert_eq!(
-            build.skip_packages,
-            vec!["@scope/pkg-a", "@scope/pkg-b"]
-        );
+        assert_eq!(build.skip_packages, vec!["@scope/pkg-a", "@scope/pkg-b"]);
         let test = cfg.pipeline.get("test").unwrap();
         assert_eq!(test.skip_packages, vec!["@scope/pkg-c"]);
     }

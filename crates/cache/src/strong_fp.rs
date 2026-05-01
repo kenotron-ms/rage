@@ -42,7 +42,9 @@ pub fn compute_strong_fingerprint(weak_fp: &str, pathset_reads: &[PathBuf]) -> S
     for p in sorted {
         // Skip non-regular files (directories, /dev/, device files, etc.).
         // On macOS, read() on devfs or large directories can block indefinitely.
-        if !p.is_file() { continue; }
+        if !p.is_file() {
+            continue;
+        }
         hasher.update(b"read:");
         hasher.update(p.as_os_str().as_encoded_bytes());
         hasher.update(b":");

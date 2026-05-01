@@ -163,7 +163,12 @@ pub async fn run_tasks(
             let cache_clone = cache.clone();
             let plugin_clone = plugin.clone();
             let store_clone = artifact_store.clone();
-            set.spawn(run_single_task(task, cache_clone, plugin_clone, store_clone));
+            set.spawn(run_single_task(
+                task,
+                cache_clone,
+                plugin_clone,
+                store_clone,
+            ));
         }
 
         let mut first_error: Option<RunError> = None;
@@ -389,9 +394,9 @@ struct TaskRecord {
 
 #[derive(Debug, PartialEq, Eq)]
 enum TaskOutcome {
-    Built,   // cache miss — subprocess ran
-    Cached,  // two-phase cache hit
-    Failed,  // non-zero exit
+    Built,  // cache miss — subprocess ran
+    Cached, // two-phase cache hit
+    Failed, // non-zero exit
 }
 
 /// Accumulates per-task records during the run; prints the summary at the end.
@@ -432,24 +437,41 @@ impl BuildSummary {
         use std::collections::HashMap;
         use std::sync::atomic::Ordering;
 
-        let wall_ms = self.wall_start
+        let wall_ms = self
+            .wall_start
             .map(|s| s.elapsed().as_millis() as u64)
             .unwrap_or(1);
         let total_secs = wall_ms as f64 / 1000.0;
 
         let records = &self.records;
-        if records.is_empty() { return; }
+        if records.is_empty() {
+            return;
+        }
 
-        let built:  Vec<&TaskRecord> = records.iter().filter(|r| r.outcome == TaskOutcome::Built).collect();
-        let cached: Vec<&TaskRecord> = records.iter().filter(|r| r.outcome == TaskOutcome::Cached).collect();
-        let failed: Vec<&TaskRecord> = records.iter().filter(|r| r.outcome == TaskOutcome::Failed).collect();
+        let built: Vec<&TaskRecord> = records
+            .iter()
+            .filter(|r| r.outcome == TaskOutcome::Built)
+            .collect();
+        let cached: Vec<&TaskRecord> = records
+            .iter()
+            .filter(|r| r.outcome == TaskOutcome::Cached)
+            .collect();
+        let failed: Vec<&TaskRecord> = records
+            .iter()
+            .filter(|r| r.outcome == TaskOutcome::Failed)
+            .collect();
         let total = records.len();
 
         // ── Timing stats ─────────────────────────────────────────────────────
-        let avg_build_ms = if built.is_empty() { 0.0 }
-            else { built.iter().map(|r| r.elapsed_ms as f64).sum::<f64>() / built.len() as f64 };
+        let avg_build_ms = if built.is_empty() {
+            0.0
+        } else {
+            built.iter().map(|r| r.elapsed_ms as f64).sum::<f64>() / built.len() as f64
+        };
 
-        let p95_ms: f64 = if built.is_empty() { 0.0 } else {
+        let p95_ms: f64 = if built.is_empty() {
+            0.0
+        } else {
             let mut t: Vec<u64> = built.iter().map(|r| r.elapsed_ms).collect();
             t.sort_unstable();
             t[((t.len() - 1) as f64 * 0.95) as usize] as f64
@@ -460,21 +482,27 @@ impl BuildSummary {
         let allowed = self.allowed_concurrency;
         let sum_built_ms: u64 = built.iter().map(|r| r.elapsed_ms).sum();
         // CPU utilization: how much of (wall × slots) was actually used building
-        let cpu_util_pct = if wall_ms == 0 || allowed == 0 { 0.0 }
-            else { (sum_built_ms as f64 / (wall_ms as f64 * allowed as f64)) * 100.0 };
+        let cpu_util_pct = if wall_ms == 0 || allowed == 0 {
+            0.0
+        } else {
+            (sum_built_ms as f64 / (wall_ms as f64 * allowed as f64)) * 100.0
+        };
 
         // ── Critical path ─────────────────────────────────────────────────────
         // finish_at[pkg] = started_at_ms + elapsed_ms
         // CP end   = task with max finish_at
         // CP chain = trace back via dep with highest finish_at at each step
-        let finish_at: HashMap<&str, u64> = records.iter()
+        let finish_at: HashMap<&str, u64> = records
+            .iter()
             .map(|r| (r.package.as_str(), r.started_at_ms + r.elapsed_ms))
             .collect();
-        let deps_of: HashMap<&str, &Vec<String>> = records.iter()
+        let deps_of: HashMap<&str, &Vec<String>> = records
+            .iter()
             .map(|r| (r.package.as_str(), &r.dep_packages))
             .collect();
 
-        let cp_tail = records.iter()
+        let cp_tail = records
+            .iter()
             .max_by_key(|r| r.started_at_ms + r.elapsed_ms);
         let cp_ms = cp_tail.map(|r| r.started_at_ms + r.elapsed_ms).unwrap_or(0);
 
@@ -482,31 +510,40 @@ impl BuildSummary {
         let mut chain: Vec<&TaskRecord> = Vec::new();
         let mut cur = cp_tail.map(|r| r.package.as_str());
         while let Some(pkg) = cur {
-            if chain.len() > 50 { break; }  // safety cap
+            if chain.len() > 50 {
+                break;
+            } // safety cap
             let rec = records.iter().find(|r| r.package == pkg);
             match rec {
                 None => break,
                 Some(r) => {
                     chain.push(r);
                     // Follow the dep whose finish_at is highest (the one that made us wait).
-                    cur = deps_of.get(pkg)
-                        .and_then(|deps| {
-                            deps.iter()
-                                .filter_map(|d| finish_at.get(d.as_str()).map(|&f| (d.as_str(), f)))
-                                .max_by_key(|(_, f)| *f)
-                                .map(|(d, _)| d)
-                        });
+                    cur = deps_of.get(pkg).and_then(|deps| {
+                        deps.iter()
+                            .filter_map(|d| finish_at.get(d.as_str()).map(|&f| (d.as_str(), f)))
+                            .max_by_key(|(_, f)| *f)
+                            .map(|(d, _)| d)
+                    });
                 }
             }
         }
         chain.reverse();
 
-        let cp_eff_pct = if wall_ms == 0 { 0.0 } else { cp_ms as f64 / wall_ms as f64 * 100.0 };
+        let cp_eff_pct = if wall_ms == 0 {
+            0.0
+        } else {
+            cp_ms as f64 / wall_ms as f64 * 100.0
+        };
 
         // ── Insight ──────────────────────────────────────────────────────────
         // cp_eff: how much of wall time was forced by sequential deps
         // peak_util: how much of the allowed concurrency ceiling we hit
-        let peak_util = if allowed == 0 { 0.0 } else { peak as f64 / allowed as f64 };
+        let peak_util = if allowed == 0 {
+            0.0
+        } else {
+            peak as f64 / allowed as f64
+        };
         let insight = if built.is_empty() {
             "⚡ all cached".to_string()
         } else if cp_eff_pct > 75.0 {
@@ -539,14 +576,19 @@ impl BuildSummary {
         eprintln!("\n[rage] {sep}");
         eprintln!(
             "[rage]  tasks    {:>3} total  ·  {:>3} built  ·  {:>3} cached  ·  {:>3} failed",
-            total, built.len(), cached.len(), failed.len()
+            total,
+            built.len(),
+            cached.len(),
+            failed.len()
         );
         if built.is_empty() {
             eprintln!("[rage]  timing   {:.2}s wall  (all cached)", total_secs);
         } else {
             eprintln!(
                 "[rage]  timing   {:.2}s wall  ·  {:.2}s avg/build  ·  {:.2}s p95",
-                total_secs, avg_build_ms / 1000.0, p95_ms / 1000.0
+                total_secs,
+                avg_build_ms / 1000.0,
+                p95_ms / 1000.0
             );
         }
         eprintln!(
@@ -556,13 +598,17 @@ impl BuildSummary {
         if cp_ms > 0 {
             eprintln!(
                 "[rage]  critical path  {:.2}s  ·  {:.0}% of wall  ({} tasks)",
-                cp_ms as f64 / 1000.0, cp_eff_pct, chain.len()
+                cp_ms as f64 / 1000.0,
+                cp_eff_pct,
+                chain.len()
             );
             for (i, r) in chain.iter().enumerate() {
                 let arrow = if i == 0 { "  " } else { "→ " };
                 eprintln!(
                     "[rage]    {}  {:.2}s  {}",
-                    arrow, r.elapsed_ms as f64 / 1000.0, r.package
+                    arrow,
+                    r.elapsed_ms as f64 / 1000.0,
+                    r.package
                 );
             }
         }
@@ -570,7 +616,6 @@ impl BuildSummary {
         eprintln!("[rage] {sep}\n");
     }
 }
-
 
 pub fn effective_concurrency(max_concurrency: Option<usize>) -> usize {
     max_concurrency.unwrap_or_else(|| {
@@ -721,7 +766,9 @@ async fn run_single_task_two_phase(
     // since the summary was created, captured once under the lock.
     let started_at_ms: u64 = {
         let s = summary.lock().unwrap();
-        s.wall_start.map(|ws| ws.elapsed().as_millis() as u64).unwrap_or(0)
+        s.wall_start
+            .map(|ws| ws.elapsed().as_millis() as u64)
+            .unwrap_or(0)
     };
     let task_dep_packages = task.dep_package_names.clone();
 
@@ -890,7 +937,9 @@ async fn run_single_task_two_phase(
 
     eprintln!(
         "[rage] {}#{} starting [sandbox={:?}] (est. {:.0} MB)",
-        task.package_name, task.script_name, task.sandbox_mode,
+        task.package_name,
+        task.script_name,
+        task.sandbox_mode,
         estimate_bytes as f64 / 1_048_576.0,
     );
     let start = Instant::now();
@@ -904,8 +953,7 @@ async fn run_single_task_two_phase(
                 crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
             let builder = {
                 let mut cmd = crate::shell::command(&task.command);
-                cmd.current_dir(&task.cwd)
-                    .env("PATH", &new_path);
+                cmd.current_dir(&task.cwd).env("PATH", &new_path);
                 cmd
             };
             let (code, out, err, peak_rss) =
@@ -952,18 +1000,16 @@ async fn run_single_task_two_phase(
                     );
                     let builder2 = {
                         let mut cmd = crate::shell::command(&task.command);
-                        cmd.current_dir(&task.cwd)
-                            .env("PATH", &new_path2);
+                        cmd.current_dir(&task.cwd).env("PATH", &new_path2);
                         cmd
                     };
-                    let (code, out, err, _pid_fallback) =
-                        spawn_capture_tee(builder2)
-                            .await
-                            .map_err(|e| RunError::Spawn {
-                                package: task.package_name.clone(),
-                                script: task.script_name.clone(),
-                                source: e,
-                            })?;
+                    let (code, out, err, _pid_fallback) = spawn_capture_tee(builder2)
+                        .await
+                        .map_err(|e| RunError::Spawn {
+                            package: task.package_name.clone(),
+                            script: task.script_name.clone(),
+                            source: e,
+                        })?;
                     captured_stdout = out;
                     captured_stderr = err;
                     (code, StoredPathset::default())
@@ -1313,12 +1359,18 @@ fn run_postinstall_phase(
         // Cache hit — restore files from CAS (or sentinel hit = no-op) and skip script.
         match restore_manifest(&key, &pt.cwd, store) {
             Ok(true) => {
-                eprintln!("[rage] {}#postinstall \u{2713} (restored from cache)", pt.package_name);
+                eprintln!(
+                    "[rage] {}#postinstall \u{2713} (restored from cache)",
+                    pt.package_name
+                );
                 continue;
             }
             Ok(false) => {}
             Err(e) => {
-                eprintln!("[rage] {}#postinstall restore error ({e}) \u{2014} re-running", pt.package_name);
+                eprintln!(
+                    "[rage] {}#postinstall restore error ({e}) \u{2014} re-running",
+                    pt.package_name
+                );
             }
         }
 
@@ -1451,7 +1503,6 @@ async fn spawn_capture_tee_tracked(
         peak_rss,
     ))
 }
-
 
 async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String, String, u32)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1909,7 +1960,9 @@ mod tests {
         };
         let pkg = mk_pkg("failing-pkg", &[]);
         let dag = build_dag(vec![pkg]).unwrap();
-        let err = run_tasks(&dag, vec![task], None, None, None).await.unwrap_err();
+        let err = run_tasks(&dag, vec![task], None, None, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("failing-pkg"));
     }
 
@@ -2004,7 +2057,9 @@ mod tests {
         );
 
         // Second run — should be a cache hit (same fingerprint)
-        run_tasks(&dag, vec![task], cache, None, None).await.unwrap();
+        run_tasks(&dag, vec![task], cache, None, None)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2086,7 +2141,9 @@ mod tests {
             vec![task.clone()],
             two_phase.clone(),
             test_plugin(),
-            test_store(), None)
+            test_store(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -2110,9 +2167,16 @@ mod tests {
             "expected sf-*.entry file"
         );
 
-        run_tasks_two_phase(&dag, vec![task], two_phase, test_plugin(), test_store(), None)
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![task],
+            two_phase,
+            test_plugin(),
+            test_store(),
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     // ── root task fingerprint tests ───────────────────────────────────────────
@@ -2311,7 +2375,9 @@ mod tests {
             vec![task.clone()],
             cache.clone(),
             test_plugin(),
-            test_store(), None)
+            test_store(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -2404,7 +2470,9 @@ mod tests {
             vec![utils_task.clone()],
             cache.clone(),
             test_plugin(),
-            test_store(), None)
+            test_store(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -2423,7 +2491,9 @@ mod tests {
             vec![utils_task],
             cache.clone(),
             test_plugin(),
-            test_store(), None)
+            test_store(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -2488,7 +2558,9 @@ mod tests {
             vec![task.clone()],
             cache.clone(),
             test_plugin(),
-            test_store(), None)
+            test_store(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -2558,7 +2630,9 @@ mod tests {
             vec![task.clone()],
             cache.clone(),
             test_plugin(),
-            test_store(), None)
+            test_store(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -2585,9 +2659,16 @@ mod tests {
         assert_eq!(stored.exit_code, 0);
 
         // Second run — should be a cache hit with replayed output.
-        run_tasks_two_phase(&dag, vec![task], cache.clone(), test_plugin(), test_store(), None)
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![task],
+            cache.clone(),
+            test_plugin(),
+            test_store(),
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     // ── cache-hit → schedule_capture integration ──────────────────────────────
@@ -2707,7 +2788,9 @@ mod tests {
             vec![install.clone()],
             cache.clone(),
             test_plugin(),
-            store.clone(), None)
+            store.clone(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -2726,7 +2809,9 @@ mod tests {
             vec![install.clone()],
             cache.clone(),
             test_plugin(),
-            store.clone(), None)
+            store.clone(),
+            None,
+        )
         .await
         .unwrap();
 

@@ -33,12 +33,7 @@ pub struct HubServer {
 }
 
 impl HubServer {
-    pub fn new(
-        tasks: Vec<TaskNode>,
-        token: String,
-        build_id: String,
-        workspace: PathBuf,
-    ) -> Self {
+    pub fn new(tasks: Vec<TaskNode>, token: String, build_id: String, workspace: PathBuf) -> Self {
         Self {
             state: Arc::new(Mutex::new(HubState {
                 dag: HubDag::new(tasks),

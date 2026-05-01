@@ -166,7 +166,11 @@ mod tests {
 
         assert_eq!(consumed, buf.len());
         assert!(is_read(&decoded));
-        assert_eq!(event_path(&decoded), path, "Unicode path must survive UTF-16 round-trip");
+        assert_eq!(
+            event_path(&decoded),
+            path,
+            "Unicode path must survive UTF-16 round-trip"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -189,10 +193,10 @@ mod tests {
         // Build a header that claims path_len = 5 UTF-16 words (10 path bytes)
         // but only supply 3 path bytes after the header.
         let mut buf = Vec::new();
-        buf.push(OP_READ);                                 // op
-        buf.extend_from_slice(&1234u32.to_le_bytes());     // pid
-        buf.extend_from_slice(&5u16.to_le_bytes());        // path_len = 5 words
-        buf.extend_from_slice(&[0x00, 0x01, 0x00]);        // only 3 of the required 10 path bytes
+        buf.push(OP_READ); // op
+        buf.extend_from_slice(&1234u32.to_le_bytes()); // pid
+        buf.extend_from_slice(&5u16.to_le_bytes()); // path_len = 5 words
+        buf.extend_from_slice(&[0x00, 0x01, 0x00]); // only 3 of the required 10 path bytes
 
         assert!(decode_event(&buf).is_none());
     }
@@ -200,9 +204,9 @@ mod tests {
     #[test]
     fn unknown_op_returns_none() {
         let mut buf = Vec::new();
-        buf.push(0xFF);                                   // unknown op
-        buf.extend_from_slice(&1234u32.to_le_bytes());    // pid
-        buf.extend_from_slice(&0u16.to_le_bytes());       // path_len = 0 (no path bytes follow)
+        buf.push(0xFF); // unknown op
+        buf.extend_from_slice(&1234u32.to_le_bytes()); // pid
+        buf.extend_from_slice(&0u16.to_le_bytes()); // path_len = 0 (no path bytes follow)
 
         assert!(decode_event(&buf).is_none());
     }

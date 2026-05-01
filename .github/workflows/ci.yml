@@ -231,6 +231,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            exclude_flags: --exclude sandbox-macos-dylib --exclude sandbox-windows-detours
+          - os: macos-latest
+            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-windows-detours
+          - os: windows-latest
+            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
@@ -252,7 +259,8 @@ jobs:
           key: fixtures-pnpm-${{ matrix.os }}-${{ hashFiles('tests/fixtures/**/pnpm-lock.yaml') }}
 
       - name: Build rage
-        run: cargo build --workspace
+        run: cargo build --workspace ${{ matrix.exclude_flags }}
+        shell: bash
 
       - name: Run e2e fixture smoke tests
         run: node tests/fixtures/run.mjs
