@@ -278,7 +278,7 @@ pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
         // ----------------------------------------------------------------
         let kernel32_wide = to_wide_null("kernel32.dll");
         let kernel32 = GetModuleHandleW(kernel32_wide.as_ptr());
-        if kernel32 == 0 {
+        if kernel32.is_null() {
             return Err(io::Error::last_os_error());
         }
 
@@ -299,7 +299,7 @@ pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
         // ----------------------------------------------------------------
         let ntdll_wide = to_wide_null("ntdll.dll");
         let ntdll = GetModuleHandleW(ntdll_wide.as_ptr());
-        if ntdll == 0 {
+        if ntdll.is_null() {
             return Err(io::Error::last_os_error());
         }
 

@@ -44,7 +44,7 @@ impl PipeClient {
                 std::ptr::null(),
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,
-                0,
+                std::ptr::null_mut(),
             )
         };
 
