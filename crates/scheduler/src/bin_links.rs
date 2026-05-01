@@ -113,13 +113,12 @@ fn create_one_bin_link(
     // Remove existing link if present (idempotent)
     let _ = std::fs::remove_file(&link_path);
 
-    // Target: relative path from bin_dir to pkg_dir/rel_path
-    // e.g.: ../typescript/bin/tsc
-    let rel_target =
-        pathdiff::diff_paths(&target_abs, bin_dir).unwrap_or_else(|| target_abs.clone());
-
     #[cfg(unix)]
     {
+        // Target: relative path from bin_dir to pkg_dir/rel_path
+        // e.g.: ../typescript/bin/tsc
+        let rel_target =
+            pathdiff::diff_paths(&target_abs, bin_dir).unwrap_or_else(|| target_abs.clone());
         std::os::unix::fs::symlink(&rel_target, &link_path)?;
         // Ensure target is executable
         use std::os::unix::fs::PermissionsExt;
