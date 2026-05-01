@@ -291,9 +291,9 @@ pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
             .initialize(create_file_w, |a, b, c, d, e, f, g| {
                 hook_create_file_w(a, b, c, d, e, f, g)
             })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+            .map_err(|e| io::Error::other(e.to_string()))?
             .enable()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         // ----------------------------------------------------------------
         // ntdll!NtCreateFile
@@ -312,9 +312,9 @@ pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
             .initialize(nt_create_file, |a, b, c, d, e, f, g, h, i, j, k| {
                 hook_nt_create_file(a, b, c, d, e, f, g, h, i, j, k)
             })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+            .map_err(|e| io::Error::other(e.to_string()))?
             .enable()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
     }
 
     Ok(())

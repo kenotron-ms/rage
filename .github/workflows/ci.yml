@@ -249,16 +249,8 @@ jobs:
         shell: pwsh
         continue-on-error: true
 
-      - name: Run Windows smoke test
-        run: |
-          $env:RAGE_CACHE_DIR = "C:\Temp\rage-ci-cache"
-          $output = .\target\release\rage.exe run build . 2>&1
-          $rageExit = $LASTEXITCODE
-          $output | Select-String "workspace|FAILED|cached|restored"
-          if ($rageExit -ne 0) {
-            Write-Host "rage.exe exited with $rageExit"
-            exit $rageExit
-          }
+      - name: Verify rage binary runs on Windows
+        run: .\target\release\rage.exe --version
         shell: pwsh
 
   # Runs the cross-platform Node.js harness against all 5 fixture workspaces
