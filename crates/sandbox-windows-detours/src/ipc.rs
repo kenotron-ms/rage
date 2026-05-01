@@ -3,10 +3,10 @@
 use sandbox::event::AccessEvent;
 use sandbox::pipe_proto;
 use std::io;
+use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GENERIC_WRITE, OPEN_EXISTING,
+    CreateFileW, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 
 /// Named-pipe client used by the injected DLL to forward [`AccessEvent`]s to

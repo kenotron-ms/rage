@@ -5,8 +5,8 @@ use retour::static_detour;
 use sandbox::event::AccessEvent;
 use std::io;
 use std::sync::{Mutex, OnceLock};
-use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
+use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
@@ -69,7 +69,7 @@ unsafe fn wide_ptr_to_string(ptr: *const u16) -> Option<String> {
         len += 1;
     }
     let slice = std::slice::from_raw_parts(ptr, len);
-    Some(String::from_utf16_lossy(slice))
+    Some(String::from_utf16_lossy(slice).into_owned())
 }
 
 /// Extract the object name from an `OBJECT_ATTRIBUTES` pointer (64-bit layout).
@@ -126,7 +126,7 @@ unsafe fn oa_to_string(oa_ptr: *const u8) -> Option<String> {
 
     let char_count = (length_bytes / 2) as usize;
     let slice = std::slice::from_raw_parts(buffer_ptr, char_count);
-    Some(String::from_utf16_lossy(slice))
+    Some(String::from_utf16_lossy(slice).into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ fn send_access(is_write: bool, path: Option<String>) {
 // ---------------------------------------------------------------------------
 
 /// Hook for `kernel32!CreateFileW`.
-unsafe extern "system" fn hook_create_file_w(
+extern "system" fn hook_create_file_w(
     lp_file_name: *const u16,
     dw_desired_access: u32,
     dw_share_mode: u32,
@@ -194,7 +194,7 @@ unsafe extern "system" fn hook_create_file_w(
 
 /// Hook for `ntdll!NtCreateFile`.
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn hook_nt_create_file(
+extern "system" fn hook_nt_create_file(
     file_handle: *mut HANDLE,
     desired_access: u32,
     object_attributes: *const u8,

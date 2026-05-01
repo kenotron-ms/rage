@@ -45,7 +45,7 @@ jobs:
 
       - name: Install Rust nightly (Windows - required for Detours DLL)
         if: matrix.os == 'windows-latest'
-        run: rustup toolchain install nightly --component rustfmt clippy
+        run: rustup toolchain install nightly --profile default
         shell: bash
 
       - name: Install protoc (Ubuntu)
