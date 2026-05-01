@@ -40,8 +40,6 @@ pub fn capture_dir(
     dir: &std::path::Path,
     store: &artifact_store::LocalArtifactStore,
 ) -> std::io::Result<PostinstallManifest> {
-    use std::os::unix::fs::PermissionsExt;
-
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -82,10 +80,16 @@ pub fn capture_dir(
             if store.put_bytes_keyed(content_hash, &bytes).is_err() {
                 continue;
             }
-            let mode = match abs.metadata() {
-                Ok(m) => m.permissions().mode() & 0o777,
-                Err(_) => 0o644,
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                match abs.metadata() {
+                    Ok(m) => m.permissions().mode() & 0o777,
+                    Err(_) => 0o644,
+                }
             };
+            #[cfg(not(unix))]
+            let mode: u32 = 0o644;
             manifest.push(ManifestEntry {
                 rel_path: rel,
                 content_hash,
@@ -286,7 +290,6 @@ pub fn restore_manifest(
     target_dir: &std::path::Path,
     store: &artifact_store::LocalArtifactStore,
 ) -> std::io::Result<bool> {
-    use std::os::unix::fs::PermissionsExt;
     let bytes = match store.get_bytes_by_raw_key(key)? {
         Some(b) => b,
         None => return Ok(false),
@@ -313,11 +316,23 @@ pub fn restore_manifest(
                         std::fs::copy(&cas_path, &dest)?;
                     }
                 }
-                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(entry.mode))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(entry.mode))?;
+                }
             }
             FileKind::Symlink(target) => {
                 let _ = std::fs::remove_file(&dest);
+                #[cfg(unix)]
                 std::os::unix::fs::symlink(target, &dest)?;
+                #[cfg(not(unix))]
+                {
+                    // Windows: symlinks require SeCreateSymbolicLink privilege and behave
+                    // differently for files vs directories.  Postinstall caches on Windows
+                    // do not typically contain symlinks, so skip silently.
+                    let _ = target;
+                }
             }
         }
     }
@@ -397,6 +412,7 @@ mod capture_dir_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn regular_file_produces_correct_hash_and_mode() {
         use std::os::unix::fs::PermissionsExt;
@@ -429,6 +445,7 @@ mod capture_dir_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn executable_mode_preserved() {
         use std::os::unix::fs::PermissionsExt;
@@ -445,6 +462,7 @@ mod capture_dir_tests {
         assert_eq!(manifest[0].mode, 0o755, "mode should be 0o755");
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_entry_has_zero_hash_and_correct_target() {
         let pkg_dir = tempfile::tempdir().unwrap();
@@ -737,6 +755,7 @@ mod restore_manifest_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn executable_permission_preserved() {
         use std::os::unix::fs::PermissionsExt;
@@ -764,6 +783,7 @@ mod restore_manifest_tests {
         assert_eq!(mode & 0o777, 0o755, "restored file should have mode 0o755");
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_restored_correctly() {
         let store_dir = tempfile::tempdir().unwrap();

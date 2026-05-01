@@ -482,11 +482,10 @@ pub async fn run_sandboxed(
     // only captures whole `SendHandle` values — which are `Send`.  A closure
     // that accesses `handle.0` directly would capture the inner `*mut c_void`
     // field (not `Send`) due to Rust 2021 precision closure capture.
-    let (events, exit_code) = tokio::task::spawn_blocking(move || {
-        do_pipe_blocking(send_pipe, send_proc)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))?;
+    let (events, exit_code) =
+        tokio::task::spawn_blocking(move || do_pipe_blocking(send_pipe, send_proc))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))?;
 
     Ok(RunResult {
         exit_code,
