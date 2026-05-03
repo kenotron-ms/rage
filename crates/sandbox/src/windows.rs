@@ -27,7 +27,6 @@ use windows_sys::Win32::Storage::FileSystem::{
     ReadFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
-use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
@@ -40,6 +39,7 @@ use windows_sys::Win32::System::Threading::{
     ResetEvent, ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE,
     PROCESS_INFORMATION, STARTUPINFOW,
 };
+use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 
 /// HANDLE wrapper that satisfies the `Send` bound required by
 /// `tokio::task::spawn_blocking`.
@@ -149,8 +149,14 @@ pub fn create_pipe() -> std::io::Result<(HANDLE, String)> {
 pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
     // ----- Connect (overlapped) -----------------------------------------
     // SAFETY: All Win32 calls are checked; the event handle has a single owner.
-    let connect_event =
-        unsafe { CreateEventW(std::ptr::null(), 1 /* manual reset */, 0, std::ptr::null()) };
+    let connect_event = unsafe {
+        CreateEventW(
+            std::ptr::null(),
+            1, /* manual reset */
+            0,
+            std::ptr::null(),
+        )
+    };
     if connect_event.is_null() {
         return Vec::new();
     }
@@ -233,9 +239,8 @@ pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
                     }
                     // SAFETY: pipe is valid; io_overlapped is alive; bWait=FALSE
                     // because the event already signalled.
-                    let got = unsafe {
-                        GetOverlappedResult(pipe, &io_overlapped, &mut bytes_read, 0)
-                    };
+                    let got =
+                        unsafe { GetOverlappedResult(pipe, &io_overlapped, &mut bytes_read, 0) };
                     if got == 0 {
                         // ERROR_BROKEN_PIPE / ERROR_HANDLE_EOF: client closed —
                         // normal shutdown. Anything else: stop reading.
@@ -254,9 +259,7 @@ pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
         } else {
             // Synchronous completion (rare on overlapped handles, but legal).
             // SAFETY: pipe is valid; io_overlapped is alive.
-            let got = unsafe {
-                GetOverlappedResult(pipe, &io_overlapped, &mut bytes_read, 0)
-            };
+            let got = unsafe { GetOverlappedResult(pipe, &io_overlapped, &mut bytes_read, 0) };
             if got == 0 {
                 break;
             }

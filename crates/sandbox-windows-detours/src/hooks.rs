@@ -127,7 +127,11 @@ unsafe fn oa_to_string(oa_ptr: *const u8) -> Option<String> {
 
     let char_count = (length_bytes / 2) as usize;
     let slice = std::slice::from_raw_parts(buffer_ptr, char_count);
-    Some(String::from_utf16_lossy(slice).to_string())
+    let s = String::from_utf16_lossy(slice).into_owned();
+    // NtCreateFile paths use the NT namespace prefix `\??\` (e.g.
+    // `\??\C:\Windows\...`). Strip it so callers see Win32-style paths.
+    let s = s.strip_prefix(r"\??").unwrap_or(&s).to_string();
+    Some(s)
 }
 
 // ---------------------------------------------------------------------------

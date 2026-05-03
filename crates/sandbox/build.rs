@@ -46,10 +46,7 @@ fn main() {
             // lib name is `rage_sandbox` per
             // crates/sandbox-windows-detours/Cargo.toml [lib] name = "rage_sandbox"
             let dll = profile_dir.join("rage_sandbox.dll");
-            println!(
-                "cargo:rustc-env=RAGE_SANDBOX_DLL_DEFAULT={}",
-                dll.display()
-            );
+            println!("cargo:rustc-env=RAGE_SANDBOX_DLL_DEFAULT={}", dll.display());
         }
         _ => {
             // Linux (eBPF) and other platforms do not need a baked artifact path.
