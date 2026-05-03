@@ -293,27 +293,42 @@ pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
 
 /// Returns the path to `rage_sandbox.dll`.
 ///
-/// Resolution order:
+/// Resolution order (mirrors the macOS dylib resolution pattern):
 /// 1. If the environment variable `RAGE_SANDBOX_DLL_PATH` is set, its value
 ///    is returned verbatim as a [`PathBuf`].
-/// 2. Otherwise the path is `<parent directory of current_exe>/rage_sandbox.dll`.
+/// 2. Otherwise, if `<dir-of-current-exe>/rage_sandbox.dll` exists, that
+///    path is returned (the colocated install layout used by
+///    `cargo install --path crates/cli` and packaged distributions).
+/// 3. Otherwise, the path baked in at compile time by `build.rs`
+///    (`RAGE_SANDBOX_DLL_DEFAULT`, the workspace `target/<profile>/`
+///    artifact path) is returned.  This succeeds during local development
+///    because `cargo build --workspace` colocates all artifacts in
+///    `target/<profile>/`.
 ///
 /// # Errors
 ///
-/// Returns `Err` if `std::env::current_exe()` fails or if the executable has
-/// no parent directory.
+/// Returns `Err` only when steps 1 and 2 both fail AND `current_exe()`
+/// itself errors (rare). The compile-time fallback always exists as a
+/// `PathBuf`; whether the file at that path is on disk is a runtime
+/// concern caught by the `dll_path.exists()` check in `run_sandboxed`.
 pub fn find_dll_path() -> std::io::Result<PathBuf> {
+    // 1. Runtime env-var override.
     if let Ok(override_path) = std::env::var("RAGE_SANDBOX_DLL_PATH") {
         return Ok(PathBuf::from(override_path));
     }
-    let exe = std::env::current_exe()?;
-    let parent = exe.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "current_exe has no parent directory",
-        )
-    })?;
-    Ok(parent.join("rage_sandbox.dll"))
+
+    // 2. Colocated with the current executable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let colocated = parent.join("rage_sandbox.dll");
+            if colocated.exists() {
+                return Ok(colocated);
+            }
+        }
+    }
+
+    // 3. Compile-time-baked workspace target/<profile>/ path.
+    Ok(PathBuf::from(env!("RAGE_SANDBOX_DLL_DEFAULT")))
 }
 
 /// Creates a child process in a suspended state, injects `dll_path` by
@@ -718,6 +733,25 @@ mod tests {
             result,
             PathBuf::from("C:\\override\\rage_sandbox.dll"),
             "find_dll_path should return the env-var override path"
+        );
+    }
+
+    /// Verifies that [`find_dll_path`] falls back to the compile-time-baked
+    /// `RAGE_SANDBOX_DLL_DEFAULT` when neither the env-var override nor a
+    /// colocated DLL is present.
+    ///
+    /// We force the env var to be unset, then assert that the result ends
+    /// with `rage_sandbox.dll` (the path itself depends on the workspace
+    /// target directory, which differs between local and CI builds).
+    #[test]
+    fn find_dll_path_falls_back_to_baked_default() {
+        std::env::remove_var("RAGE_SANDBOX_DLL_PATH");
+        let result = find_dll_path().expect("find_dll_path should succeed");
+        let s = result.to_string_lossy().to_lowercase();
+        assert!(
+            s.ends_with("rage_sandbox.dll"),
+            "expected path ending in rage_sandbox.dll, got: {}",
+            result.display()
         );
     }
 

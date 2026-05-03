@@ -1,12 +1,14 @@
-// build.rs — locate the sandbox dylib at build time and bake the expected path
-// into the binary as an environment variable.
+// build.rs — locate the sandbox dynamic-library at build time and bake the
+// expected path into the binary as a compile-time env var.
 //
-// The dylib (`librage_sandbox.dylib`) is produced by the `sandbox-macos-dylib`
-// workspace crate, which is a *sibling* crate — NOT a direct Cargo dependency
-// of this crate.  We must not link against it.  Instead, we compute the path
-// to where Cargo would place the output artifact and pass it through as a
-// compile-time env var.  Consumers may override this at runtime by setting
-// the `RAGE_SANDBOX_DYLIB` environment variable.
+// The dylib (`librage_sandbox.dylib` on macOS) is produced by the
+// `sandbox-macos-dylib` workspace crate, and the DLL (`rage_sandbox.dll` on
+// Windows) by the `sandbox-windows-detours` workspace crate.  Both are
+// *sibling* crates — NOT direct Cargo dependencies of this crate.  We must not
+// link against them.  Instead, we compute the path Cargo would place the
+// output artifact at and pass it through as a compile-time env var.  Consumers
+// may override this at runtime by setting the corresponding `RAGE_SANDBOX_*`
+// runtime variable.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -24,10 +26,18 @@ fn main() {
         .nth(3)
         .expect("OUT_DIR does not have the expected directory depth");
 
+    // macOS: librage_sandbox.dylib
     let dylib = profile_dir.join("librage_sandbox.dylib");
-
     println!(
         "cargo:rustc-env=RAGE_SANDBOX_DYLIB_DEFAULT={}",
         dylib.display()
+    );
+
+    // Windows: rage_sandbox.dll  (lib name is `rage_sandbox` per
+    // crates/sandbox-windows-detours/Cargo.toml [lib] name = "rage_sandbox")
+    let dll = profile_dir.join("rage_sandbox.dll");
+    println!(
+        "cargo:rustc-env=RAGE_SANDBOX_DLL_DEFAULT={}",
+        dll.display()
     );
 }
