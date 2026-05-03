@@ -18,25 +18,27 @@ use crate::pipe_proto;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE,
-    INVALID_HANDLE_VALUE,
+    CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_IO_PENDING,
+    ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
-use windows_sys::Win32::Storage::FileSystem::ReadFile;
+// In windows-sys 0.59, PIPE_ACCESS_INBOUND and FILE_FLAG_OVERLAPPED are typed as
+// FILE_FLAGS_AND_ATTRIBUTES and live in Win32::Storage::FileSystem.
+use windows_sys::Win32::Storage::FileSystem::{
+    ReadFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND,
+};
 use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
 };
-// In windows-sys 0.59, PIPE_ACCESS_INBOUND is typed as FILE_FLAGS_AND_ATTRIBUTES
-// and lives in Win32::Storage::FileSystem, not Win32::System::Pipes.
-use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeProcess, ResumeThread,
-    TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE, PROCESS_INFORMATION,
-    STARTUPINFOW,
+    CreateEventW, CreateProcessW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeProcess,
+    ResetEvent, ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, INFINITE,
+    PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 /// HANDLE wrapper that satisfies the `Send` bound required by
@@ -108,11 +110,13 @@ pub fn create_pipe() -> std::io::Result<(HANDLE, String)> {
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0u16)).collect();
 
     // SAFETY: All arguments are valid Win32 values; the returned handle is
-    // checked immediately below.
+    // checked immediately below. FILE_FLAG_OVERLAPPED enables async I/O so
+    // that ConnectNamedPipe and ReadFile can wait on a Win32 event with
+    // GetOverlappedResult — eliminating the connect/disconnect race.
     let handle = unsafe {
         CreateNamedPipeW(
             wide.as_ptr(),
-            PIPE_ACCESS_INBOUND,
+            PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             1,                // nMaxInstances: exactly one client at a time
             0,                // nOutBufferSize: no outbound data
@@ -133,53 +137,133 @@ pub fn create_pipe() -> std::io::Result<(HANDLE, String)> {
 /// until the client closes the connection (`ERROR_BROKEN_PIPE` or a
 /// zero-byte read).
 ///
-/// Returns an empty `Vec` if the client fails to connect (and the error is
-/// not `ERROR_PIPE_CONNECTED`, which means the client connected before this
-/// function was called — a normal race the caller need not worry about).
+/// Uses overlapped I/O internally so that `ConnectNamedPipe` and `ReadFile`
+/// wait on a Win32 event with `GetOverlappedResult`. This eliminates the
+/// race where a synchronous `ConnectNamedPipe` would block indefinitely
+/// after a client connect/disconnect cycle that completed before the
+/// server entered the wait.
+///
+/// Returns an empty `Vec` if the connect or first read fails. Partially-read
+/// events are decoded best-effort.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
-    // SAFETY: pipe is a valid HANDLE and null is a valid lpOverlapped value
-    // for synchronous (non-overlapped) named-pipe I/O.
-    let connect_result = unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) };
-    // SAFETY: GetLastError is always safe to call immediately after a Win32 call.
-    let last_error = unsafe { GetLastError() };
-
-    // connect_result == 0 means the Win32 call returned FALSE.
-    // ERROR_PIPE_CONNECTED is acceptable: the client connected between
-    // CreateNamedPipeW and ConnectNamedPipe — data may already be buffered.
-    if connect_result == 0 && last_error != ERROR_PIPE_CONNECTED {
+    // ----- Connect (overlapped) -----------------------------------------
+    // SAFETY: All Win32 calls are checked; the event handle has a single owner.
+    let connect_event =
+        unsafe { CreateEventW(std::ptr::null(), 1 /* manual reset */, 0, std::ptr::null()) };
+    if connect_event.is_null() {
         return Vec::new();
     }
 
+    let mut connect_overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    connect_overlapped.hEvent = connect_event;
+
+    // SAFETY: pipe is a valid HANDLE; connect_overlapped lives until we
+    // observe its completion (we either return early or wait below).
+    let connect_result = unsafe { ConnectNamedPipe(pipe, &mut connect_overlapped) };
+
+    // With FILE_FLAG_OVERLAPPED, ConnectNamedPipe always returns FALSE.
+    // The interesting cases are encoded in GetLastError().
+    if connect_result == 0 {
+        // SAFETY: GetLastError is always safe to call after a Win32 call.
+        let err = unsafe { GetLastError() };
+        match err {
+            ERROR_PIPE_CONNECTED => {
+                // Client connected before our ConnectNamedPipe call —
+                // accepted, proceed to ReadFile. Win32 documents that the
+                // event is NOT signalled in this case, but the read loop
+                // below uses its own per-iteration overlapped struct, so we
+                // just continue.
+            }
+            ERROR_IO_PENDING => {
+                // Async wait; block on the event handle.
+                // SAFETY: connect_event is a valid manual-reset event handle.
+                let wait = unsafe { WaitForSingleObject(connect_event, INFINITE) };
+                if wait != WAIT_OBJECT_0 {
+                    // SAFETY: connect_event is owned by us.
+                    unsafe { CloseHandle(connect_event) };
+                    return Vec::new();
+                }
+            }
+            _ => {
+                // Hard failure (e.g. invalid handle).
+                // SAFETY: connect_event is owned by us.
+                unsafe { CloseHandle(connect_event) };
+                return Vec::new();
+            }
+        }
+    }
+
+    // ----- Read (overlapped) --------------------------------------------
     let mut raw_buf: Vec<u8> = Vec::with_capacity(4096);
     let mut read_scratch = [0u8; 4096];
     let mut events: Vec<AccessEvent> = Vec::new();
 
+    // Reuse the same event handle for ReadFile completions; manual-reset
+    // means we explicitly ResetEvent before each operation.
     loop {
-        let mut bytes_read: u32 = 0;
+        // SAFETY: connect_event is a valid manual-reset event handle.
+        unsafe { ResetEvent(connect_event) };
 
-        // SAFETY: pipe is a valid HANDLE; read_scratch is a live mutable
-        // buffer; null is valid for lpOverlapped with synchronous I/O.
+        let mut io_overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        io_overlapped.hEvent = connect_event;
+
+        // SAFETY: pipe is a valid overlapped HANDLE; read_scratch lives
+        // until we either complete the wait or break out of this iteration.
         let ok = unsafe {
             ReadFile(
                 pipe,
                 read_scratch.as_mut_ptr().cast(),
                 4096,
-                &mut bytes_read,
-                std::ptr::null_mut(),
+                std::ptr::null_mut(), // bytes_read retrieved via GetOverlappedResult
+                &mut io_overlapped,
             )
         };
 
-        if ok == 0 || bytes_read == 0 {
+        let mut bytes_read: u32 = 0;
+        if ok == 0 {
             // SAFETY: GetLastError is always safe to call.
             let err = unsafe { GetLastError() };
-            // ERROR_BROKEN_PIPE: client closed the pipe (normal shutdown).
-            // ERROR_NO_DATA:     no more data (pipe closing in NOWAIT mode).
-            // bytes_read == 0:   zero-length read — treat as EOF.
-            if err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA || bytes_read == 0 {
+            match err {
+                ERROR_IO_PENDING => {
+                    // SAFETY: connect_event is a valid event handle.
+                    let wait = unsafe { WaitForSingleObject(connect_event, INFINITE) };
+                    if wait != WAIT_OBJECT_0 {
+                        break;
+                    }
+                    // SAFETY: pipe is valid; io_overlapped is alive; bWait=FALSE
+                    // because the event already signalled.
+                    let got = unsafe {
+                        GetOverlappedResult(pipe, &io_overlapped, &mut bytes_read, 0)
+                    };
+                    if got == 0 {
+                        // ERROR_BROKEN_PIPE / ERROR_HANDLE_EOF: client closed —
+                        // normal shutdown. Anything else: stop reading.
+                        break;
+                    }
+                }
+                ERROR_BROKEN_PIPE | ERROR_HANDLE_EOF | ERROR_NO_DATA => {
+                    // Client already closed the pipe between iterations.
+                    break;
+                }
+                _ => {
+                    // Any other error — stop reading.
+                    break;
+                }
+            }
+        } else {
+            // Synchronous completion (rare on overlapped handles, but legal).
+            // SAFETY: pipe is valid; io_overlapped is alive.
+            let got = unsafe {
+                GetOverlappedResult(pipe, &io_overlapped, &mut bytes_read, 0)
+            };
+            if got == 0 {
                 break;
             }
-            // Any other error — stop reading.
+        }
+
+        if bytes_read == 0 {
+            // Zero-length read → EOF.
             break;
         }
 
@@ -200,6 +284,9 @@ pub fn read_events(pipe: HANDLE) -> Vec<AccessEvent> {
         events.push(event);
         offset += consumed;
     }
+
+    // SAFETY: connect_event is a valid event handle owned solely by this fn.
+    unsafe { CloseHandle(connect_event) };
 
     events
 }
@@ -526,7 +613,6 @@ mod tests {
     /// DISCONNECTED state and ConnectNamedPipe blocks indefinitely. The
     /// end-to-end behavior is validated by the sandbox integration test.
     #[test]
-    #[ignore = "requires careful concurrency — end-to-end tested by windows_integration test"]
     fn pipe_round_trip_single_event() {
         let (handle, name) = create_pipe().expect("create_pipe should succeed");
 
