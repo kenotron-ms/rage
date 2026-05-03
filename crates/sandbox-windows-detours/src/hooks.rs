@@ -1,7 +1,7 @@
 #![cfg(windows)]
 
 use crate::ipc::PipeClient;
-use retour::static_detour;
+use retour::GenericDetour;
 use sandbox::event::AccessEvent;
 use std::io;
 use std::sync::{Mutex, OnceLock};
@@ -15,18 +15,13 @@ use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 pub(crate) static IPC_CLIENT: OnceLock<Mutex<PipeClient>> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
-// Static detour declarations
+// Detour storage (stable-Rust replacement for the retour `static_detour!` macro)
 // ---------------------------------------------------------------------------
-
-static_detour! {
-    static HookCreateFileW: unsafe extern "system" fn(
-        *const u16, u32, u32, *const u8, u32, u32, HANDLE
-    ) -> HANDLE;
-
-    static HookNtCreateFile: unsafe extern "system" fn(
-        *mut HANDLE, u32, *const u8, *mut u8, *const i64, u32, u32, u32, u32, *mut u8, u32
-    ) -> NTSTATUS;
-}
+//
+// `static_detour!` in retour 0.3 requires nightly (it activates unstable language
+// features via the `static-detour` feature → `nightly` feature chain).
+// We store the detours in OnceLock cells instead — populated exactly once during
+// `setup_hooks`, then called from the hook trampolines via `.call(...)`.
 
 /// Type alias for transmuting the raw `CreateFileW` function pointer.
 type CreateFileWFn =
@@ -46,6 +41,12 @@ type NtCreateFileFn = unsafe extern "system" fn(
     *mut u8,
     u32,
 ) -> NTSTATUS;
+
+/// Detour for `kernel32!CreateFileW`. Set once during `setup_hooks`.
+static CREATE_FILE_W_DETOUR: OnceLock<GenericDetour<CreateFileWFn>> = OnceLock::new();
+
+/// Detour for `ntdll!NtCreateFile`. Set once during `setup_hooks`.
+static NT_CREATE_FILE_DETOUR: OnceLock<GenericDetour<NtCreateFileFn>> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -160,7 +161,8 @@ fn send_access(is_write: bool, path: Option<String>) {
 // Hook implementations
 // ---------------------------------------------------------------------------
 
-/// Hook for `kernel32!CreateFileW`.
+/// Hook for `kernel32!CreateFileW`. Forwards to the original via the
+/// stored detour's trampoline.
 extern "system" fn hook_create_file_w(
     lp_file_name: *const u16,
     dw_desired_access: u32,
@@ -177,10 +179,15 @@ extern "system" fn hook_create_file_w(
         (dw_desired_access & GENERIC_WRITE) != 0 || (dw_desired_access & FILE_WRITE_DATA) != 0;
     send_access(is_write, path);
 
+    // The detour cell is populated before any hook fires (setup_hooks
+    // installs the detour AFTER OnceLock::set), so .get() is always Some.
     // SAFETY: All arguments are forwarded unmodified to the original function
     // via the retour trampoline.
+    let detour = CREATE_FILE_W_DETOUR
+        .get()
+        .expect("CREATE_FILE_W_DETOUR must be initialized before hook fires");
     unsafe {
-        HookCreateFileW.call(
+        detour.call(
             lp_file_name,
             dw_desired_access,
             dw_share_mode,
@@ -192,7 +199,8 @@ extern "system" fn hook_create_file_w(
     }
 }
 
-/// Hook for `ntdll!NtCreateFile`.
+/// Hook for `ntdll!NtCreateFile`. Forwards to the original via the stored
+/// detour's trampoline.
 #[allow(clippy::too_many_arguments)]
 extern "system" fn hook_nt_create_file(
     file_handle: *mut HANDLE,
@@ -218,8 +226,11 @@ extern "system" fn hook_nt_create_file(
 
     // SAFETY: All arguments are forwarded unmodified to the original function
     // via the retour trampoline.
+    let detour = NT_CREATE_FILE_DETOUR
+        .get()
+        .expect("NT_CREATE_FILE_DETOUR must be initialized before hook fires");
     unsafe {
-        HookNtCreateFile.call(
+        detour.call(
             file_handle,
             desired_access,
             object_attributes,
@@ -253,7 +264,8 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 /// 1. Connects to the named pipe at `pipe_name` (returns error if absent).
 /// 2. Stores the [`PipeClient`] in the global [`IPC_CLIENT`].
 /// 3. Resolves `CreateFileW` from `kernel32.dll` and `NtCreateFile` from
-///    `ntdll.dll`, then installs inline patches via retour.
+///    `ntdll.dll`, constructs a `GenericDetour` for each, enables them, and
+///    stores them in `CREATE_FILE_W_DETOUR` / `NT_CREATE_FILE_DETOUR`.
 ///
 /// # Errors
 ///
@@ -262,6 +274,8 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 /// - A module handle cannot be obtained (`GetModuleHandleW` returns 0).
 /// - A function address cannot be resolved (`GetProcAddress` returns `None`).
 /// - A detour cannot be initialized or enabled (retour returns an error).
+/// - The OnceLock for either detour was already populated (would only happen
+///   if `setup_hooks` was called twice in the same process).
 #[allow(clippy::manual_c_str_literals)]
 pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
     // 1. Connect to the named pipe — propagate any error immediately.
@@ -287,13 +301,14 @@ pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
             .ok_or_else(io::Error::last_os_error)?;
         let create_file_w: CreateFileWFn = std::mem::transmute(create_file_w_addr);
 
-        HookCreateFileW
-            .initialize(create_file_w, |a, b, c, d, e, f, g| {
-                hook_create_file_w(a, b, c, d, e, f, g)
-            })
-            .map_err(|e| io::Error::other(e.to_string()))?
+        let create_detour = GenericDetour::<CreateFileWFn>::new(create_file_w, hook_create_file_w)
+            .map_err(|e| io::Error::other(format!("CreateFileW detour::new: {e}")))?;
+        create_detour
             .enable()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+            .map_err(|e| io::Error::other(format!("CreateFileW detour::enable: {e}")))?;
+        CREATE_FILE_W_DETOUR
+            .set(create_detour)
+            .map_err(|_| io::Error::other("CREATE_FILE_W_DETOUR already initialized"))?;
 
         // ----------------------------------------------------------------
         // ntdll!NtCreateFile
@@ -308,13 +323,14 @@ pub fn setup_hooks(pipe_name: &str) -> io::Result<()> {
             .ok_or_else(io::Error::last_os_error)?;
         let nt_create_file: NtCreateFileFn = std::mem::transmute(nt_create_file_addr);
 
-        HookNtCreateFile
-            .initialize(nt_create_file, |a, b, c, d, e, f, g, h, i, j, k| {
-                hook_nt_create_file(a, b, c, d, e, f, g, h, i, j, k)
-            })
-            .map_err(|e| io::Error::other(e.to_string()))?
+        let nt_detour = GenericDetour::<NtCreateFileFn>::new(nt_create_file, hook_nt_create_file)
+            .map_err(|e| io::Error::other(format!("NtCreateFile detour::new: {e}")))?;
+        nt_detour
             .enable()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+            .map_err(|e| io::Error::other(format!("NtCreateFile detour::enable: {e}")))?;
+        NT_CREATE_FILE_DETOUR
+            .set(nt_detour)
+            .map_err(|_| io::Error::other("NT_CREATE_FILE_DETOUR already initialized"))?;
     }
 
     Ok(())
