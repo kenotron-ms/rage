@@ -1,0 +1,9 @@
+[alias]
+# Mirror what CI runs in the Test job (all platforms, native target)
+ci-fmt   = "fmt --all -- --check"
+ci-clippy = "clippy --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib --all-targets -- -D warnings"
+ci-test  = "test --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib"
+
+# Windows cross-compile check — catches Windows-only compile errors on macOS.
+# Requires: rustup target add x86_64-pc-windows-msvc
+ci-clippy-windows = "clippy --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib --target x86_64-pc-windows-msvc --all-targets -- -D warnings"
