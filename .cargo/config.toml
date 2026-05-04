@@ -1,9 +1,19 @@
 [alias]
-# Mirror what CI runs in the Test job (all platforms, native target)
-ci-fmt   = "fmt --all -- --check"
-ci-clippy = "clippy --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib --all-targets -- -D warnings"
-ci-test  = "test --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib"
+# Format check — same on all platforms.
+ci-fmt = "fmt --all -- --check"
 
-# Windows cross-compile check — catches Windows-only compile errors on macOS.
-# Requires: rustup target add x86_64-pc-windows-msvc
-ci-clippy-windows = "clippy --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib --target x86_64-pc-windows-msvc --all-targets -- -D warnings"
+# Clippy — platform-specific excludes mirror ci.yml matrix.include[*].exclude_flags.
+# One source of truth: change excludes here and CI picks them up automatically.
+ci-clippy-linux   = "clippy --workspace --exclude sandbox-macos-dylib --exclude sandbox-windows-detours --exclude sandbox-linux-ebpf --all-targets -- -D warnings"
+ci-clippy-macos   = "clippy --workspace --exclude sandbox-linux-ebpf --exclude sandbox-windows-detours --all-targets -- -D warnings"
+ci-clippy-windows = "clippy --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib --all-targets -- -D warnings"
+
+# Tests — same excludes as clippy.
+ci-test-linux   = "test --workspace --exclude sandbox-macos-dylib --exclude sandbox-windows-detours --exclude sandbox-linux-ebpf"
+ci-test-macos   = "test --workspace --exclude sandbox-linux-ebpf --exclude sandbox-windows-detours"
+ci-test-windows = "test --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib"
+
+# Build — used by the e2e-smoke job.
+ci-build-linux   = "build --workspace --exclude sandbox-macos-dylib --exclude sandbox-windows-detours --exclude sandbox-linux-ebpf"
+ci-build-macos   = "build --workspace --exclude sandbox-linux-ebpf --exclude sandbox-windows-detours"
+ci-build-windows = "build --workspace --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib"
