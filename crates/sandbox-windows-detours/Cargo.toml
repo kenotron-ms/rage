@@ -18,7 +18,9 @@ name = "rage_sandbox"
 crate-type = ["cdylib"]
 
 [target.'cfg(windows)'.dependencies]
-retour = { version = "0.3", features = ["static-detour"] }
+# Use GenericDetour (stable Rust). The static-detour feature requires
+# nightly; we store detours in OnceLock<GenericDetour<...>> ourselves instead.
+retour = { version = "0.3" }
 # Note: in windows-sys 0.59, CreateFileW is gated behind Win32_Security
 # (it takes *const SECURITY_ATTRIBUTES).  GetCurrentProcessId likewise
 # requires Win32_Security on some configurations.  Add it unconditionally.

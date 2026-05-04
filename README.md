@@ -66,9 +66,9 @@ The daemon, the hub, and the spoke are all `rage` — same binary, different con
 |---|---|---|
 | macOS | ✅ Supported | DYLD interpose (`__DATA,__interpose` in a Mach-O dylib loaded via `DYLD_INSERT_LIBRARIES`) |
 | Linux | ✅ Supported | eBPF tracepoints (aya loader, `sys_enter_*` hooks, ring-buffer events) |
-| Windows | 🔜 Planned | Microsoft Detours inline patching (DLL injected into a suspended child via `DetourCreateProcessWithDllsW`, named-pipe IPC) |
+| Windows | ✅ Supported | Inline patching via `retour` (DLL injected into a suspended child via `CreateRemoteThread(LoadLibraryW)`; `kernel32!CreateFileW` and `ntdll!NtCreateFile` hooked; named-pipe IPC) |
 
-The Windows backend is a planned `sandbox-windows-detours` crate. The mechanism deliberately mirrors BuildXL's Windows sandbox so a rage build on Windows matches BuildXL's correctness model. See [`docs/architecture/SANDBOX.md`](docs/architecture/SANDBOX.md) for the design.
+The Windows backend lives in the `sandbox-windows-detours` crate. The mechanism deliberately mirrors BuildXL's Windows sandbox so a rage build on Windows matches BuildXL's correctness model. See [`docs/architecture/SANDBOX.md`](docs/architecture/SANDBOX.md) for the design.
 
 ## Honest comparison
 
@@ -114,11 +114,11 @@ rage spoke --hub $RAGE_HUB_ADDRESS
 
 - [`docs/architecture/OVERVIEW.md`](docs/architecture/OVERVIEW.md) — system architecture and crate layout
 - [`docs/architecture/CACHING.md`](docs/architecture/CACHING.md) — two-phase fingerprinting end to end
-- [`docs/architecture/SANDBOX.md`](docs/architecture/SANDBOX.md) — DYLD interpose on macOS, eBPF on Linux, Detours on Windows (planned)
+- [`docs/architecture/SANDBOX.md`](docs/architecture/SANDBOX.md) — DYLD interpose on macOS, eBPF on Linux, Detours on Windows
 - [`docs/architecture/INSTALL-CACHING.md`](docs/architecture/INSTALL-CACHING.md) — install + postinstall artifact cache
 - [`docs/architecture/DISTRIBUTED.md`](docs/architecture/DISTRIBUTED.md) — hub/spoke gRPC scheduler
 - [`docs/architecture/COMPARISON.md`](docs/architecture/COMPARISON.md) — vs lage, Turborepo, Nx, BuildXL, Bazel
 
 ## Status
 
-Pre-1.0. macOS and Linux supported. Windows is not yet implemented. The TypeScript plugin is the first ecosystem; the trait is designed for Rust, Go, and Python plugins to follow without scheduler changes.
+Pre-1.0. macOS, Linux, and Windows supported. The TypeScript plugin is the first ecosystem; the trait is designed for Rust, Go, and Python plugins to follow without scheduler changes.

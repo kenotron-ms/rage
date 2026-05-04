@@ -21,19 +21,10 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux
-            # Exclude macOS, Windows, AND Linux eBPF crates.
-            # sandbox-linux-ebpf is excluded because its build.rs compiles a BPF
-            # program that requires nightly + bpf-linker.  The sandbox crate uses
-            # the unsupported stub on Linux when the `ebpf` feature is off (default).
-            exclude_flags: --exclude sandbox-macos-dylib --exclude sandbox-windows-detours --exclude sandbox-linux-ebpf
           - os: macos-latest
             platform: macos
-            # Exclude Linux eBPF and Windows Detours crates
-            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-windows-detours
           - os: windows-latest
             platform: windows
-            # Exclude macOS and Linux sandbox crates
-            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib
 
     steps:
       - uses: actions/checkout@v4
@@ -43,10 +34,6 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Install Rust nightly (Windows - required for Detours DLL)
-        if: matrix.os == 'windows-latest'
-        run: rustup toolchain install nightly --profile default
-        shell: bash
 
       - name: Install protoc (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -66,19 +53,15 @@ jobs:
           shared-key: ${{ matrix.platform }}
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo ci-fmt
 
       - name: Clippy
-        run: cargo clippy --workspace ${{ matrix.exclude_flags }} --all-targets -- -D warnings
+        run: cargo ci-clippy-${{ matrix.platform }}
         shell: bash
-        env:
-          RUSTUP_TOOLCHAIN: ${{ matrix.os == 'windows-latest' && 'nightly' || 'stable' }}
 
       - name: Run tests
-        run: cargo test --workspace ${{ matrix.exclude_flags }}
+        run: cargo ci-test-${{ matrix.platform }}
         shell: bash
-        env:
-          RUSTUP_TOOLCHAIN: ${{ matrix.os == 'windows-latest' && 'nightly' || 'stable' }}
 
   # Build the release binary to catch any linker/feature-flag issues
   build:
@@ -90,11 +73,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         include:
           - os: ubuntu-latest
-            exclude_flags: --exclude sandbox-macos-dylib --exclude sandbox-windows-detours
+            platform: linux
           - os: macos-latest
-            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-windows-detours
+            platform: macos
           - os: windows-latest
-            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib
+            platform: windows
 
     steps:
       - uses: actions/checkout@v4
@@ -226,8 +209,8 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install Rust nightly toolchain (for Detours DLL - retour crate requires nightly)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -247,7 +230,6 @@ jobs:
         env:
           RAGE_SANDBOX_DLL_PATH: ${{ github.workspace }}\target\release\rage_sandbox.dll
         shell: pwsh
-        continue-on-error: true
 
       - name: Verify rage binary runs on Windows
         run: .\target\release\rage.exe --version
@@ -261,14 +243,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         include:
           - os: ubuntu-latest
-            # Exclude sandbox-linux-ebpf: its build.rs compiles a BPF program
-            # requiring nightly+bpf-linker.  The sandbox crate falls back to the
-            # unsupported stub (safe for loose-mode e2e tests).
-            exclude_flags: --exclude sandbox-macos-dylib --exclude sandbox-windows-detours --exclude sandbox-linux-ebpf
+            platform: linux
           - os: macos-latest
-            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-windows-detours
+            platform: macos
           - os: windows-latest
-            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib
+            platform: windows
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
@@ -276,10 +255,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Rust nightly (Windows - required for Detours DLL)
-        if: matrix.os == 'windows-latest'
-        run: rustup toolchain install nightly
-        shell: bash
 
       - name: Install protoc (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -307,10 +282,8 @@ jobs:
           key: fixtures-pnpm-${{ matrix.os }}-${{ hashFiles('tests/fixtures/**/pnpm-lock.yaml') }}
 
       - name: Build rage
-        run: cargo build --workspace ${{ matrix.exclude_flags }}
+        run: cargo ci-build-${{ matrix.platform }}
         shell: bash
-        env:
-          RUSTUP_TOOLCHAIN: ${{ matrix.os == 'windows-latest' && 'nightly' || 'stable' }}
 
       - name: Run e2e fixture smoke tests
         run: node tests/fixtures/run.mjs
