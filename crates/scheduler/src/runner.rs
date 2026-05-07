@@ -291,8 +291,7 @@ pub async fn run_tasks(
                 });
             }
 
-            let result =
-                run_single_task(task, cache_clone, plugin_clone, store_clone).await;
+            let result = run_single_task(task, cache_clone, plugin_clone, store_clone).await;
             let _ = done_tx.send(match &result {
                 Ok(()) => DepState::Done,
                 Err(_) => DepState::Failed,
