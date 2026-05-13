@@ -573,6 +573,7 @@ async fn cmd_run(
             plugin_arc,
             artifact_store,
             config.max_concurrency,
+            config.cold_concurrency,
         )
         .await
         .with_context(|| format!("'{script}' run failed"))?;

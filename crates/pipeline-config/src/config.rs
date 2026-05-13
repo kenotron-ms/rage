@@ -131,6 +131,20 @@ pub struct RageConfig {
     /// ```
     #[serde(rename = "maxConcurrency")]
     pub max_concurrency: Option<usize>,
+    /// Maximum number of *cold-start* tasks (no RSS history) that may run
+    /// concurrently.  Defaults to `min(cpu_count, available_gb / 2)`, which
+    /// gives full core utilisation on memory-rich machines and a conservative
+    /// cap on constrained ones.
+    ///
+    /// Raise this on a machine with ample RAM to let first builds run faster.
+    /// Lower it on constrained CI runners to avoid OOM.
+    ///
+    /// Example in rage.json:
+    /// ```json
+    /// { "coldConcurrency": 8 }
+    /// ```
+    #[serde(rename = "coldConcurrency", default)]
+    pub cold_concurrency: Option<usize>,
 }
 
 /// Load `rage.json` from the workspace root. Returns `None` if absent.

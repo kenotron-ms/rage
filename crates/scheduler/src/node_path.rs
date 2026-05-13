@@ -608,6 +608,7 @@ mod tests {
 
     // ── build_node_path ───────────────────────────────────────────────────────
 
+    #[cfg(not(windows))] // PATH uses ':' separator; Windows uses ';' — would split drive letters
     #[test]
     fn build_node_path_prepends_pkg_then_workspace_then_existing() {
         let ws = tempdir().unwrap();
@@ -650,6 +651,7 @@ mod tests {
         assert_eq!(count, 1, "node_modules/.bin must appear exactly once");
     }
 
+    #[cfg(not(windows))] // fake_fnm creates Unix-style paths; Windows paths don't match expected format
     #[test]
     fn build_node_path_includes_version_manager_bin_when_node_version_set() {
         let home = tempdir().unwrap();

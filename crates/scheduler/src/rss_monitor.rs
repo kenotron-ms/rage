@@ -108,6 +108,9 @@ mod tests {
         let _ = peak; // suppress unused warning in release builds
     }
 
+    #[cfg(not(windows))]
+    // On Windows, PID 0 is the real System Idle Process — sysinfo
+    // finds it and the monitor loops forever instead of returning 0.
     #[tokio::test]
     async fn returns_zero_for_nonexistent_pid() {
         // PID 0 is not a valid user process on macOS or Linux.
