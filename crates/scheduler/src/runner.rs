@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 use tokio::process::Command;
+use tokio::sync::watch;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -29,6 +30,38 @@ pub enum RunError {
         #[source]
         source: std::io::Error,
     },
+    #[error("task {package}#{script} skipped — upstream dependency failed")]
+    Skipped { package: String, script: String },
+}
+
+/// Per-task completion state shared by the continuous-topological scheduler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DepState {
+    Pending,
+    Done,
+    Failed,
+}
+
+/// Await all `dep_receivers` until each leaves [`DepState::Pending`].
+/// Returns `true` if any dep failed (or its sender was dropped), `false` if
+/// all succeeded.
+async fn await_deps(dep_receivers: Vec<watch::Receiver<DepState>>) -> bool {
+    for mut rx in dep_receivers {
+        loop {
+            let state = *rx.borrow();
+            if state != DepState::Pending {
+                if state == DepState::Failed {
+                    return true;
+                }
+                break;
+            }
+            // Sender dropped without sending a final state — treat as failure.
+            if rx.changed().await.is_err() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Compute a content-addressed fingerprint for a root task.
@@ -163,8 +196,6 @@ pub async fn run_tasks(
     plugin: Option<std::sync::Arc<dyn plugin::EcosystemPlugin>>,
     artifact_store: Option<std::sync::Arc<artifact_store::LocalArtifactStore>>,
 ) -> anyhow::Result<()> {
-    use tokio::sync::watch;
-
     // Partition into root and package tasks. Root tasks (install) remain a
     // barrier — they must complete before any package task starts. We don't
     // need topological levels for the package tasks because each task
@@ -223,13 +254,6 @@ pub async fn run_tasks(
     // Per-package completion signal. `Pending` while the task is unfinished;
     // `Done` on success; `Failed` if the task itself or any of its deps
     // failed. Downstream tasks read this state to decide when to start.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum DepState {
-        Pending,
-        Done,
-        Failed,
-    }
-
     let mut senders: HashMap<String, watch::Sender<DepState>> = HashMap::new();
     let mut receivers: HashMap<String, watch::Receiver<DepState>> = HashMap::new();
     for task in &package_tasks {
@@ -257,37 +281,14 @@ pub async fn run_tasks(
         let plugin_clone = plugin.clone();
         let store_clone = artifact_store.clone();
         set.spawn(async move {
-            // Await every dep until it leaves the Pending state.
-            let mut any_dep_failed = false;
-            for mut rx in dep_receivers {
-                loop {
-                    let state = *rx.borrow();
-                    if state != DepState::Pending {
-                        if state == DepState::Failed {
-                            any_dep_failed = true;
-                        }
-                        break;
-                    }
-                    // If the sender was dropped without a final state, treat
-                    // as failure (defensive — abort_all path).
-                    if rx.changed().await.is_err() {
-                        any_dep_failed = true;
-                        break;
-                    }
-                }
-                if any_dep_failed {
-                    break;
-                }
-            }
-
+            let any_dep_failed = await_deps(dep_receivers).await;
             if any_dep_failed {
                 // Propagate failure downstream without running the subprocess.
                 let _ = done_tx.send(DepState::Failed);
                 eprintln!("[rage] {pkg}#{script} \u{2717} skipped (upstream failed)");
-                return Err(RunError::TaskFailed {
+                return Err(RunError::Skipped {
                     package: pkg,
                     script,
-                    code: -1,
                 });
             }
 
@@ -791,12 +792,10 @@ pub async fn run_tasks_two_phase(
     // advancing) that wave-parallel scheduling exhibits. Per-subprocess
     // CPU/memory gating is still enforced inside run_single_task_two_phase
     // via the semaphore and memory budget.
-    use tokio::sync::watch;
 
-    // compute_task_levels is retained for ordering of the install/root wave
-    // and so that any future stats consumer can still see the topological
-    // depth of each task; the continuous scheduler does not iterate it.
-    let _ = compute_task_levels(dag, &tasks);
+    // The continuous scheduler does not use pre-computed levels — each task
+    // carries its own deps in `dep_package_names`.
+    let _ = dag;
 
     let (root_tasks, package_tasks): (Vec<Task>, Vec<Task>) =
         tasks.into_iter().partition(|t| t.is_root);
@@ -848,21 +847,28 @@ pub async fn run_tasks_two_phase(
             ));
         }
         let mut errors: Vec<String> = Vec::new();
+        let mut did_abort = false;
         while let Some(join_result) = set.join_next().await {
             match join_result {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    errors.push(e.to_string());
+                    if !did_abort {
+                        errors.push(e.to_string());
+                    }
+                    did_abort = true;
                     set.abort_all();
                 }
                 Err(_) => {
-                    errors.push(
-                        RunError::Killed {
-                            package: "unknown".to_string(),
-                            script: "unknown".to_string(),
-                        }
-                        .to_string(),
-                    );
+                    if !did_abort {
+                        errors.push(
+                            RunError::Killed {
+                                package: "unknown".to_string(),
+                                script: "unknown".to_string(),
+                            }
+                            .to_string(),
+                        );
+                    }
+                    did_abort = true;
                     set.abort_all();
                 }
             }
@@ -874,13 +880,6 @@ pub async fn run_tasks_two_phase(
     if package_tasks.is_empty() {
         summary.lock().unwrap().print();
         return Ok(());
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum DepState {
-        Pending,
-        Done,
-        Failed,
     }
 
     let mut senders: HashMap<String, watch::Sender<DepState>> = HashMap::new();
@@ -914,33 +913,13 @@ pub async fn run_tasks_two_phase(
             (Arc::clone(&s.peak_active), Arc::clone(&s.current_active))
         };
         set.spawn(async move {
-            let mut any_dep_failed = false;
-            for mut rx in dep_receivers {
-                loop {
-                    let state = *rx.borrow();
-                    if state != DepState::Pending {
-                        if state == DepState::Failed {
-                            any_dep_failed = true;
-                        }
-                        break;
-                    }
-                    if rx.changed().await.is_err() {
-                        any_dep_failed = true;
-                        break;
-                    }
-                }
-                if any_dep_failed {
-                    break;
-                }
-            }
-
+            let any_dep_failed = await_deps(dep_receivers).await;
             if any_dep_failed {
                 let _ = done_tx.send(DepState::Failed);
                 eprintln!("[rage] {pkg}#{script} \u{2717} skipped (upstream failed)");
-                return Err(RunError::TaskFailed {
+                return Err(RunError::Skipped {
                     package: pkg,
                     script,
-                    code: -1,
                 });
             }
 
@@ -965,21 +944,28 @@ pub async fn run_tasks_two_phase(
     }
 
     let mut errors: Vec<String> = Vec::new();
+    let mut did_abort = false;
     while let Some(join_result) = set.join_next().await {
         match join_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                errors.push(e.to_string());
+                if !did_abort {
+                    errors.push(e.to_string());
+                }
+                did_abort = true;
                 set.abort_all();
             }
             Err(_) => {
-                errors.push(
-                    RunError::Killed {
-                        package: "unknown".to_string(),
-                        script: "unknown".to_string(),
-                    }
-                    .to_string(),
-                );
+                if !did_abort {
+                    errors.push(
+                        RunError::Killed {
+                            package: "unknown".to_string(),
+                            script: "unknown".to_string(),
+                        }
+                        .to_string(),
+                    );
+                }
+                did_abort = true;
                 set.abort_all();
             }
         }
