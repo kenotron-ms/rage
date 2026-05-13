@@ -139,10 +139,19 @@ pub fn compute_task_levels(dag: &WorkspaceDag, tasks: &[Task]) -> Vec<Vec<Task>>
     }
 }
 
-/// Execute tasks in wave-parallel order using Tokio.
+/// Execute tasks in continuous-topological order using Tokio.
 ///
-/// For each wave, all tasks run concurrently. Waves run sequentially.
-/// On any task failure, the wave is aborted and the error is returned.
+/// Root tasks (e.g. `yarn install`) form an initial barrier: they all
+/// complete before any package task starts. Package tasks themselves are
+/// *not* run in waves — every package task is spawned up front, then awaits
+/// a per-dep completion signal before invoking the subprocess. As soon as a
+/// task's specific deps finish it can run, even if other tasks at the same
+/// topological depth are still building. This avoids the wave-collapse tail
+/// that leaves CPUs idle waiting for a single straggler at each level.
+///
+/// On any task failure, downstream tasks observe the failure via the watch
+/// channel and exit without running their subprocess; the JoinSet is also
+/// aborted so already-running tasks are cancelled.
 ///
 /// `plugin` and `artifact_store` are optional. When provided, postinstall
 /// scripts are run after any root task (e.g. `yarn install`) completes —
@@ -154,25 +163,34 @@ pub async fn run_tasks(
     plugin: Option<std::sync::Arc<dyn plugin::EcosystemPlugin>>,
     artifact_store: Option<std::sync::Arc<artifact_store::LocalArtifactStore>>,
 ) -> anyhow::Result<()> {
-    let levels = compute_task_levels(dag, &tasks);
+    use tokio::sync::watch;
 
-    for level in levels {
+    // Partition into root and package tasks. Root tasks (install) remain a
+    // barrier — they must complete before any package task starts. We don't
+    // need topological levels for the package tasks because each task
+    // explicitly awaits its own deps below.
+    let (root_tasks, package_tasks): (Vec<Task>, Vec<Task>) =
+        tasks.into_iter().partition(|t| t.is_root);
+    // Sort root tasks by package name for deterministic logs (matches the
+    // ordering compute_task_levels produced for the root wave).
+    let mut root_tasks = root_tasks;
+    root_tasks.sort_by(|a, b| a.package_name.cmp(&b.package_name));
+    // The continuous scheduler does not need the dag directly — each task
+    // already carries its workspace-package deps in `dep_package_names`.
+    let _ = dag;
+
+    // ── Phase 1: root-task barrier ──────────────────────────────────────────
+    if !root_tasks.is_empty() {
         let mut set: JoinSet<Result<(), RunError>> = JoinSet::new();
-
-        for task in level {
-            let cache_clone = cache.clone();
-            let plugin_clone = plugin.clone();
-            let store_clone = artifact_store.clone();
+        for task in root_tasks {
             set.spawn(run_single_task(
                 task,
-                cache_clone,
-                plugin_clone,
-                store_clone,
+                cache.clone(),
+                plugin.clone(),
+                artifact_store.clone(),
             ));
         }
-
         let mut first_error: Option<RunError> = None;
-
         while let Some(join_result) = set.join_next().await {
             match join_result {
                 Ok(Ok(())) => {}
@@ -182,7 +200,7 @@ pub async fn run_tasks(
                     }
                     set.abort_all();
                 }
-                Err(_join_err) => {
+                Err(_) => {
                     if first_error.is_none() {
                         first_error = Some(RunError::Killed {
                             package: "unknown".to_string(),
@@ -192,10 +210,118 @@ pub async fn run_tasks(
                 }
             }
         }
-
         if let Some(e) = first_error {
             return Err(e.into());
         }
+    }
+
+    // ── Phase 2: package tasks, continuous topological ──────────────────────
+    if package_tasks.is_empty() {
+        return Ok(());
+    }
+
+    // Per-package completion signal. `Pending` while the task is unfinished;
+    // `Done` on success; `Failed` if the task itself or any of its deps
+    // failed. Downstream tasks read this state to decide when to start.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DepState {
+        Pending,
+        Done,
+        Failed,
+    }
+
+    let mut senders: HashMap<String, watch::Sender<DepState>> = HashMap::new();
+    let mut receivers: HashMap<String, watch::Receiver<DepState>> = HashMap::new();
+    for task in &package_tasks {
+        let (tx, rx) = watch::channel(DepState::Pending);
+        senders.insert(task.package_name.clone(), tx);
+        receivers.insert(task.package_name.clone(), rx);
+    }
+
+    let mut set: JoinSet<Result<(), RunError>> = JoinSet::new();
+    for task in package_tasks {
+        let pkg = task.package_name.clone();
+        let script = task.script_name.clone();
+        // Resolve dep receivers — only deps that are also being built in
+        // this run participate. Deps outside the task list (e.g. transitive
+        // packages already filtered out of `tasks`) are ignored.
+        let dep_receivers: Vec<watch::Receiver<DepState>> = task
+            .dep_package_names
+            .iter()
+            .filter_map(|d| receivers.get(d).cloned())
+            .collect();
+        let done_tx = senders
+            .remove(&pkg)
+            .expect("sender created for every package task");
+        let cache_clone = cache.clone();
+        let plugin_clone = plugin.clone();
+        let store_clone = artifact_store.clone();
+        set.spawn(async move {
+            // Await every dep until it leaves the Pending state.
+            let mut any_dep_failed = false;
+            for mut rx in dep_receivers {
+                loop {
+                    let state = *rx.borrow();
+                    if state != DepState::Pending {
+                        if state == DepState::Failed {
+                            any_dep_failed = true;
+                        }
+                        break;
+                    }
+                    // If the sender was dropped without a final state, treat
+                    // as failure (defensive — abort_all path).
+                    if rx.changed().await.is_err() {
+                        any_dep_failed = true;
+                        break;
+                    }
+                }
+                if any_dep_failed {
+                    break;
+                }
+            }
+
+            if any_dep_failed {
+                // Propagate failure downstream without running the subprocess.
+                let _ = done_tx.send(DepState::Failed);
+                eprintln!("[rage] {pkg}#{script} \u{2717} skipped (upstream failed)");
+                return Err(RunError::TaskFailed {
+                    package: pkg,
+                    script,
+                    code: -1,
+                });
+            }
+
+            let result = run_single_task(task, cache_clone, plugin_clone, store_clone).await;
+            let _ = done_tx.send(match &result {
+                Ok(()) => DepState::Done,
+                Err(_) => DepState::Failed,
+            });
+            result
+        });
+    }
+
+    let mut first_error: Option<RunError> = None;
+    while let Some(join_result) = set.join_next().await {
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+                set.abort_all();
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some(RunError::Killed {
+                        package: "unknown".to_string(),
+                        script: "unknown".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    if let Some(e) = first_error {
+        return Err(e.into());
     }
 
     Ok(())
@@ -655,12 +781,50 @@ pub async fn run_tasks_two_phase(
     // default estimate (total_memory / 2*cpu_count).
     let memory_budget = Arc::new(crate::resource_budget::MemoryBudget::from_system());
 
-    let levels = compute_task_levels(dag, &tasks);
+    // Continuous-topological execution.
+    //
+    // Root tasks (install) form a barrier — they must complete before any
+    // package task starts. Package tasks then run continuously: every task
+    // is spawned up front and awaits its specific deps via watch channels
+    // before invoking the cache lookup / subprocess. This eliminates the
+    // wave-collapse tail (where each level waits for its slowest task before
+    // advancing) that wave-parallel scheduling exhibits. Per-subprocess
+    // CPU/memory gating is still enforced inside run_single_task_two_phase
+    // via the semaphore and memory budget.
+    use tokio::sync::watch;
 
-    for level in levels {
+    // compute_task_levels is retained for ordering of the install/root wave
+    // and so that any future stats consumer can still see the topological
+    // depth of each task; the continuous scheduler does not iterate it.
+    let _ = compute_task_levels(dag, &tasks);
+
+    let (root_tasks, package_tasks): (Vec<Task>, Vec<Task>) =
+        tasks.into_iter().partition(|t| t.is_root);
+    let mut root_tasks = root_tasks;
+    root_tasks.sort_by(|a, b| a.package_name.cmp(&b.package_name));
+
+    let collect_errors = |errors: Vec<String>| -> anyhow::Result<()> {
+        if errors.is_empty() {
+            Ok(())
+        } else if errors.len() == 1 {
+            Err(anyhow::anyhow!("{}", errors[0]))
+        } else {
+            Err(anyhow::anyhow!(
+                "{} tasks failed:\n{}",
+                errors.len(),
+                errors
+                    .iter()
+                    .map(|e| format!("  - {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))
+        }
+    };
+
+    // ── Phase 1: root-task barrier ──────────────────────────────────────────
+    if !root_tasks.is_empty() {
         let mut set: JoinSet<Result<(), RunError>> = JoinSet::new();
-
-        for task in level {
+        for task in root_tasks {
             let cache_clone = cache.clone();
             let plugin_clone = Arc::clone(&plugin);
             let store_clone = Arc::clone(&artifact_store);
@@ -683,11 +847,7 @@ pub async fn run_tasks_two_phase(
                 cur_clone,
             ));
         }
-
-        // Bug 4 fix: collect ALL failures so every failing package is reported,
-        // not just the first one.
         let mut errors: Vec<String> = Vec::new();
-
         while let Some(join_result) = set.join_next().await {
             match join_result {
                 Ok(Ok(())) => {}
@@ -695,7 +855,7 @@ pub async fn run_tasks_two_phase(
                     errors.push(e.to_string());
                     set.abort_all();
                 }
-                Err(_join_err) => {
+                Err(_) => {
                     errors.push(
                         RunError::Killed {
                             package: "unknown".to_string(),
@@ -707,25 +867,126 @@ pub async fn run_tasks_two_phase(
                 }
             }
         }
+        collect_errors(errors)?;
+    }
 
-        if !errors.is_empty() {
-            if errors.len() == 1 {
-                return Err(anyhow::anyhow!("{}", errors[0]));
-            } else {
-                return Err(anyhow::anyhow!(
-                    "{} tasks failed:\n{}",
-                    errors.len(),
-                    errors
-                        .iter()
-                        .map(|e| format!("  - {e}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ));
+    // ── Phase 2: package tasks, continuous topological ──────────────────────
+    if package_tasks.is_empty() {
+        summary.lock().unwrap().print();
+        return Ok(());
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DepState {
+        Pending,
+        Done,
+        Failed,
+    }
+
+    let mut senders: HashMap<String, watch::Sender<DepState>> = HashMap::new();
+    let mut receivers: HashMap<String, watch::Receiver<DepState>> = HashMap::new();
+    for task in &package_tasks {
+        let (tx, rx) = watch::channel(DepState::Pending);
+        senders.insert(task.package_name.clone(), tx);
+        receivers.insert(task.package_name.clone(), rx);
+    }
+
+    let mut set: JoinSet<Result<(), RunError>> = JoinSet::new();
+    for task in package_tasks {
+        let pkg = task.package_name.clone();
+        let script = task.script_name.clone();
+        let dep_receivers: Vec<watch::Receiver<DepState>> = task
+            .dep_package_names
+            .iter()
+            .filter_map(|d| receivers.get(d).cloned())
+            .collect();
+        let done_tx = senders
+            .remove(&pkg)
+            .expect("sender created for every package task");
+        let cache_clone = cache.clone();
+        let plugin_clone = Arc::clone(&plugin);
+        let store_clone = Arc::clone(&artifact_store);
+        let sem_clone = Arc::clone(&semaphore);
+        let budget_clone = Arc::clone(&memory_budget);
+        let summary_clone = Arc::clone(&summary);
+        let (peak_clone, cur_clone) = {
+            let s = summary.lock().unwrap();
+            (Arc::clone(&s.peak_active), Arc::clone(&s.current_active))
+        };
+        set.spawn(async move {
+            let mut any_dep_failed = false;
+            for mut rx in dep_receivers {
+                loop {
+                    let state = *rx.borrow();
+                    if state != DepState::Pending {
+                        if state == DepState::Failed {
+                            any_dep_failed = true;
+                        }
+                        break;
+                    }
+                    if rx.changed().await.is_err() {
+                        any_dep_failed = true;
+                        break;
+                    }
+                }
+                if any_dep_failed {
+                    break;
+                }
+            }
+
+            if any_dep_failed {
+                let _ = done_tx.send(DepState::Failed);
+                eprintln!("[rage] {pkg}#{script} \u{2717} skipped (upstream failed)");
+                return Err(RunError::TaskFailed {
+                    package: pkg,
+                    script,
+                    code: -1,
+                });
+            }
+
+            let result = run_single_task_two_phase(
+                task,
+                cache_clone,
+                plugin_clone,
+                store_clone,
+                sem_clone,
+                budget_clone,
+                summary_clone,
+                peak_clone,
+                cur_clone,
+            )
+            .await;
+            let _ = done_tx.send(match &result {
+                Ok(()) => DepState::Done,
+                Err(_) => DepState::Failed,
+            });
+            result
+        });
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    while let Some(join_result) = set.join_next().await {
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                errors.push(e.to_string());
+                set.abort_all();
+            }
+            Err(_) => {
+                errors.push(
+                    RunError::Killed {
+                        package: "unknown".to_string(),
+                        script: "unknown".to_string(),
+                    }
+                    .to_string(),
+                );
+                set.abort_all();
             }
         }
     }
-
+    let result = collect_errors(errors);
     summary.lock().unwrap().print();
+    result?;
     Ok(())
 }
 
@@ -2012,6 +2273,184 @@ mod tests {
         run_tasks(&dag, tasks, None, None, None).await.unwrap();
         assert!(file_a.exists(), "task a should have run");
         assert!(file_b.exists(), "task b should have run");
+    }
+
+    /// Continuous-scheduler property: a task whose own deps are satisfied
+    /// must start before unrelated, slower tasks at the same topological
+    /// level finish. This is the distinction from wave-parallel scheduling,
+    /// where every level is a hard barrier.
+    ///
+    /// DAG:
+    ///   slow_leaf  — sleeps, then drops a marker file
+    ///   fast_leaf  — drops a marker file immediately
+    ///   downstream — depends only on fast_leaf; records whether slow's
+    ///                marker exists at the moment it begins running.
+    ///
+    /// Under wave-parallel scheduling, downstream would be held until the
+    /// whole level-0 wave (slow + fast) drained, so it would observe the
+    /// slow marker and write "wave". Under continuous scheduling it begins
+    /// the moment fast_leaf signals Done — well before slow_leaf finishes —
+    /// and writes "continuous".
+    #[tokio::test]
+    async fn dependent_task_starts_before_unrelated_slow_task_finishes() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let fast_marker = dir.path().join("fast.txt");
+        let slow_marker = dir.path().join("slow.txt");
+        let observation = dir.path().join("downstream_observation.txt");
+
+        let slow_cmd = format!("sleep 0.5 && touch '{}'", slow_marker.display());
+        let fast_cmd = format!("touch '{}'", fast_marker.display());
+        let downstream_cmd = format!(
+            "if [ -f '{slow}' ]; then echo wave > '{obs}'; \
+             else echo continuous > '{obs}'; fi",
+            slow = slow_marker.display(),
+            obs = observation.display(),
+        );
+
+        let mk = |name: &str, cmd: String, deps: Vec<String>| Task {
+            package_name: name.to_string(),
+            script_name: "build".to_string(),
+            command: cmd,
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
+            dep_package_names: deps,
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+
+        let tasks = vec![
+            mk("slow", slow_cmd, Vec::new()),
+            mk("fast", fast_cmd, Vec::new()),
+            mk("downstream", downstream_cmd, vec!["fast".to_string()]),
+        ];
+        let packages = vec![
+            mk_pkg("slow", &[]),
+            mk_pkg("fast", &[]),
+            mk_pkg("downstream", &["fast"]),
+        ];
+        let dag = build_dag(packages).unwrap();
+        run_tasks(&dag, tasks, None, None, None).await.unwrap();
+
+        assert!(fast_marker.exists(), "fast leaf should have run");
+        assert!(slow_marker.exists(), "slow leaf should have run");
+        let observed = std::fs::read_to_string(&observation).unwrap();
+        assert_eq!(
+            observed.trim(),
+            "continuous",
+            "downstream must start before slow_leaf finishes — got wave-parallel behavior"
+        );
+    }
+
+    /// Continuous-scheduler property: when a task fails, dependents observe
+    /// the failure via the dep-state channel, skip their subprocess, and
+    /// propagate the failure upward.
+    #[tokio::test]
+    async fn failed_dep_skips_downstream_subprocess() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let sentinel = dir.path().join("downstream_ran.txt");
+
+        let mk = |name: &str, cmd: String, deps: Vec<String>| Task {
+            package_name: name.to_string(),
+            script_name: "build".to_string(),
+            command: cmd,
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
+            dep_package_names: deps,
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+
+        let tasks = vec![
+            mk("failing", "false".to_string(), Vec::new()),
+            mk(
+                "downstream",
+                format!("touch '{}'", sentinel.display()),
+                vec!["failing".to_string()],
+            ),
+        ];
+        let packages = vec![mk_pkg("failing", &[]), mk_pkg("downstream", &["failing"])];
+        let dag = build_dag(packages).unwrap();
+        let err = run_tasks(&dag, tasks, None, None, None).await.unwrap_err();
+        // The first failure surfaced by the JoinSet is reported; either the
+        // failing task itself or the downstream "skipped" message is fine.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failing") || msg.contains("downstream"),
+            "error should reference failing dep or skipped downstream, got: {msg}"
+        );
+        assert!(
+            !sentinel.exists(),
+            "downstream subprocess must not have run when its dep failed"
+        );
+    }
+
+    /// Continuous-scheduler property: root tasks (e.g. `yarn install`)
+    /// remain a hard barrier — every root task must complete before any
+    /// package task starts.
+    #[tokio::test]
+    async fn root_task_completes_before_package_tasks_start() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let install_marker = dir.path().join("install.txt");
+        let observation = dir.path().join("pkg_observation.txt");
+
+        let install_cmd = format!("sleep 0.2 && touch '{}'", install_marker.display());
+        let pkg_cmd = format!(
+            "if [ -f '{m}' ]; then echo ok > '{o}'; else echo missing > '{o}'; fi",
+            m = install_marker.display(),
+            o = observation.display(),
+        );
+
+        let install = Task {
+            package_name: "workspace".to_string(),
+            script_name: "install".to_string(),
+            command: install_cmd,
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: true,
+            input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+        let pkg = Task {
+            package_name: "pkg".to_string(),
+            script_name: "build".to_string(),
+            command: pkg_cmd,
+            cwd: PathBuf::from("/tmp"),
+            sandbox_mode: pipeline_config::SandboxMode::default(),
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: PathBuf::from("/tmp"),
+            declared_input_globs: Vec::new(),
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+
+        let packages = vec![mk_pkg("pkg", &[])];
+        let dag = build_dag(packages).unwrap();
+        run_tasks(&dag, vec![install, pkg], None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&observation).unwrap().trim(),
+            "ok",
+            "package task must not start until the root install task finished"
+        );
     }
 
     #[tokio::test]
