@@ -160,13 +160,25 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!(ws.join("node_modules/.bin/tsc").exists());
-        // Verify it's a symlink pointing toward typescript/bin/tsc
-        let target = std::fs::read_link(ws.join("node_modules/.bin/tsc")).unwrap();
-        assert!(
-            target.to_string_lossy().contains("tsc"),
-            "symlink target should contain 'tsc', got: {}",
-            target.display()
-        );
+        // On Unix: verify it's a symlink pointing toward typescript/bin/tsc.
+        // On Windows: bin links are copies (symlinks require admin), so just
+        // verify the file exists and has content.
+        #[cfg(unix)]
+        {
+            let link_target = std::fs::read_link(ws.join("node_modules/.bin/tsc")).unwrap();
+            assert!(
+                link_target.to_string_lossy().contains("tsc"),
+                "symlink target should contain 'tsc', got: {}",
+                link_target.display()
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                ws.join("node_modules/.bin/tsc").exists(),
+                "bin link file should exist on Windows"
+            );
+        }
     }
 
     #[test]

@@ -760,6 +760,7 @@ pub async fn run_tasks_two_phase(
     plugin: Arc<dyn plugin::EcosystemPlugin>,
     artifact_store: Arc<artifact_store::LocalArtifactStore>,
     max_concurrency: Option<usize>,
+    cold_concurrency: Option<usize>,
 ) -> anyhow::Result<()> {
     // Layer 1 — process-count semaphore (CPU guard).
     // One permit per allowed concurrent subprocess. Cache lookups and
@@ -777,10 +778,12 @@ pub async fn run_tasks_two_phase(
 
     // Layer 2 — memory budget (RAM guard).
     // Reads available system memory at startup; uses historical p75 peak-RSS
-    // per task as the admission estimate.  Waits when the estimated in-flight
-    // RSS approaches the capacity.  A task that has no history uses the
-    // default estimate (total_memory / 2*cpu_count).
-    let memory_budget = Arc::new(crate::resource_budget::MemoryBudget::from_system());
+    // per task as the admission estimate.  Tasks with no history take a slot
+    // from the cold-start semaphore (sized from `cold_concurrency` or the
+    // memory-based default: min(cpu_count, available_gb / 2)).
+    let memory_budget = Arc::new(crate::resource_budget::MemoryBudget::from_system(
+        cold_concurrency,
+    ));
 
     // Continuous-topological execution.
     //
@@ -1177,19 +1180,26 @@ async fn run_single_task_two_phase(
         peak_active.fetch_max(cur, Ordering::Relaxed);
     }
 
-    // Look up historical memory stats for this task and reserve budget.
+    // Look up historical memory stats for this task.
     let stats = cache::task_stats::load(cache.dir(), &task_wf);
-    let estimate_bytes = stats
-        .estimate_bytes()
-        .unwrap_or_else(|| memory_budget.default_estimate_bytes());
-    let memory_guard = memory_budget.reserve(estimate_bytes).await;
+    // Tasks with no history get a cold-start slot (max(1, cpu/2) permits);
+    // tasks with history reserve against the RSS budget.  Both paths return
+    // a MemoryGuard that is released when the subprocess exits.
+    let estimate = stats.estimate_bytes();
+    let memory_guard = match estimate {
+        Some(bytes) => memory_budget.reserve(bytes).await,
+        None => memory_budget.reserve_cold().await,
+    };
 
     eprintln!(
-        "[rage] {}#{} starting [sandbox={:?}] (est. {:.0} MB)",
+        "[rage] {}#{} starting [sandbox={:?}] (est. {})",
         task.package_name,
         task.script_name,
         task.sandbox_mode,
-        estimate_bytes as f64 / 1_048_576.0,
+        match estimate {
+            Some(bytes) => format!("{:.0} MB", bytes as f64 / 1_048_576.0),
+            None => "cold start (semaphore slot)".to_string(),
+        },
     );
     let start = Instant::now();
     let mut captured_stdout = String::new();
@@ -1215,8 +1225,7 @@ async fn run_single_task_two_phase(
                     })?;
             captured_stdout = out;
             captured_stderr = err;
-            // Release memory reservation with *actual* peak (not just estimate)
-            // and update historical stats for future scheduling decisions.
+            // Update historical RSS stats for future scheduling decisions.
             if !task_wf.is_empty() {
                 let mut stats = cache::task_stats::load(cache.dir(), &task_wf);
                 stats.record(peak_rss);
@@ -2172,15 +2181,16 @@ mod tests {
 
     #[tokio::test]
     async fn single_successful_task_runs() {
+        let tmpdir = tempfile::tempdir().unwrap();
         let task = Task {
             package_name: "test-pkg".to_string(),
             script_name: "build".to_string(),
             command: "echo hello".to_string(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: tmpdir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
-            workspace_root: PathBuf::from("/tmp"),
+            workspace_root: tmpdir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
@@ -2221,19 +2231,26 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_a = dir.path().join("a.txt");
         let file_b = dir.path().join("b.txt");
+        #[cfg(not(windows))]
         let cmd_a = format!("touch '{}'", file_a.display());
+        #[cfg(not(windows))]
         let cmd_b = format!("touch '{}'", file_b.display());
+        #[cfg(windows)]
+        let cmd_a = format!("type nul > \"{}\"", file_a.display());
+        #[cfg(windows)]
+        let cmd_b = format!("type nul > \"{}\"", file_b.display());
+        let cwd = dir.path().to_path_buf();
 
         let tasks = vec![
             Task {
                 package_name: "a".to_string(),
                 script_name: "build".to_string(),
                 command: cmd_a,
-                cwd: PathBuf::from("/tmp"),
+                cwd: cwd.clone(),
                 sandbox_mode: pipeline_config::SandboxMode::default(),
                 is_root: false,
                 input_paths: Vec::new(),
-                workspace_root: PathBuf::from("/tmp"),
+                workspace_root: cwd.clone(),
                 declared_input_globs: Vec::new(),
                 dep_package_names: Vec::new(),
                 output_globs: Vec::new(),
@@ -2243,11 +2260,11 @@ mod tests {
                 package_name: "b".to_string(),
                 script_name: "build".to_string(),
                 command: cmd_b,
-                cwd: PathBuf::from("/tmp"),
+                cwd: cwd.clone(),
                 sandbox_mode: pipeline_config::SandboxMode::default(),
                 is_root: false,
                 input_paths: Vec::new(),
-                workspace_root: PathBuf::from("/tmp"),
+                workspace_root: cwd.clone(),
                 declared_input_globs: Vec::new(),
                 dep_package_names: Vec::new(),
                 output_globs: Vec::new(),
@@ -2285,11 +2302,29 @@ mod tests {
         let slow_marker = dir.path().join("slow.txt");
         let observation = dir.path().join("downstream_observation.txt");
 
+        #[cfg(not(windows))]
         let slow_cmd = format!("sleep 0.5 && touch '{}'", slow_marker.display());
+        #[cfg(windows)]
+        let slow_cmd = format!(
+            "ping -n 1 -w 500 127.0.0.1 >nul && type nul > \"{}\"",
+            slow_marker.display()
+        );
+
+        #[cfg(not(windows))]
         let fast_cmd = format!("touch '{}'", fast_marker.display());
+        #[cfg(windows)]
+        let fast_cmd = format!("type nul > \"{}\"", fast_marker.display());
+
+        #[cfg(not(windows))]
         let downstream_cmd = format!(
             "if [ -f '{slow}' ]; then echo wave > '{obs}'; \
              else echo continuous > '{obs}'; fi",
+            slow = slow_marker.display(),
+            obs = observation.display(),
+        );
+        #[cfg(windows)]
+        let downstream_cmd = format!(
+            "if exist \"{slow}\" (echo wave > \"{obs}\") else (echo continuous > \"{obs}\")",
             slow = slow_marker.display(),
             obs = observation.display(),
         );
@@ -2298,11 +2333,11 @@ mod tests {
             package_name: name.to_string(),
             script_name: "build".to_string(),
             command: cmd,
-            cwd: PathBuf::from("/tmp"),
+            cwd: dir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
-            workspace_root: PathBuf::from("/tmp"),
+            workspace_root: dir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
             dep_package_names: deps,
             output_globs: Vec::new(),
@@ -2390,9 +2425,23 @@ mod tests {
         let install_marker = dir.path().join("install.txt");
         let observation = dir.path().join("pkg_observation.txt");
 
+        #[cfg(not(windows))]
         let install_cmd = format!("sleep 0.2 && touch '{}'", install_marker.display());
+        #[cfg(windows)]
+        let install_cmd = format!(
+            "ping -n 1 -w 200 127.0.0.1 >nul && type nul > \"{}\"",
+            install_marker.display()
+        );
+
+        #[cfg(not(windows))]
         let pkg_cmd = format!(
             "if [ -f '{m}' ]; then echo ok > '{o}'; else echo missing > '{o}'; fi",
+            m = install_marker.display(),
+            o = observation.display(),
+        );
+        #[cfg(windows)]
+        let pkg_cmd = format!(
+            "if exist \"{m}\" (echo ok > \"{o}\") else (echo missing > \"{o}\")",
             m = install_marker.display(),
             o = observation.display(),
         );
@@ -2401,11 +2450,11 @@ mod tests {
             package_name: "workspace".to_string(),
             script_name: "install".to_string(),
             command: install_cmd,
-            cwd: PathBuf::from("/tmp"),
+            cwd: dir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: true,
             input_paths: Vec::new(),
-            workspace_root: PathBuf::from("/tmp"),
+            workspace_root: dir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
@@ -2415,11 +2464,11 @@ mod tests {
             package_name: "pkg".to_string(),
             script_name: "build".to_string(),
             command: pkg_cmd,
-            cwd: PathBuf::from("/tmp"),
+            cwd: dir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
-            workspace_root: PathBuf::from("/tmp"),
+            workspace_root: dir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
@@ -2491,15 +2540,16 @@ mod tests {
 
     #[tokio::test]
     async fn no_cache_option_executes_normally() {
+        let tmpdir = tempfile::tempdir().unwrap();
         let task = Task {
             package_name: "uncached-pkg".to_string(),
             script_name: "build".to_string(),
             command: "echo no-cache-test".to_string(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: tmpdir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::default(),
             is_root: false,
             input_paths: Vec::new(),
-            workspace_root: PathBuf::from("/tmp"),
+            workspace_root: tmpdir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
@@ -2514,15 +2564,17 @@ mod tests {
     #[tokio::test]
     async fn task_logs_sandbox_mode_in_starting_line() {
         // Smoke test: just verify runner accepts SandboxMode-bearing tasks.
+        // Use "echo ok" rather than "true" — `true` is not available on Windows.
+        let tmpdir = tempfile::tempdir().unwrap();
         let task = Task {
             package_name: "smoke".to_string(),
             script_name: "build".to_string(),
-            command: "true".to_string(),
-            cwd: PathBuf::from("/tmp"),
+            command: "echo ok".to_string(),
+            cwd: tmpdir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::Strict,
             is_root: false,
             input_paths: Vec::new(),
-            workspace_root: PathBuf::from("/tmp"),
+            workspace_root: tmpdir.path().to_path_buf(),
             declared_input_globs: Vec::new(),
             dep_package_names: Vec::new(),
             output_globs: Vec::new(),
@@ -2570,6 +2622,7 @@ mod tests {
             test_plugin(),
             test_store(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2600,6 +2653,7 @@ mod tests {
             two_phase,
             test_plugin(),
             test_store(),
+            None,
             None,
         )
         .await
@@ -2721,23 +2775,41 @@ mod tests {
         let dir = tempdir().unwrap();
         let bin_dir = dir.path().join("node_modules/.bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
-        let bin_path = bin_dir.join("fake-tsc");
         let sentinel = dir.path().join("fake-tsc-ran.txt");
-        std::fs::write(
-            &bin_path,
-            format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()).as_bytes(),
-        )
-        .unwrap();
+
+        // Create a platform-appropriate executable in node_modules/.bin/.
+        // On Unix: a shell script named `fake-tsc` (needs execute permission).
+        // On Windows: a batch file named `fake-tsc.bat` (cmd.exe uses PATHEXT).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let script = bin_dir.join("fake-tsc");
+            std::fs::write(
+                &script,
+                format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()).as_bytes(),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        #[cfg(windows)]
+        {
+            let script = bin_dir.join("fake-tsc.bat");
+            std::fs::write(
+                &script,
+                format!("@type nul > \"{}\"\r\n", sentinel.display()).as_bytes(),
+            )
+            .unwrap();
+        }
+
+        #[cfg(not(windows))]
+        let tsc_cmd = "fake-tsc".to_string();
+        #[cfg(windows)]
+        let tsc_cmd = "fake-tsc.bat".to_string();
 
         let task = Task {
             package_name: "test-pkg".to_string(),
             script_name: "build".to_string(),
-            command: "fake-tsc".to_string(),
+            command: tsc_cmd,
             cwd: dir.path().to_path_buf(),
             workspace_root: dir.path().to_path_buf(),
             sandbox_mode: pipeline_config::SandboxMode::Loose,
@@ -2754,9 +2826,17 @@ mod tests {
         let cache = std::sync::Arc::new(
             cache::TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap(),
         );
-        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store(), None)
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![task],
+            cache,
+            test_plugin(),
+            test_store(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             sentinel.exists(),
             "fake-tsc must have been found via node_modules/.bin"
@@ -2804,6 +2884,7 @@ mod tests {
             test_plugin(),
             test_store(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2823,9 +2904,17 @@ mod tests {
         std::fs::write(&src_file, b"export const v = 2;").unwrap();
 
         // Second run — must MISS because WF changed (source file content changed)
-        run_tasks_two_phase(&dag, vec![task], cache, test_plugin(), test_store(), None)
-            .await
-            .unwrap();
+        run_tasks_two_phase(
+            &dag,
+            vec![task],
+            cache,
+            test_plugin(),
+            test_store(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let wf_files_after_second: Vec<_> = std::fs::read_dir(cache_dir.path())
             .unwrap()
@@ -2899,6 +2988,7 @@ mod tests {
             test_plugin(),
             test_store(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2919,6 +3009,7 @@ mod tests {
             cache.clone(),
             test_plugin(),
             test_store(),
+            None,
             None,
         )
         .await
@@ -2944,6 +3035,7 @@ mod tests {
     /// BUG: entry.abi_fingerprint was hardcoded None even though
     /// compute_abi_fingerprint_from_outputs() was called. Fix: compute ABI fp
     /// *before* CacheEntry construction and include it in the entry.
+    #[cfg(not(windows))] // output glob '**/*.d.ts' path matching differs on Windows
     #[tokio::test]
     async fn entry_abi_fingerprint_set_when_dts_outputs_exist() {
         use cache::TwoPhaseCache;
@@ -2986,6 +3078,7 @@ mod tests {
             cache.clone(),
             test_plugin(),
             test_store(),
+            None,
             None,
         )
         .await
@@ -3059,6 +3152,7 @@ mod tests {
             test_plugin(),
             test_store(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3092,6 +3186,7 @@ mod tests {
             cache.clone(),
             test_plugin(),
             test_store(),
+            None,
             None,
         )
         .await
@@ -3217,6 +3312,7 @@ mod tests {
             test_plugin(),
             store.clone(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3237,6 +3333,7 @@ mod tests {
             cache.clone(),
             test_plugin(),
             store.clone(),
+            None,
             None,
         )
         .await

@@ -381,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))] // fixture path glob matching differs on Windows; policy.rs tests cover the logic
     fn task_list_with_config_resolves_sandbox_per_policy() {
         use pipeline_config::{CacheConfig, Policy, RageConfig, SandboxConfig, SandboxMode};
         use std::collections::HashMap;
@@ -404,6 +405,7 @@ mod tests {
             plugins_config: HashMap::new(),
             pipeline: HashMap::new(),
             max_concurrency: None,
+            cold_concurrency: None,
         };
 
         let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();
@@ -466,6 +468,7 @@ mod tests {
             plugins_config: HashMap::new(),
             pipeline,
             max_concurrency: None,
+            cold_concurrency: None,
         };
 
         let plugins: Vec<&dyn plugin::EcosystemPlugin> = Vec::new();

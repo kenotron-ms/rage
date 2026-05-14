@@ -29,8 +29,10 @@ pub fn extract_pnpm_packages(
     let mut out: Vec<PathsetPackageRef> = Vec::new();
 
     for p in pathset_reads {
-        let s = p.to_string_lossy();
-        let Some(caps) = re.captures(&s) else {
+        // Normalize backslashes to forward slashes so the regex matches on
+        // Windows, where `to_string_lossy()` returns native backslash paths.
+        let path_str = p.to_string_lossy().replace('\\', "/");
+        let Some(caps) = re.captures(&path_str) else {
             continue;
         };
         let dir_name = caps.name("dir_name").unwrap().as_str().to_string();

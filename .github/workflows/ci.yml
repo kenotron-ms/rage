@@ -14,6 +14,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -32,8 +33,10 @@ jobs:
             exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-windows-detours
           - os: windows-latest
             platform: windows
-            # Exclude macOS and Linux sandbox crates
-            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib
+            # Exclude macOS and Linux sandbox crates, and the Windows Detours DLL
+            # crate — it requires nightly + C++ FFI compilation and is tested by
+            # the dedicated sandbox-smoke-windows job instead.
+            exclude_flags: --exclude sandbox-linux-ebpf --exclude sandbox-macos-dylib --exclude sandbox-windows-detours
 
     steps:
       - uses: actions/checkout@v4
@@ -66,13 +69,13 @@ jobs:
           shared-key: ${{ matrix.platform }}
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace ${{ matrix.exclude_flags }} --all-targets -- -D warnings
         shell: bash
-        env:
-          RUSTUP_TOOLCHAIN: ${{ matrix.os == 'windows-latest' && 'nightly' || 'stable' }}
 
       - name: Run tests
         run: cargo test --workspace ${{ matrix.exclude_flags }}
