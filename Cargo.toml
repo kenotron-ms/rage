@@ -37,3 +37,9 @@ tonic = "0.12"
 prost = "0.13"
 tokio = { version = "1", features = ["full"] }
 pathdiff = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
