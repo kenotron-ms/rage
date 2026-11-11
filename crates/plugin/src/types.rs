@@ -71,7 +71,7 @@ pub enum EdgePolicy {
 }
 
 /// Per-package virtual pathset emitted by a multi-package batch pass (such as
-/// `developer-bundler` Tier-1 `prepare` / `compile` or `relay-compiler`).
+/// workspace-wide `prepare` / `compile` or GraphQL codegen).
 ///
 /// Serialization is backwards-compatible with [`sandbox::PathSet`] /
 /// `StoredPathset` (`reads` and `writes` are always present; optional v2
@@ -91,7 +91,7 @@ pub struct VirtualPathset {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub absent_probes: Vec<PathBuf>,
     /// Optional BLAKE3 hex digest of the transitive closure of resolved symbol
-    /// or fragment names (e.g. `relay-rust` closure digest).
+    /// or fragment names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closure_names_blake3: Option<String>,
     /// Optional BLAKE3 hex digest of the emitted ABI surface (e.g. `.d.ts`).
@@ -177,11 +177,11 @@ pub fn verify_batch_audit(
 }
 
 /// Specification of a workspace-wide or wave-level batch pass (such as
-/// `developer-bundler` Tier-1 or `relay-compiler`) that processes multiple
+/// multi-package typechecking or GraphQL codegen) that processes multiple
 /// packages in a single invocation and emits per-package [`VirtualPathset`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchPass {
-    /// Identifier for the batch pass (e.g. `"developer-bundler-tier1"`).
+    /// Identifier for the batch pass (e.g. `"batch-typecheck"`).
     pub id: String,
     /// Task script name this batch pass accelerates (e.g. `"prepare"` or `"compile"`).
     pub script_name: String,

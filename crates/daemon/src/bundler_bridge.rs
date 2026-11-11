@@ -1,35 +1,35 @@
-//! `developer-bundler` JSON-lines `invalidate` bridge for the rage daemon.
+//! JSON-lines `invalidate` bridge for the rage daemon.
 //!
-//! When Tier-1 tasks (`prepare` / `compile`) complete or update package ABI
-//! fingerprints, the daemon formats and optionally sends a newline-delimited
-//! JSON [`InvalidationNotice`] over a Unix socket or Windows named pipe so
-//! `developer-bundler` dev servers and persistent workers can invalidate only
-//! the affected module subgraph.
+//! When codegen or compile tasks (`prepare` / `compile`) complete or update
+//! package ABI fingerprints, the daemon formats and optionally sends a
+//! newline-delimited JSON [`InvalidationNotice`] over a Unix socket or Windows
+//! named pipe so external dev bundlers and persistent workers can invalidate
+//! only the affected module subgraph.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-/// Wire operation tag for `developer-bundler` invalidation messages.
+/// Wire operation tag for external bundler invalidation messages.
 pub const INVALIDATE_OP: &str = "invalidate";
 
-/// JSON-lines invalidation payload emitted to `developer-bundler`.
+/// JSON-lines invalidation payload emitted to external dev bundlers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvalidationNotice {
     /// Always `"invalidate"`.
     pub op: String,
-    /// Workspace package name (e.g. `"@1js/copilot-chat"`).
+    /// Workspace package name (e.g. `"@acme/web-app"`).
     pub name: String,
     /// Monotonic daemon reconciliation revision / epoch.
     pub epoch: u64,
     /// Source paths whose modification triggered the rebuild.
     pub paths: Vec<PathBuf>,
-    /// Generated output paths (e.g. `.d.ts`, Relay artifacts, CSS modules).
+    /// Generated output paths (e.g. `.d.ts`, GraphQL artifacts, CSS modules).
     pub generated: Vec<PathBuf>,
     /// `true` if the package's semantic ABI fingerprint changed on this epoch.
     pub abi_changed: bool,
-    /// Short machine/human reason (e.g. `"tier1-prepare"`, `"abi-updated"`).
+    /// Short machine/human reason (e.g. `"prepare-complete"`, `"abi-updated"`).
     pub reason: String,
 }
 
@@ -109,12 +109,12 @@ mod tests {
     #[test]
     fn formats_valid_single_line_json() {
         let notice = InvalidationNotice::new(
-            "@1js/chat",
+            "@acme/chat",
             7,
             vec![PathBuf::from("packages/chat/src/index.ts")],
             vec![PathBuf::from("packages/chat/dist/index.d.ts")],
             true,
-            "tier1-prepare",
+            "prepare-complete",
         );
 
         let line = notice.to_json_line().unwrap();
@@ -123,10 +123,10 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(parsed["op"], "invalidate");
-        assert_eq!(parsed["name"], "@1js/chat");
+        assert_eq!(parsed["name"], "@acme/chat");
         assert_eq!(parsed["epoch"], 7);
         assert_eq!(parsed["abi_changed"], true);
-        assert_eq!(parsed["reason"], "tier1-prepare");
+        assert_eq!(parsed["reason"], "prepare-complete");
 
         let roundtrip: InvalidationNotice = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(roundtrip, notice);
@@ -142,7 +142,7 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
         let notice = InvalidationNotice::new(
-            "@1js/core",
+            "@acme/core",
             42,
             vec![PathBuf::from("src/a.ts")],
             vec![PathBuf::from("dist/a.d.ts")],

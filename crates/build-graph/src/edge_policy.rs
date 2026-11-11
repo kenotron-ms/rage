@@ -1,9 +1,10 @@
-//! Edge policies and `prepare-producers.json` transitive producer pruning for `build-graph`.
+//! Edge policies and transitive producer pruning for `build-graph`.
 //!
-//! In 1JS (~2,800 packages), only ~64 packages actually generate files during
-//! `prepare` (Relay artifacts, GraphQL types, CSS modules, icons). A naive
-//! `"prepare": { "dependsOn": ["^prepare"] }` rule forces long sequential
-//! wait chains through intermediate non-producer packages and `devDependencies`.
+//! In large monorepos (~2,800 packages), only a small subset of packages
+//! actually generate files during `prepare` (such as GraphQL schemas, CSS
+//! modules, or icon assets). A naive `"prepare": { "dependsOn": ["^prepare"] }`
+//! rule forces long sequential wait chains through intermediate non-producer
+//! packages and `devDependencies`.
 //!
 //! [`PrepareProducerPolicy`] rewrites `^prepare` edges using
 //! [`EdgePolicy::ReplaceWithProducersReachableVia`]:
@@ -22,8 +23,7 @@ pub use plugin::{EdgeOrigin, EdgePolicy};
 /// non-producer intermediate hops and `devDependency` edges.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareProducerPolicy {
-    /// Set of package names that are true `prepare` producers (matching 1JS's
-    /// `prepare-producers.json`).
+    /// Set of package names that are true `prepare` producers.
     pub producers: BTreeSet<String>,
     /// When `true`, edges whose origin is purely [`EdgeOrigin::DevDependency`]
     /// are dropped during `prepare` scheduling.

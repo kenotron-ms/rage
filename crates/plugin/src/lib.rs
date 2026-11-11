@@ -227,7 +227,7 @@ pub trait EcosystemPlugin: Send + Sync {
     /// Optional v2 batch pass descriptor for `script_name` across `packages`.
     ///
     /// When an ecosystem supports multi-package batch execution (such as
-    /// `developer-bundler` Tier-1 or `relay-compiler`), returning `Some(BatchPass)`
+    /// workspace-wide typechecking or GraphQL codegen), returning `Some(BatchPass)`
     /// allows the scheduler to execute the batch once and verify per-package
     /// [`VirtualPathset`]s via [`verify_batch_audit`].
     ///
