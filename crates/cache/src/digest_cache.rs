@@ -10,8 +10,6 @@ use std::fs::{self, Metadata};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
-#[cfg(not(unix))]
-use std::time::UNIX_EPOCH;
 
 const SHARD_COUNT: usize = 64;
 
@@ -31,53 +29,42 @@ pub struct FileStamp {
 
 impl FileStamp {
     /// Extract a [`FileStamp`] for `path` using `fs::symlink_metadata`.
-    pub fn from_symlink_metadata(path: &Path) -> std::io::Result<Self> {
+    pub fn from_symlink_metadata(path: &Path) -> std::io::Result<Option<Self>> {
         let meta = fs::symlink_metadata(path)?;
         Ok(Self::from_metadata(&meta))
     }
 
     /// Extract a [`FileStamp`] for `path` following symlinks (`fs::metadata`).
-    pub fn from_target_metadata(path: &Path) -> std::io::Result<Self> {
+    pub fn from_target_metadata(path: &Path) -> std::io::Result<Option<Self>> {
         let meta = fs::metadata(path)?;
         Ok(Self::from_metadata(&meta))
     }
 
     /// Construct a [`FileStamp`] from an already-fetched [`Metadata`].
-    pub fn from_metadata(meta: &Metadata) -> Self {
+    ///
+    /// Returns `None` on platforms (such as stable Rust on Windows) where
+    /// `std::fs::Metadata` does not expose inode/file-index or a genuine
+    /// metadata-change timestamp (`ctime_ns`), since `Metadata::created()` is
+    /// the creation time and an in-place same-size rewrite that preserves
+    /// `mtime` would otherwise alias to the same stamp.
+    pub fn from_metadata(meta: &Metadata) -> Option<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             let mtime_ns = i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec());
             let ctime_ns = i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
-            Self {
+            Some(Self {
                 dev: meta.dev(),
                 ino: meta.ino(),
                 size: meta.len(),
                 mtime_ns,
                 ctime_ns,
-            }
+            })
         }
         #[cfg(not(unix))]
         {
-            let mtime_ns = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos() as i128)
-                .unwrap_or(0);
-            let ctime_ns = meta
-                .created()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos() as i128)
-                .unwrap_or(mtime_ns);
-            Self {
-                dev: 0,
-                ino: 0,
-                size: meta.len(),
-                mtime_ns,
-                ctime_ns,
-            }
+            let _ = meta;
+            None
         }
     }
 }
@@ -141,13 +128,15 @@ impl DigestCache {
             return None;
         };
 
-        let stamp = FileStamp::from_metadata(&meta);
+        let maybe_stamp = FileStamp::from_metadata(&meta);
         let shard = &self.shards[Self::shard_index(path)];
 
-        if let Ok(guard) = shard.map.read() {
-            if let Some((cached_stamp, cached_hash)) = guard.get(path) {
-                if *cached_stamp == stamp {
-                    return Some(*cached_hash);
+        if let Some(stamp) = maybe_stamp {
+            if let Ok(guard) = shard.map.read() {
+                if let Some((cached_stamp, cached_hash)) = guard.get(path) {
+                    if *cached_stamp == stamp {
+                        return Some(*cached_hash);
+                    }
                 }
             }
         }
@@ -155,8 +144,10 @@ impl DigestCache {
         let bytes = fs::read(path).ok()?;
         let digest = blake3::hash(&bytes);
 
-        if let Ok(mut guard) = shard.map.write() {
-            guard.insert(path.to_path_buf(), (stamp, digest));
+        if let Some(stamp) = maybe_stamp {
+            if let Ok(mut guard) = shard.map.write() {
+                guard.insert(path.to_path_buf(), (stamp, digest));
+            }
         }
 
         Some(digest)
@@ -232,5 +223,37 @@ mod tests {
         let cache = DigestCache::new();
         assert!(cache.get_or_hash(dir.path()).is_none());
         assert!(cache.get_or_hash(&dir.path().join("missing.ts")).is_none());
+    }
+
+    #[test]
+    fn invalidates_on_same_size_in_place_rewrite_with_restored_mtime() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("same_size.ts");
+        fs::write(&file, b"aaaa").unwrap();
+        let original_mtime = fs::metadata(&file).unwrap().modified().unwrap();
+
+        let cache = DigestCache::new();
+        let h1 = cache.get_or_hash(&file).expect("hash v1");
+        assert_eq!(h1, blake3::hash(b"aaaa"));
+
+        // Ensure wall clock advances so ctime_ns changes when we rewrite and restore mtime.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&file, b"bbbb").unwrap();
+        let f = fs::OpenOptions::new().write(true).open(&file).unwrap();
+        f.set_times(fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        drop(f);
+
+        assert_eq!(
+            fs::metadata(&file).unwrap().modified().unwrap(),
+            original_mtime
+        );
+
+        let h2 = cache.get_or_hash(&file).expect("hash v2");
+        assert_eq!(h2, blake3::hash(b"bbbb"));
+        assert_ne!(
+            h1, h2,
+            "same-size rewrite with restored mtime must not return stale digest"
+        );
     }
 }

@@ -30,12 +30,14 @@ pub fn hash_tool_binary(path: &Path) -> Option<String> {
     if !meta.is_file() {
         return None;
     }
-    let stamp = FileStamp::from_metadata(&meta);
+    let maybe_stamp = FileStamp::from_metadata(&meta);
 
-    if let Ok(guard) = tool_hash_cache().read() {
-        if let Some((cached_stamp, cached_hex)) = guard.get(&canonical) {
-            if *cached_stamp == stamp {
-                return Some(cached_hex.clone());
+    if let Some(stamp) = maybe_stamp {
+        if let Ok(guard) = tool_hash_cache().read() {
+            if let Some((cached_stamp, cached_hex)) = guard.get(&canonical) {
+                if *cached_stamp == stamp {
+                    return Some(cached_hex.clone());
+                }
             }
         }
     }
@@ -43,8 +45,10 @@ pub fn hash_tool_binary(path: &Path) -> Option<String> {
     let bytes = std::fs::read(&canonical).ok()?;
     let hex = blake3::hash(&bytes).to_hex().to_string();
 
-    if let Ok(mut guard) = tool_hash_cache().write() {
-        guard.insert(canonical, (stamp, hex.clone()));
+    if let Some(stamp) = maybe_stamp {
+        if let Ok(mut guard) = tool_hash_cache().write() {
+            guard.insert(canonical, (stamp, hex.clone()));
+        }
     }
 
     Some(hex)

@@ -14,7 +14,7 @@
 use crate::dag::WorkspaceDag;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 pub use plugin::{EdgeOrigin, EdgePolicy};
 
@@ -28,10 +28,10 @@ pub struct PrepareProducerPolicy {
     /// When `true`, edges whose origin is purely [`EdgeOrigin::DevDependency`]
     /// are dropped during `prepare` scheduling.
     pub drop_dev_dependencies: bool,
-    /// Optional explicit edge origins keyed by `(from_pkg, to_pkg)`. Any DAG
+    /// Optional explicit edge origins keyed by `from_pkg -> to_pkg`. Any DAG
     /// edge not present in this map defaults to [`EdgeOrigin::Dependency`].
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub edge_origins: HashMap<(String, String), EdgeOrigin>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub edge_origins: BTreeMap<String, BTreeMap<String, EdgeOrigin>>,
 }
 
 impl PrepareProducerPolicy {
@@ -44,7 +44,7 @@ impl PrepareProducerPolicy {
         Self {
             producers: producers.into_iter().map(Into::into).collect(),
             drop_dev_dependencies,
-            edge_origins: HashMap::new(),
+            edge_origins: BTreeMap::new(),
         }
     }
 
@@ -56,7 +56,9 @@ impl PrepareProducerPolicy {
         origin: EdgeOrigin,
     ) -> Self {
         self.edge_origins
-            .insert((from_pkg.into(), to_pkg.into()), origin);
+            .entry(from_pkg.into())
+            .or_default()
+            .insert(to_pkg.into(), origin);
         self
     }
 
@@ -69,7 +71,8 @@ impl PrepareProducerPolicy {
     /// [`EdgeOrigin::Dependency`].
     pub fn origin_of(&self, from_pkg: &str, to_pkg: &str) -> EdgeOrigin {
         self.edge_origins
-            .get(&(from_pkg.to_string(), to_pkg.to_string()))
+            .get(from_pkg)
+            .and_then(|targets| targets.get(to_pkg))
             .copied()
             .unwrap_or(EdgeOrigin::Dependency)
     }
@@ -290,6 +293,22 @@ mod tests {
         assert_eq!(
             keep_dev_policy.effective_dependencies(&dag, "app"),
             vec!["storybook-gen".to_string(), "test-codegen".to_string()]
+        );
+    }
+
+    #[test]
+    fn policy_with_edge_origins_roundtrips_json() {
+        let policy = PrepareProducerPolicy::new(["relay-schema", "icon-gen"], true)
+            .with_edge_origin("app", "storybook-gen", EdgeOrigin::DevDependency)
+            .with_edge_origin("ui", "relay-schema", EdgeOrigin::Dependency);
+
+        let json = serde_json::to_string(&policy).expect("serialize policy with edge_origins");
+        let decoded: PrepareProducerPolicy =
+            serde_json::from_str(&json).expect("deserialize policy with edge_origins");
+        assert_eq!(decoded, policy);
+        assert_eq!(
+            decoded.origin_of("app", "storybook-gen"),
+            EdgeOrigin::DevDependency
         );
     }
 }
