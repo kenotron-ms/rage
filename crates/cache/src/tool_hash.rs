@@ -33,10 +33,12 @@ pub fn hash_tool_binary(path: &Path) -> Option<String> {
     let maybe_stamp = FileStamp::from_metadata(&meta);
 
     if let Some(stamp) = maybe_stamp {
-        if let Ok(guard) = tool_hash_cache().read() {
-            if let Some((cached_stamp, cached_hex)) = guard.get(&canonical) {
-                if *cached_stamp == stamp {
-                    return Some(cached_hex.clone());
+        if stamp.is_racily_clean_safe() {
+            if let Ok(guard) = tool_hash_cache().read() {
+                if let Some((cached_stamp, cached_hex)) = guard.get(&canonical) {
+                    if *cached_stamp == stamp {
+                        return Some(cached_hex.clone());
+                    }
                 }
             }
         }
@@ -92,8 +94,8 @@ mod tests {
         let h1_cached = hash_tool_binary(&p).unwrap();
         assert_eq!(h1, h1_cached);
 
-        // Overwrite with different content/size so FileStamp changes.
-        std::fs::write(&p, b"tsc-v2-updated").unwrap();
+        // Same-size immediate rewrite with no sleep must still invalidate!
+        std::fs::write(&p, b"tsc-v2").unwrap();
         let h2 = hash_tool_binary(&p).unwrap();
         assert_ne!(h1, h2);
     }

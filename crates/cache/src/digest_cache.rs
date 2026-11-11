@@ -10,8 +10,18 @@ use std::fs::{self, Metadata};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
+#[cfg(unix)]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SHARD_COUNT: usize = 64;
+
+/// Racily-clean recency window (2 seconds, matching Git's index `racy-git`
+/// guard and covering 1-second coarse filesystems as well as sub-millisecond
+/// clock ticks). Any file whose `mtime` or `ctime` is within this window of
+/// `SystemTime::now()` (or in the future) is never served from the metadata
+/// cache and is always re-hashed from disk.
+#[cfg(unix)]
+const RACY_CLEAN_WINDOW_NS: i128 = Duration::from_secs(2).as_nanos() as i128;
 
 /// Cheap metadata identity stamp for a file on disk.
 ///
@@ -65,6 +75,26 @@ impl FileStamp {
         {
             let _ = meta;
             None
+        }
+    }
+
+    /// Returns `true` when this stamp is old enough (strictly older than the
+    /// racy-clean guard window relative to `SystemTime::now()`), so a
+    /// subsequent same-size rewrite cannot share the same `(mtime_ns, ctime_ns)`
+    /// within the same clock tick or coarse 1-second filesystem tick.
+    pub fn is_racily_clean_safe(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let Ok(now_dur) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+                return false;
+            };
+            let now_ns = now_dur.as_nanos() as i128;
+            let newest_ts = self.mtime_ns.max(self.ctime_ns);
+            newest_ts > 0 && now_ns >= newest_ts && (now_ns - newest_ts) >= RACY_CLEAN_WINDOW_NS
+        }
+        #[cfg(not(unix))]
+        {
+            false
         }
     }
 }
@@ -132,10 +162,12 @@ impl DigestCache {
         let shard = &self.shards[Self::shard_index(path)];
 
         if let Some(stamp) = maybe_stamp {
-            if let Ok(guard) = shard.map.read() {
-                if let Some((cached_stamp, cached_hash)) = guard.get(path) {
-                    if *cached_stamp == stamp {
-                        return Some(*cached_hash);
+            if stamp.is_racily_clean_safe() {
+                if let Ok(guard) = shard.map.read() {
+                    if let Some((cached_stamp, cached_hash)) = guard.get(path) {
+                        if *cached_stamp == stamp {
+                            return Some(*cached_hash);
+                        }
                     }
                 }
             }
@@ -236,8 +268,8 @@ mod tests {
         let h1 = cache.get_or_hash(&file).expect("hash v1");
         assert_eq!(h1, blake3::hash(b"aaaa"));
 
-        // Ensure wall clock advances so ctime_ns changes when we rewrite and restore mtime.
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Immediate same-size rewrite with NO sleep (within the same clock tick)
+        // and restored mtime must still re-read and return the updated digest.
         fs::write(&file, b"bbbb").unwrap();
         let f = fs::OpenOptions::new().write(true).open(&file).unwrap();
         f.set_times(fs::FileTimes::new().set_modified(original_mtime))
