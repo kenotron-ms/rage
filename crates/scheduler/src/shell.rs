@@ -70,37 +70,59 @@ impl Drop for ProcessGroupGuard {
 fn kill_pid_tree_sync(pid: u32) {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
-
     let root = Pid::from_u32(pid);
-    // Collect all descendants in the process tree rooted at `pid` so we can
-    // terminate children and grandchildren directly via the OS API (`sysinfo`
-    // uses `kill(pid, SIGKILL)` on Unix and `TerminateProcess` on Windows)
-    // without relying on PATH or external `kill`/`taskkill` binaries.
-    let mut to_kill = vec![root];
-    let mut idx = 0;
-    while idx < to_kill.len() {
-        let current = to_kill[idx];
-        idx += 1;
-        for (&proc_pid, proc_info) in sys.processes() {
-            if proc_info.parent() == Some(current) && !to_kill.contains(&proc_pid) {
-                to_kill.push(proc_pid);
+    let mut sys = System::new();
+
+    // Perform up to 3 converging passes:
+    // 1. Snapshot the process table and collect all descendants of `root`.
+    // 2. Kill the root/parents FIRST so they cannot spawn any new child
+    //    processes after the snapshot, then kill all collected descendants.
+    // 3. Re-scan the process table to catch any child that was in the middle
+    //    of spawning just before its parent was killed, repeating until no
+    //    descendants remain alive.
+    for _pass in 0..3 {
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            false,
+            ProcessRefreshKind::nothing(),
+        );
+
+        let mut to_kill = Vec::new();
+        if sys.process(root).is_some() {
+            to_kill.push(root);
+        }
+        let mut frontier = vec![root];
+        let mut idx = 0;
+        while idx < frontier.len() {
+            let current = frontier[idx];
+            idx += 1;
+            for (&proc_pid, proc_info) in sys.processes() {
+                if proc_info.parent() == Some(current) && !frontier.contains(&proc_pid) {
+                    frontier.push(proc_pid);
+                    if !to_kill.contains(&proc_pid) {
+                        to_kill.push(proc_pid);
+                    }
+                }
+            }
+        }
+
+        if to_kill.is_empty() {
+            break;
+        }
+
+        // Kill parents before children (`to_kill` is in BFS root-first order)
+        // so a parent process is terminated before it can spawn another child.
+        for &target_pid in &to_kill {
+            if let Some(proc_info) = sys.process(target_pid) {
+                let _ = proc_info
+                    .kill_with(Signal::Kill)
+                    .unwrap_or_else(|| proc_info.kill());
             }
         }
     }
 
-    // Kill leaves before parents so parents cannot respawn children during teardown.
-    for &target_pid in to_kill.iter().rev() {
-        if let Some(proc_info) = sys.process(target_pid) {
-            let _ = proc_info
-                .kill_with(Signal::Kill)
-                .unwrap_or_else(|| proc_info.kill());
-        }
-    }
-
     // On Unix, also signal the process group (`-pid`) via `/bin/kill` as a
-    // belt-and-suspenders sweep for any child that forked after the snapshot.
+    // belt-and-suspenders sweep for the entire process group.
     #[cfg(unix)]
     {
         let _ = std::process::Command::new("/bin/kill")

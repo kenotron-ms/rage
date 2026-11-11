@@ -462,9 +462,19 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(slow_ws.path().join("p")).unwrap();
-        let slow_pkg_json = format!(
-            r#"{{"name":"@slow/p","version":"1.0.0","scripts":{{"build":"sleep 0.6 && echo stale > '{}' && exit 1"}}}}"#,
+        #[cfg(not(windows))]
+        let slow_cmd = format!(
+            "sleep 0.6 && echo stale > '{}' && exit 1",
             sentinel.display()
+        );
+        #[cfg(windows)]
+        let slow_cmd = format!(
+            "ping -n 1 -w 600 127.0.0.1 >nul && echo stale > \"{}\" && exit /b 1",
+            sentinel.display().to_string().replace('\\', "\\\\")
+        );
+        let slow_pkg_json = format!(
+            r#"{{"name":"@slow/p","version":"1.0.0","scripts":{{"build":{}}}}}"#,
+            serde_json::to_string(&slow_cmd).unwrap()
         );
         std::fs::write(slow_ws.path().join("p/package.json"), slow_pkg_json).unwrap();
 
