@@ -3,6 +3,7 @@
 //! On disk: `{cache_dir}/wf-{WF}.pathsets` is a JSON array of pathsets, where
 //! each pathset is `{ "reads": [...], "writes": [...] }`.
 
+use crate::strong_fp::is_node_modules_path;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use plugin::AllowlistEntry;
@@ -16,15 +17,16 @@ pub struct StoredPathset {
 }
 
 impl StoredPathset {
-    /// Pre-filter (`allowlist` removed, while preserving `node_modules` paths
-    /// in `reads` so warm-hit artifact CAS capture can discover packages) and
-    /// lexicographically sort + deduplicate `reads` and `writes` before
-    /// persisting to `pathset_store` so candidate lookups do not repeat
-    /// sorting/deduplication on every check.
+    /// Pre-filter (`allowlist` removed outside `node_modules`, while preserving
+    /// all `node_modules` paths in `reads` so warm-hit artifact CAS capture can
+    /// discover packages like `typescript` even when matched by a toolchain
+    /// allowlist) and lexicographically sort + deduplicate `reads` and `writes`
+    /// before persisting to `pathset_store`.
     pub fn normalized(mut self, allowlist: &[AllowlistEntry]) -> Self {
         let allow_set = build_allowlist_globset(allowlist);
         if let Some(set) = &allow_set {
-            self.reads.retain(|p| !set.is_match(p));
+            self.reads
+                .retain(|p| is_node_modules_path(p) || !set.is_match(p));
         }
         self.reads.sort();
         self.reads.dedup();
@@ -208,10 +210,16 @@ mod tests {
             ],
             writes: vec![PathBuf::from("dist/b.js"), PathBuf::from("dist/a.js")],
         };
-        let allowlist = vec![plugin::AllowlistEntry {
-            path_pattern: "**/toolchain/**".to_string(),
-            reason: "toolchain stdlib".to_string(),
-        }];
+        let allowlist = vec![
+            plugin::AllowlistEntry {
+                path_pattern: "**/toolchain/**".to_string(),
+                reason: "toolchain stdlib".to_string(),
+            },
+            plugin::AllowlistEntry {
+                path_pattern: "**/node_modules/typescript/**".to_string(),
+                reason: "typescript compiler".to_string(),
+            },
+        ];
 
         store
             .append_with_allowlist("wf_norm", raw, &allowlist)
