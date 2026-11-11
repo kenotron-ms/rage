@@ -1368,13 +1368,20 @@ async fn run_single_task_two_phase(
             }
 
             let pathset_reads_for_capture = pathset.reads.clone();
-            // Only record into the two-phase cache (and persist pkg ABI) when
-            // the run has not aborted and the post-run WF still matches the
-            // pre-run WF.
-            if !pre_wf.is_empty() && post_wf == pre_wf && !aborted_flag.load(Ordering::SeqCst) {
+            if !aborted_flag.load(Ordering::SeqCst) {
                 if let Some(fp) = &abi_fp {
                     cache_post.set_pkg_abi_fp(&pkg_post, fp);
+                } else {
+                    // If the task no longer produces an ABI (or its inputs
+                    // changed so no ABI outputs matched), clear any stale
+                    // stored ABI so downstream tasks cannot reuse an outdated
+                    // ABI fingerprint.
+                    cache_post.clear_pkg_abi_fp(&pkg_post);
                 }
+            }
+            // Only record into the two-phase cache when the run has not aborted
+            // and the post-run WF still matches the pre-run WF.
+            if !pre_wf.is_empty() && post_wf == pre_wf && !aborted_flag.load(Ordering::SeqCst) {
                 let entry = CacheEntry {
                     fingerprint: String::new(),
                     command: cmd_post,
@@ -2804,6 +2811,72 @@ mod tests {
                 .iter()
                 .any(|e| e.file_name().to_string_lossy().starts_with("sf-")),
             "must not record an sf-*.entry when a declared WF input mutated mid-run"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_cache_updates_pkg_abi_even_when_wf_mutates_during_run() {
+        use cache::TwoPhaseCache;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let cache_dir = tempdir().unwrap();
+        let pkg_dir = tempdir().unwrap();
+        std::fs::create_dir_all(pkg_dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(pkg_dir.path().join("dist")).unwrap();
+        let src_file = pkg_dir.path().join("src/index.ts");
+        let dts_file = pkg_dir.path().join("dist/index.d.ts");
+        std::fs::write(&src_file, b"export const x = 1;\n").unwrap();
+
+        let two_phase = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
+        two_phase.set_pkg_abi_fp("pkg", "stale-abi-v0");
+
+        #[cfg(not(windows))]
+        let mutate_and_emit_cmd = format!(
+            "echo 'export const x = 2;' > '{}' && echo 'export declare const x: number;' > '{}'",
+            src_file.display(),
+            dts_file.display()
+        );
+        #[cfg(windows)]
+        let mutate_and_emit_cmd = format!(
+            "echo export const x = 2; > \"{}\" && echo export declare const x: number; > \"{}\"",
+            src_file.display(),
+            dts_file.display()
+        );
+
+        let task = Task {
+            package_name: "pkg".to_string(),
+            script_name: "build".to_string(),
+            command: mutate_and_emit_cmd,
+            cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: vec!["src/**/*.ts".to_string()],
+            dep_package_names: Vec::new(),
+            output_globs: vec!["dist/**/*.d.ts".to_string()],
+            env_hash_inputs: Vec::new(),
+        };
+        let pkg = mk_pkg("pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        run_tasks_two_phase(
+            &dag,
+            vec![task],
+            two_phase.clone(),
+            test_plugin(),
+            test_store(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let updated_abi = two_phase.get_pkg_abi_fp("pkg").expect("ABI persisted");
+        assert_ne!(
+            updated_abi, "stale-abi-v0",
+            "downstream dependents must see the newly emitted ABI rather than a stale prior ABI"
         );
     }
 

@@ -161,6 +161,16 @@ impl TwoPhaseCache {
         let path = dir.join(Self::pkg_name_to_filename(pkg_name));
         let _ = std::fs::write(&path, abi_fp);
     }
+
+    /// Remove any stored ABI fingerprint for `pkg_name` so downstream tasks do
+    /// not read a stale ABI when a package stops emitting `.d.ts` files.
+    pub fn clear_pkg_abi_fp(&self, pkg_name: &str) {
+        let path = self
+            .dir
+            .join("pkg-abi")
+            .join(Self::pkg_name_to_filename(pkg_name));
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(test)]
