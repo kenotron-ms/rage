@@ -536,6 +536,14 @@ struct BuildSummary {
     peak_active: Arc<std::sync::atomic::AtomicUsize>,
     /// Currently-active subprocess count (decremented on task exit).
     current_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// Set to `true` as soon as the run aborts due to a task failure or
+    /// cancellation, preventing in-flight `spawn_blocking` post-task closures
+    /// from mutating shared cache state after abort.
+    aborted: Arc<std::sync::atomic::AtomicBool>,
+    /// Blocking post-task persistence handles spawned during this run, drained
+    /// before `run_tasks_two_phase` returns so no background cache write can
+    /// outlive the run and race a subsequent retry.
+    blocking_jobs: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Default for BuildSummary {
@@ -546,6 +554,8 @@ impl Default for BuildSummary {
             allowed_concurrency: 1,
             peak_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             current_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            aborted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            blocking_jobs: Vec::new(),
         }
     }
 }
@@ -857,6 +867,11 @@ pub async fn run_tasks_two_phase(
                         errors.push(e.to_string());
                     }
                     did_abort = true;
+                    summary
+                        .lock()
+                        .unwrap()
+                        .aborted
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     set.abort_all();
                 }
                 Err(_) => {
@@ -870,9 +885,21 @@ pub async fn run_tasks_two_phase(
                         );
                     }
                     did_abort = true;
+                    summary
+                        .lock()
+                        .unwrap()
+                        .aborted
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     set.abort_all();
                 }
             }
+        }
+        let jobs = {
+            let mut s = summary.lock().unwrap();
+            std::mem::take(&mut s.blocking_jobs)
+        };
+        for jh in jobs {
+            let _ = jh.await;
         }
         collect_errors(errors)?;
     }
@@ -954,6 +981,11 @@ pub async fn run_tasks_two_phase(
                     errors.push(e.to_string());
                 }
                 did_abort = true;
+                summary
+                    .lock()
+                    .unwrap()
+                    .aborted
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 set.abort_all();
             }
             Err(_) => {
@@ -967,9 +999,21 @@ pub async fn run_tasks_two_phase(
                     );
                 }
                 did_abort = true;
+                summary
+                    .lock()
+                    .unwrap()
+                    .aborted
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 set.abort_all();
             }
         }
+    }
+    let jobs = {
+        let mut s = summary.lock().unwrap();
+        std::mem::take(&mut s.blocking_jobs)
+    };
+    for jh in jobs {
+        let _ = jh.await;
     }
     let result = collect_errors(errors);
     summary.lock().unwrap().print();
@@ -1206,15 +1250,17 @@ async fn run_single_task_two_phase(
                     })?;
             captured_stdout = out;
             captured_stderr = err;
-            // Update historical RSS stats off the async worker thread (#7).
+            // Update historical RSS stats off the async worker thread (#7),
+            // registering the handle so `run_tasks_two_phase` drains it before returning.
             if !task_wf.is_empty() {
                 let cache_dir_stats = cache.dir().to_path_buf();
                 let wf_stats = task_wf.clone();
                 let mut updated_stats = stats;
                 updated_stats.record(peak_rss);
-                tokio::task::spawn_blocking(move || {
+                let stats_jh = tokio::task::spawn_blocking(move || {
                     let _ = cache::task_stats::save(&cache_dir_stats, &wf_stats, &updated_stats);
                 });
+                summary.lock().unwrap().blocking_jobs.push(stats_jh);
             }
             current_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             memory_guard.release_with_actual(peak_rss);
@@ -1269,6 +1315,10 @@ async fn run_single_task_two_phase(
         // ABI fingerprinting, pkg-abi persistence, post-run WF verification +
         // pathset/entry recording, output_store write, and CAS capture scheduling)
         // inside spawn_blocking so Tokio worker threads never block on disk I/O (#7).
+        // The JoinHandle is tracked in `summary.blocking_jobs` and gated by
+        // `summary.aborted` so an aborted run neither leaves detached cache
+        // writers running past `run_tasks_two_phase` return nor overwrites
+        // shared ABI/cache state after a sibling task fails.
         let cache_post = Arc::clone(&cache);
         let store_post = Arc::clone(&artifact_store);
         let cwd_post = task.cwd.clone();
@@ -1280,16 +1330,23 @@ async fn run_single_task_two_phase(
         let ws_post = task.workspace_root.clone();
         let tp_post = tool_path;
         let pre_wf = task_wf;
-        let _ = tokio::task::spawn_blocking(move || {
+        let aborted_flag = {
+            let s = summary.lock().unwrap();
+            Arc::clone(&s.aborted)
+        };
+        let (done_post_tx, done_post_rx) = tokio::sync::oneshot::channel::<()>();
+        let post_jh = tokio::task::spawn_blocking(move || {
+            use std::sync::atomic::Ordering;
+            if aborted_flag.load(Ordering::SeqCst) {
+                let _ = done_post_tx.send(());
+                return;
+            }
             let output_files = resolve_output_globs(&cwd_post, &out_globs_post);
             let abi_fp: Option<String> = if !output_files.is_empty() {
                 compute_abi_fingerprint_from_outputs(&output_files)
             } else {
                 None
             };
-            if let Some(fp) = &abi_fp {
-                cache_post.set_pkg_abi_fp(&pkg_post, fp);
-            }
 
             let dep_abi_fps: Vec<(String, String)> = dep_names_post
                 .iter()
@@ -1305,12 +1362,19 @@ async fn run_single_task_two_phase(
             };
             let post_wf = cache::weak_fp::compute_weak_fingerprint(&post_wf_inputs);
 
+            if aborted_flag.load(Ordering::SeqCst) {
+                let _ = done_post_tx.send(());
+                return;
+            }
+
             let pathset_reads_for_capture = pathset.reads.clone();
-            // Only record into the two-phase cache when the post-run WF still
-            // matches the pre-run WF; if a WF input (such as the tool binary or
-            // declared source inputs) mutated mid-flight, skip cache recording to
-            // prevent poisoning either WF with a mixed-state artifact.
-            if !pre_wf.is_empty() && post_wf == pre_wf {
+            // Only record into the two-phase cache (and persist pkg ABI) when
+            // the run has not aborted and the post-run WF still matches the
+            // pre-run WF.
+            if !pre_wf.is_empty() && post_wf == pre_wf && !aborted_flag.load(Ordering::SeqCst) {
+                if let Some(fp) = &abi_fp {
+                    cache_post.set_pkg_abi_fp(&pkg_post, fp);
+                }
                 let entry = CacheEntry {
                     fingerprint: String::new(),
                     command: cmd_post,
@@ -1327,7 +1391,7 @@ async fn run_single_task_two_phase(
                     .record_with_wf(&post_wf, pathset, entry)
                     .unwrap_or_default();
 
-                if !sf.is_empty() {
+                if !sf.is_empty() && !aborted_flag.load(Ordering::SeqCst) {
                     cache::output_store::write_output(
                         cache_post.dir(),
                         &sf,
@@ -1340,7 +1404,7 @@ async fn run_single_task_two_phase(
                 }
             }
 
-            if !pathset_reads_for_capture.is_empty() {
+            if !pathset_reads_for_capture.is_empty() && !aborted_flag.load(Ordering::SeqCst) {
                 if let Some(fp) = find_latest_install_fingerprint(cache_post.dir()) {
                     let artifact_dir = cache_post.dir().join("artifact-packages").join(&fp);
                     crate::artifact_capture::schedule_capture(
@@ -1352,8 +1416,10 @@ async fn run_single_task_two_phase(
                     );
                 }
             }
-        })
-        .await;
+            let _ = done_post_tx.send(());
+        });
+        summary.lock().unwrap().blocking_jobs.push(post_jh);
+        let _ = done_post_rx.await;
 
         eprintln!(
             "[rage] {}#{} \u{2713} {:.2}s",

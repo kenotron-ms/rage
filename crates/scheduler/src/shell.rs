@@ -68,16 +68,43 @@ impl Drop for ProcessGroupGuard {
 }
 
 fn kill_pid_tree_sync(pid: u32) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
+
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, false, ProcessRefreshKind::nothing());
+
+    let root = Pid::from_u32(pid);
+    // Collect all descendants in the process tree rooted at `pid` so we can
+    // terminate children and grandchildren directly via the OS API (`sysinfo`
+    // uses `kill(pid, SIGKILL)` on Unix and `TerminateProcess` on Windows)
+    // without relying on PATH or external `kill`/`taskkill` binaries.
+    let mut to_kill = vec![root];
+    let mut idx = 0;
+    while idx < to_kill.len() {
+        let current = to_kill[idx];
+        idx += 1;
+        for (&proc_pid, proc_info) in sys.processes() {
+            if proc_info.parent() == Some(current) && !to_kill.contains(&proc_pid) {
+                to_kill.push(proc_pid);
+            }
+        }
+    }
+
+    // Kill leaves before parents so parents cannot respawn children during teardown.
+    for &target_pid in to_kill.iter().rev() {
+        if let Some(proc_info) = sys.process(target_pid) {
+            let _ = proc_info
+                .kill_with(Signal::Kill)
+                .unwrap_or_else(|| proc_info.kill());
+        }
+    }
+
+    // On Unix, also signal the process group (`-pid`) via `/bin/kill` as a
+    // belt-and-suspenders sweep for any child that forked after the snapshot.
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
+        let _ = std::process::Command::new("/bin/kill")
             .args(["-9", &format!("-{pid}")])
-            .status();
-    }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
             .status();
     }
 }

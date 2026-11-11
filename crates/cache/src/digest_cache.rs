@@ -280,12 +280,22 @@ mod tests {
         let h1 = cache.get_or_hash(&file).expect("hash v1");
         assert_eq!(h1, blake3::hash(b"export const x = 1;\n"));
 
-        let (stamp1, cached1) = cache.peek(&file).expect("entry cached");
-        assert_eq!(cached1, h1);
+        #[cfg(unix)]
+        let stamp1 = {
+            let (stamp1, cached1) = cache.peek(&file).expect("entry cached");
+            assert_eq!(cached1, h1);
+            stamp1
+        };
+        #[cfg(not(unix))]
+        assert!(
+            cache.peek(&file).is_none(),
+            "non-Unix platforms without ctime/inode stamps must not cache metadata entries"
+        );
 
-        // Second lookup with unchanged file hits the stamp and returns the same hash.
+        // Second lookup with unchanged file returns the same hash.
         let h1_again = cache.get_or_hash(&file).expect("hash v1 again");
         assert_eq!(h1, h1_again);
+        #[cfg(unix)]
         assert_eq!(cache.peek(&file).unwrap().0, stamp1);
 
         // Modify file with different size/content so FileStamp changes immediately.
@@ -294,9 +304,14 @@ mod tests {
         assert_ne!(h1, h2);
         assert_eq!(h2, blake3::hash(b"export const x = 222;\n"));
 
-        let (stamp2, cached2) = cache.peek(&file).expect("updated entry");
-        assert_ne!(stamp1, stamp2);
-        assert_eq!(cached2, h2);
+        #[cfg(unix)]
+        {
+            let (stamp2, cached2) = cache.peek(&file).expect("updated entry");
+            assert_ne!(stamp1, stamp2);
+            assert_eq!(cached2, h2);
+        }
+        #[cfg(not(unix))]
+        assert!(cache.peek(&file).is_none());
     }
 
     #[test]
