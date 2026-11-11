@@ -7,7 +7,10 @@
 
 pub mod types;
 
-pub use types::{AllowlistEntry, OutputFile, PluginConfig, TaskDef};
+pub use types::{
+    verify_batch_audit, AllowlistEntry, BatchAuditResult, BatchPass, EdgeOrigin, EdgePolicy,
+    OutputFile, PluginConfig, TaskDef, VirtualPathset,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -219,6 +222,37 @@ pub trait EcosystemPlugin: Send + Sync {
     /// Default returns `vec![]` so non-TypeScript ecosystems are unaffected.
     fn postinstall_tasks(&self, _workspace_root: &Path) -> Vec<PostinstallTask> {
         Vec::new()
+    }
+
+    /// Optional v2 batch pass descriptor for `script_name` across `packages`.
+    ///
+    /// When an ecosystem supports multi-package batch execution (such as
+    /// `developer-bundler` Tier-1 or `relay-compiler`), returning `Some(BatchPass)`
+    /// allows the scheduler to execute the batch once and verify per-package
+    /// [`VirtualPathset`]s via [`verify_batch_audit`].
+    ///
+    /// Default returns `None` so existing single-package plugins compile unchanged.
+    fn plan_batch_pass(
+        &self,
+        _workspace_root: &Path,
+        _script_name: &str,
+        _packages: &[String],
+    ) -> Option<BatchPass> {
+        None
+    }
+
+    /// Optional v2 edge policy for `(from_pkg, to_pkg)` when scheduling
+    /// `script_name` over an edge of origin `origin`.
+    ///
+    /// Default returns [`EdgePolicy::Keep`] so existing plugins preserve all DAG edges.
+    fn edge_policy(
+        &self,
+        _script_name: &str,
+        _from_pkg: &str,
+        _to_pkg: &str,
+        _origin: EdgeOrigin,
+    ) -> EdgePolicy {
+        EdgePolicy::Keep
     }
 }
 

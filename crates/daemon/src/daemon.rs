@@ -79,8 +79,8 @@ impl Daemon {
         if let Ok(mut watcher) = FileWatcher::start(&self.workspace, Duration::from_millis(300)) {
             let watcher_handle = handle.clone();
             tokio::spawn(async move {
-                while let Some(_ev) = watcher.events.recv().await {
-                    watcher_handle.on_files_changed();
+                while let Some(ev) = watcher.events.recv().await {
+                    watcher_handle.on_files_changed_paths(ev.paths);
                 }
             });
         }

@@ -50,6 +50,11 @@ pub struct DaemonState {
     pub state: BuildStateContainer,
     pub desired: Option<DesiredState>,
     pub tasks: Vec<TaskRecord>,
+    /// Monotonically increasing reconciliation revision counter.
+    /// Incremented whenever a new build run is dispatched; completions from
+    /// older revisions are discarded so superseded runs cannot overwrite state.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// Wrapper that carries the current `BuildState` kind.

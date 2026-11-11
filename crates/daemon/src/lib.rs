@@ -2,6 +2,7 @@
 //!
 //! See docs/plans/2026-04-24-rage-daemon-config-cache-design.md Section 1.
 
+pub mod bundler_bridge;
 pub mod daemon;
 pub mod discovery;
 pub mod http;
@@ -12,8 +13,10 @@ pub mod state;
 pub mod transport;
 pub mod watcher;
 
+pub use bundler_bridge::{InvalidationNotice, INVALIDATE_OP};
 pub use daemon::Daemon;
 pub use discovery::{discovery_path, workspace_hash, DiscoveryFile};
 pub use http::{bind_dynamic, AppState, StateSnapshot};
 pub use messages::{DaemonMessage, DaemonResponse, TaskStatusMsg};
+pub use reconciler::CancellationToken;
 pub use state::{BuildState, DaemonState, TaskStatus};

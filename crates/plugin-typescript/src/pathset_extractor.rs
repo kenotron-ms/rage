@@ -1,6 +1,7 @@
-//! Extract installed-package references from a sandbox pathset.
+//!Extract installed-package references from a sandbox pathset.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathsetPackageRef {
@@ -9,6 +10,16 @@ pub struct PathsetPackageRef {
     pub version: String,
     /// Absolute path to the package's directory in the workspace.
     pub package_root: PathBuf,
+}
+
+fn pnpm_virtual_store_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"\.pnpm/(?P<encoded_name>(?:@[^/+]+\+)?[^@/]+)@(?P<version>[^/_+]+)(?:[_+][^/]+)?/node_modules/(?P<dir_name>(?:@[^/]+/)?[^/]+)/",
+        )
+        .expect("static pnpm virtual-store regex must compile")
+    })
 }
 
 /// Parse pnpm virtual-store paths from a pathset.
@@ -20,10 +31,7 @@ pub fn extract_pnpm_packages(
     //   .pnpm/<encoded_name>@<version>[_<peer>]/node_modules/<dir_name>/...
     //   - Scoped: @scope/pkg → encoded as @scope+pkg
     //   - Peer suffix: name@ver_peerinfo or name@ver+peerinfo
-    let re = regex::Regex::new(
-        r"\.pnpm/(?P<encoded_name>(?:@[^/+]+\+)?[^@/]+)@(?P<version>[^/_+]+)(?:[_+][^/]+)?/node_modules/(?P<dir_name>(?:@[^/]+/)?[^/]+)/",
-    )
-    .expect("static regex");
+    let re = pnpm_virtual_store_regex();
 
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let mut out: Vec<PathsetPackageRef> = Vec::new();

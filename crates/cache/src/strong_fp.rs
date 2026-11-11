@@ -4,16 +4,23 @@
 //!
 //! Per docs/plans/2026-04-24-rage-daemon-config-cache-design.md Section 5.
 
+use crate::digest_cache::{global_digest_cache, DigestCache};
 use blake3::Hasher;
 use std::path::{Path, PathBuf};
 
-/// Compute the strong fingerprint.
+/// Return `true` when `path` contains a `node_modules` component.
+pub fn is_node_modules_path(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str() == std::ffi::OsStr::new("node_modules"))
+}
+
+/// Compute the strong fingerprint using the process-wide [`DigestCache`].
 ///
 /// # Pathset filtering
 ///
-/// Files under `node_modules` are excluded from the SF hash.  Their
+/// Files under `node_modules` are excluded from the SF hash. Their
 /// contents are managed by the package manager (yarn/pnpm/npm) and are
-/// stable for any given lockfile.  The lockfile is already tracked by the
+/// stable for any given lockfile. The lockfile is already tracked by the
 /// root-task fingerprint (`workspace#install`), so changes to installed
 /// packages will invalidate the root task and cause a full rebuild —
 /// including re-populating all SF entries.
@@ -22,39 +29,64 @@ use std::path::{Path, PathBuf};
 /// per SF computation (TypeScript stdlib alone can add hundreds of files)
 /// without sacrificing correctness.
 pub fn compute_strong_fingerprint(weak_fp: &str, pathset_reads: &[PathBuf]) -> String {
+    compute_strong_fingerprint_with_cache(weak_fp, pathset_reads, global_digest_cache())
+}
+
+/// Compute the strong fingerprint using an explicit [`DigestCache`].
+///
+/// When `pathset_reads` is already sorted, deduplicated, and filtered of
+/// `node_modules` (as stored by [`crate::pathset_store::PathsetStore`]), this
+/// avoids allocating and sorting on the lookup fast path.
+pub fn compute_strong_fingerprint_with_cache(
+    weak_fp: &str,
+    pathset_reads: &[PathBuf],
+    digest_cache: &DigestCache,
+) -> String {
     let mut hasher = Hasher::new();
     hasher.update(b"wf:");
     hasher.update(weak_fp.as_bytes());
     hasher.update(b"\n");
 
-    let mut sorted: Vec<&Path> = pathset_reads
-        .iter()
-        .map(|p| p.as_path())
-        // Skip files inside node_modules — they're pinned by the lockfile.
-        .filter(|p| {
-            !p.components()
-                .any(|c| c.as_os_str() == std::ffi::OsStr::new("node_modules"))
-        })
-        .collect();
-    sorted.sort();
-    sorted.dedup();
+    let already_normalized = pathset_reads
+        .windows(2)
+        .all(|w| w[0] < w[1] && !is_node_modules_path(&w[0]) && !is_node_modules_path(&w[1]))
+        && pathset_reads
+            .first()
+            .map(|p| !is_node_modules_path(p))
+            .unwrap_or(true);
 
-    for p in sorted {
-        // Skip non-regular files (directories, /dev/, device files, etc.).
-        // On macOS, read() on devfs or large directories can block indefinitely.
-        if !p.is_file() {
-            continue;
+    if already_normalized {
+        for p in pathset_reads {
+            hash_single_path(&mut hasher, p.as_path(), digest_cache);
         }
-        hasher.update(b"read:");
-        hasher.update(p.as_os_str().as_encoded_bytes());
-        hasher.update(b":");
-        let content = std::fs::read(p).unwrap_or_default();
-        let h = blake3::hash(&content);
-        hasher.update(h.as_bytes());
-        hasher.update(b"\n");
+    } else {
+        let mut sorted: Vec<&Path> = pathset_reads
+            .iter()
+            .map(|p| p.as_path())
+            .filter(|p| !is_node_modules_path(p))
+            .collect();
+        sorted.sort();
+        sorted.dedup();
+
+        for p in sorted {
+            hash_single_path(&mut hasher, p, digest_cache);
+        }
     }
 
     hasher.finalize().to_hex().to_string()
+}
+
+fn hash_single_path(hasher: &mut Hasher, p: &Path, digest_cache: &DigestCache) {
+    // Validate via DigestCache (which uses symlink_metadata / FileStamp).
+    // Skip non-regular files (directories, /dev/, device files, missing files).
+    let Some(h) = digest_cache.get_or_hash(p) else {
+        return;
+    };
+    hasher.update(b"read:");
+    hasher.update(p.as_os_str().as_encoded_bytes());
+    hasher.update(b":");
+    hasher.update(h.as_bytes());
+    hasher.update(b"\n");
 }
 
 #[cfg(test)]

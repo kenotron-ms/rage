@@ -53,6 +53,17 @@ impl TwoPhaseCache {
             .map(|(sf, entry, _)| (sf, entry))
     }
 
+    /// Look up a hit using a pre-computed weak fingerprint `wf`.
+    pub fn lookup_with_wf(&self, wf: &str) -> Option<(String, CacheEntry, Vec<PathBuf>)> {
+        for ps in self.pathsets.list(wf) {
+            let sf = compute_strong_fingerprint(wf, &ps.reads);
+            if let Some(entry) = self.read_entry(&sf) {
+                return Some((sf, entry, ps.reads));
+            }
+        }
+        None
+    }
+
     /// Like `lookup`, but also returns the pathset reads from the stored WF entry
     /// so callers can populate the artifact CAS on cache hits without re-reading the file.
     ///
@@ -63,13 +74,24 @@ impl TwoPhaseCache {
         weak_fp_inputs: &WeakFpInputs,
     ) -> Option<(String, CacheEntry, Vec<PathBuf>)> {
         let wf = compute_weak_fingerprint(weak_fp_inputs);
-        for ps in self.pathsets.list(&wf) {
-            let sf = compute_strong_fingerprint(&wf, &ps.reads);
-            if let Some(entry) = self.read_entry(&sf) {
-                return Some((sf, entry, ps.reads));
-            }
-        }
-        None
+        self.lookup_with_wf(&wf)
+    }
+
+    /// Record a successful run using a pre-computed weak fingerprint `wf`.
+    pub fn record_with_wf(
+        &self,
+        wf: &str,
+        pathset: StoredPathset,
+        entry_template: CacheEntry,
+    ) -> Result<String> {
+        let normalized = pathset.normalized(&[]);
+        self.pathsets.append(wf, normalized.clone())?;
+        let sf = compute_strong_fingerprint(wf, &normalized.reads);
+        let mut entry = entry_template;
+        entry.fingerprint = sf.clone();
+        entry.pathset_reads = normalized.reads;
+        self.write_entry(&sf, &entry)?;
+        Ok(sf)
     }
 
     /// Record a successful run. Stores both the pathset (under WF) and the
@@ -84,13 +106,7 @@ impl TwoPhaseCache {
         entry_template: CacheEntry,
     ) -> Result<String> {
         let wf = compute_weak_fingerprint(weak_fp_inputs);
-        self.pathsets.append(&wf, pathset.clone())?;
-        let sf = compute_strong_fingerprint(&wf, &pathset.reads);
-        let mut entry = entry_template;
-        entry.fingerprint = sf.clone();
-        entry.pathset_reads = pathset.reads;
-        self.write_entry(&sf, &entry)?;
-        Ok(sf)
+        self.record_with_wf(&wf, pathset, entry_template)
     }
 
     // ── private helpers ──────────────────────────────────────────────────

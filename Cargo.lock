@@ -924,6 +924,9 @@ name = "build-graph"
 version = "0.0.0"
 dependencies = [
  "petgraph",
+ "plugin",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "workspace-tools",
 ]
@@ -2926,6 +2929,7 @@ name = "plugin"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "globset",
  "serde",
  "serde_json",
  "tempfile",

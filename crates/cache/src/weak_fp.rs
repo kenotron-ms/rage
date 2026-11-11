@@ -2,9 +2,10 @@
 //! Used as the first phase of the two-phase cache lookup (design doc §5).
 
 use globset::{Glob, GlobSetBuilder};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::digest_cache::global_digest_cache;
 use crate::tool_hash::hash_tool_binary;
 
 /// All inputs that vary the weak fingerprint.
@@ -24,9 +25,24 @@ pub struct WeakFpInputs<'a> {
     pub dep_abi_fingerprints: &'a [(String, String)],
 }
 
+/// Detailed weak-fingerprint result produced in a single pass so callers
+/// (such as `why-miss` snapshot recording) can reuse the resolved input
+/// files and tool hash without walking the directory tree or hashing the
+/// tool binary a second time.
+#[derive(Debug, Clone)]
+pub struct WeakFpDetails {
+    /// 64-character BLAKE3 weak fingerprint hex string.
+    pub wf: String,
+    /// Resolved tool binary hash (or `"<missing>"`).
+    pub tool_hash: String,
+    /// Sorted, deduplicated `(relative_path, blake3_hex)` pairs matched by
+    /// `declared_input_globs`.
+    pub resolved_inputs: Vec<(PathBuf, String)>,
+}
+
 /// Resolve `globs` relative to `pkg_dir`, skipping common generated/vcs dirs.
 /// Returns (relative_path, blake3_hex_of_contents) pairs, sorted and deduped.
-fn resolve_globs(pkg_dir: &Path, globs: &[String]) -> Vec<(std::path::PathBuf, String)> {
+fn resolve_globs(pkg_dir: &Path, globs: &[String]) -> Vec<(PathBuf, String)> {
     if globs.is_empty() {
         return Vec::new();
     }
@@ -43,6 +59,7 @@ fn resolve_globs(pkg_dir: &Path, globs: &[String]) -> Vec<(std::path::PathBuf, S
     };
 
     const SKIP_DIRS: &[&str] = &["node_modules", "target", "dist", ".git"];
+    let digest_cache = global_digest_cache();
 
     let mut files = Vec::new();
 
@@ -67,12 +84,10 @@ fn resolve_globs(pkg_dir: &Path, globs: &[String]) -> Vec<(std::path::PathBuf, S
             Err(_) => continue,
         };
         if set.is_match(rel) {
-            let content = match std::fs::read(path) {
-                Ok(c) => c,
-                Err(_) => continue,
+            let Some(hash) = digest_cache.get_or_hash(path) else {
+                continue;
             };
-            let hash = blake3::hash(&content).to_hex().to_string();
-            files.push((rel.to_path_buf(), hash));
+            files.push((rel.to_path_buf(), hash.to_hex().to_string()));
         }
     }
 
@@ -81,28 +96,17 @@ fn resolve_globs(pkg_dir: &Path, globs: &[String]) -> Vec<(std::path::PathBuf, S
     files
 }
 
-/// Compute the weak fingerprint as a 64-char blake3 hex string.
+/// Resolve `globs` relative to `pkg_dir` and return `(rel_path, blake3_hex)` pairs.
 ///
-/// WF = blake3(
-///   "command:" || command || "\n",
-///   "tool_path:" || tool_path_bytes || "\n",
-///   "tool_hash:" || tool_hash_or_missing || "\n",
-///   "pkg_path:" || package_path_bytes || "\n",
-///   sorted("input:" || rel_path || ":" || content_hash || "\n" for each matched file),
-///   sorted("env:" || key || "=" || value || "\n" for each env pair),
-/// )
-/// Resolve  relative to  and return (rel_path, blake3_hex) pairs.
-///
-/// Public entry point used by  to collect the snapshot of declared
-/// input files for the  diagnostic.
-pub fn resolve_globs_for_snapshot(
-    pkg_dir: &Path,
-    globs: &[String],
-) -> Vec<(std::path::PathBuf, String)> {
+/// Public entry point used by callers that need declared input hashes directly.
+pub fn resolve_globs_for_snapshot(pkg_dir: &Path, globs: &[String]) -> Vec<(PathBuf, String)> {
     resolve_globs(pkg_dir, globs)
 }
 
-pub fn compute_weak_fingerprint(inputs: &WeakFpInputs) -> String {
+/// Compute the weak fingerprint and return the intermediate [`WeakFpDetails`]
+/// (resolved input hashes + tool hash) so `why-miss` snapshot persistence
+/// never repeats the `WalkDir` or tool binary read.
+pub fn compute_weak_fingerprint_with_details(inputs: &WeakFpInputs) -> WeakFpDetails {
     let mut hasher = blake3::Hasher::new();
 
     // 1. command
@@ -158,7 +162,16 @@ pub fn compute_weak_fingerprint(inputs: &WeakFpInputs) -> String {
     }
 
     // 7. finalize
-    hasher.finalize().to_hex().to_string()
+    let wf = hasher.finalize().to_hex().to_string();
+    WeakFpDetails {
+        wf,
+        tool_hash,
+        resolved_inputs: resolved,
+    }
+}
+
+pub fn compute_weak_fingerprint(inputs: &WeakFpInputs) -> String {
+    compute_weak_fingerprint_with_details(inputs).wf
 }
 
 #[cfg(test)]

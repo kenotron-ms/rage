@@ -3,7 +3,10 @@
 //! On disk: `{cache_dir}/wf-{WF}.pathsets` is a JSON array of pathsets, where
 //! each pathset is `{ "reads": [...], "writes": [...] }`.
 
+use crate::strong_fp::is_node_modules_path;
 use anyhow::{Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use plugin::AllowlistEntry;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -11,6 +14,46 @@ use std::path::{Path, PathBuf};
 pub struct StoredPathset {
     pub reads: Vec<PathBuf>,
     pub writes: Vec<PathBuf>,
+}
+
+impl StoredPathset {
+    /// Pre-filter (`node_modules` and optional toolchain allowlist) and
+    /// lexicographically sort + deduplicate `reads` and `writes` before
+    /// persisting to `pathset_store` so candidate lookups do not repeat
+    /// filtering/sorting on every check.
+    pub fn normalized(mut self, allowlist: &[AllowlistEntry]) -> Self {
+        let allow_set = build_allowlist_globset(allowlist);
+        self.reads.retain(|p| {
+            if is_node_modules_path(p) {
+                return false;
+            }
+            if let Some(set) = &allow_set {
+                if set.is_match(p) {
+                    return false;
+                }
+            }
+            true
+        });
+        self.reads.sort();
+        self.reads.dedup();
+
+        self.writes.sort();
+        self.writes.dedup();
+        self
+    }
+}
+
+fn build_allowlist_globset(allowlist: &[AllowlistEntry]) -> Option<GlobSet> {
+    if allowlist.is_empty() {
+        return None;
+    }
+    let mut builder = GlobSetBuilder::new();
+    for entry in allowlist {
+        if let Ok(glob) = Glob::new(&entry.path_pattern) {
+            builder.add(glob);
+        }
+    }
+    builder.build().ok()
 }
 
 pub struct PathsetStore {
@@ -34,11 +77,24 @@ impl PathsetStore {
         serde_json::from_str(&raw).unwrap_or_default()
     }
 
-    /// Append a pathset under `weak_fp`. Idempotent — if the same pathset is
+    /// Append a pathset under `weak_fp`, pre-filtering `node_modules` and
+    /// sorting/deduplicating paths. Idempotent — if the normalized pathset is
     /// already stored, no duplicate is added.
     pub fn append(&self, weak_fp: &str, ps: StoredPathset) -> Result<()> {
+        self.append_with_allowlist(weak_fp, ps, &[])
+    }
+
+    /// Append a pathset under `weak_fp`, pre-filtering `node_modules` and
+    /// `allowlist` patterns, and sorting/deduplicating paths before writing.
+    pub fn append_with_allowlist(
+        &self,
+        weak_fp: &str,
+        ps: StoredPathset,
+        allowlist: &[AllowlistEntry],
+    ) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating cache dir {}", self.dir.display()))?;
+        let ps = ps.normalized(allowlist);
         let mut existing = self.list(weak_fp);
         if existing.iter().any(|e| e == &ps) {
             return Ok(());
@@ -138,5 +194,38 @@ mod tests {
         let beta = store.list("wf_beta");
         assert_eq!(beta.len(), 1);
         assert_eq!(beta[0], ps_b);
+    }
+
+    #[test]
+    fn append_pre_filters_node_modules_allowlist_and_sorts() {
+        let (_tmp, store) = make_store();
+        let raw = StoredPathset {
+            reads: vec![
+                PathBuf::from("src/z.ts"),
+                PathBuf::from("node_modules/typescript/lib/typescript.js"),
+                PathBuf::from("src/a.ts"),
+                PathBuf::from("src/z.ts"),
+                PathBuf::from("/usr/local/share/toolchain/std.d.ts"),
+            ],
+            writes: vec![PathBuf::from("dist/b.js"), PathBuf::from("dist/a.js")],
+        };
+        let allowlist = vec![plugin::AllowlistEntry {
+            path_pattern: "**/toolchain/**".to_string(),
+            reason: "toolchain stdlib".to_string(),
+        }];
+
+        store
+            .append_with_allowlist("wf_norm", raw, &allowlist)
+            .unwrap();
+        let stored = store.list("wf_norm");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].reads,
+            vec![PathBuf::from("src/a.ts"), PathBuf::from("src/z.ts")]
+        );
+        assert_eq!(
+            stored[0].writes,
+            vec![PathBuf::from("dist/a.js"), PathBuf::from("dist/b.js")]
+        );
     }
 }
