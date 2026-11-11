@@ -184,8 +184,12 @@ impl DigestCache {
         let (digest, verified_stamp) = read_and_hash_verified(path, maybe_stamp)?;
 
         if let Some(stamp) = verified_stamp {
-            if let Ok(mut guard) = shard.map.write() {
-                guard.insert(path.to_path_buf(), (stamp, digest));
+            if stamp.is_racily_clean_safe() {
+                if let Ok(mut guard) = shard.map.write() {
+                    guard.insert(path.to_path_buf(), (stamp, digest));
+                }
+            } else if let Ok(mut guard) = shard.map.write() {
+                guard.remove(path);
             }
         }
 
@@ -277,12 +281,25 @@ mod tests {
         let cache = DigestCache::new();
         assert!(cache.peek(&file).is_none());
 
+        // Freshly written file is inside the 2s racy-clean guard window, so
+        // get_or_hash computes the digest without caching a racy stamp.
+        let h_racy = cache.get_or_hash(&file).expect("hash racy");
+        assert_eq!(h_racy, blake3::hash(b"export const x = 1;\n"));
+        assert!(
+            cache.peek(&file).is_none(),
+            "fresh file within racy-clean window must not be inserted into cache"
+        );
+
+        // Sleep past the 2-second racy-clean guard window so both mtime_ns and
+        // ctime_ns are strictly outside the window.
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+
         let h1 = cache.get_or_hash(&file).expect("hash v1");
         assert_eq!(h1, blake3::hash(b"export const x = 1;\n"));
 
         #[cfg(unix)]
         let stamp1 = {
-            let (stamp1, cached1) = cache.peek(&file).expect("entry cached");
+            let (stamp1, cached1) = cache.peek(&file).expect("entry cached after racy window");
             assert_eq!(cached1, h1);
             stamp1
         };
@@ -292,26 +309,22 @@ mod tests {
             "non-Unix platforms without ctime/inode stamps must not cache metadata entries"
         );
 
-        // Second lookup with unchanged file returns the same hash.
+        // Second lookup with unchanged file hits the cached stamp.
         let h1_again = cache.get_or_hash(&file).expect("hash v1 again");
         assert_eq!(h1, h1_again);
         #[cfg(unix)]
         assert_eq!(cache.peek(&file).unwrap().0, stamp1);
 
-        // Modify file with different size/content so FileStamp changes immediately.
+        // Modify file: new write is now within the racy-clean window, so
+        // get_or_hash returns the new digest and evicts the old cached entry.
         fs::write(&file, b"export const x = 222;\n").unwrap();
         let h2 = cache.get_or_hash(&file).expect("hash v2");
         assert_ne!(h1, h2);
         assert_eq!(h2, blake3::hash(b"export const x = 222;\n"));
-
-        #[cfg(unix)]
-        {
-            let (stamp2, cached2) = cache.peek(&file).expect("updated entry");
-            assert_ne!(stamp1, stamp2);
-            assert_eq!(cached2, h2);
-        }
-        #[cfg(not(unix))]
-        assert!(cache.peek(&file).is_none());
+        assert!(
+            cache.peek(&file).is_none(),
+            "modified file within racy window must evict old stamp and not insert racy stamp"
+        );
     }
 
     #[test]

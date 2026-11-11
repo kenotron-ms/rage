@@ -48,8 +48,12 @@ pub fn hash_tool_binary(path: &Path) -> Option<String> {
     let hex = digest.to_hex().to_string();
 
     if let Some(stamp) = verified_stamp {
-        if let Ok(mut guard) = tool_hash_cache().write() {
-            guard.insert(canonical, (stamp, hex.clone()));
+        if stamp.is_racily_clean_safe() {
+            if let Ok(mut guard) = tool_hash_cache().write() {
+                guard.insert(canonical, (stamp, hex.clone()));
+            }
+        } else if let Ok(mut guard) = tool_hash_cache().write() {
+            guard.remove(&canonical);
         }
     }
 

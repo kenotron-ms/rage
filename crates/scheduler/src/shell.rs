@@ -105,6 +105,8 @@ fn kill_pid_tree_sync(pid: u32) {
     {
         let _ = std::process::Command::new("/bin/kill")
             .args(["-9", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status();
     }
 }
