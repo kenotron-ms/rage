@@ -68,56 +68,54 @@ impl Drop for ProcessGroupGuard {
 }
 
 fn kill_pid_tree_sync(pid: u32) {
+    use std::collections::HashSet;
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
     let root = Pid::from_u32(pid);
     let mut sys = System::new();
 
-    // Perform up to 3 converging passes:
-    // 1. Snapshot the process table and collect all descendants of `root`.
-    // 2. Kill the root/parents FIRST so they cannot spawn any new child
-    //    processes after the snapshot, then kill all collected descendants.
-    // 3. Re-scan the process table to catch any child that was in the middle
-    //    of spawning just before its parent was killed, repeating until no
-    //    descendants remain alive.
-    for _pass in 0..3 {
+    // Retain all discovered ancestor PIDs across passes so that if an
+    // intermediate parent exits after spawning a child (leaving the child's
+    // recorded `parent()` pointing at that now-exited PID rather than `root`),
+    // subsequent passes still recognize and terminate that child.
+    let mut known_ancestors: HashSet<Pid> = HashSet::new();
+    known_ancestors.insert(root);
+
+    for _pass in 0..4 {
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             false,
             ProcessRefreshKind::nothing(),
         );
 
-        let mut to_kill = Vec::new();
-        if sys.process(root).is_some() {
-            to_kill.push(root);
-        }
-        let mut frontier = vec![root];
-        let mut idx = 0;
-        while idx < frontier.len() {
-            let current = frontier[idx];
-            idx += 1;
+        // Expand `known_ancestors` to transitive closure over the current
+        // process table using all previously discovered ancestor PIDs.
+        loop {
+            let mut added = false;
             for (&proc_pid, proc_info) in sys.processes() {
-                if proc_info.parent() == Some(current) && !frontier.contains(&proc_pid) {
-                    frontier.push(proc_pid);
-                    if !to_kill.contains(&proc_pid) {
-                        to_kill.push(proc_pid);
+                if let Some(parent_pid) = proc_info.parent() {
+                    if known_ancestors.contains(&parent_pid) && known_ancestors.insert(proc_pid) {
+                        added = true;
                     }
                 }
             }
+            if !added {
+                break;
+            }
         }
 
-        if to_kill.is_empty() {
-            break;
-        }
-
-        // Kill parents before children (`to_kill` is in BFS root-first order)
-        // so a parent process is terminated before it can spawn another child.
-        for &target_pid in &to_kill {
+        let mut killed_any = false;
+        for &target_pid in &known_ancestors {
             if let Some(proc_info) = sys.process(target_pid) {
                 let _ = proc_info
                     .kill_with(Signal::Kill)
                     .unwrap_or_else(|| proc_info.kill());
+                killed_any = true;
             }
+        }
+
+        if !killed_any {
+            break;
         }
     }
 
@@ -127,6 +125,21 @@ fn kill_pid_tree_sync(pid: u32) {
     {
         let _ = std::process::Command::new("/bin/kill")
             .args(["-9", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    // On Windows, also invoke `SystemRoot\System32\taskkill.exe /F /T /PID`
+    // via its canonical system path so the OS kernel's process-tree terminator
+    // sweeps any remaining descendants.
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let taskkill = std::path::PathBuf::from(system_root)
+            .join("System32")
+            .join("taskkill.exe");
+        let _ = std::process::Command::new(taskkill)
+            .args(["/F", "/T", "/PID", &pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();

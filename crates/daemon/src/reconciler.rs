@@ -469,8 +469,8 @@ mod tests {
         );
         #[cfg(windows)]
         let slow_cmd = format!(
-            "ping -n 1 -w 600 127.0.0.1 >nul && echo stale > \"{}\" && exit /b 1",
-            sentinel.display().to_string().replace('\\', "\\\\")
+            "powershell -NoProfile -Command \"Start-Sleep -Milliseconds 600\" && echo stale > \"{}\" && exit /b 1",
+            sentinel.display()
         );
         let slow_pkg_json = format!(
             r#"{{"name":"@slow/p","version":"1.0.0","scripts":{{"build":{}}}}}"#,
