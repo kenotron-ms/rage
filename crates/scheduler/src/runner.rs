@@ -536,10 +536,11 @@ struct BuildSummary {
     peak_active: Arc<std::sync::atomic::AtomicUsize>,
     /// Currently-active subprocess count (decremented on task exit).
     current_active: Arc<std::sync::atomic::AtomicUsize>,
-    /// Set to `true` as soon as the run aborts due to a task failure or
-    /// cancellation, preventing in-flight `spawn_blocking` post-task closures
-    /// from mutating shared cache state after abort.
-    aborted: Arc<std::sync::atomic::AtomicBool>,
+    /// Mutex-protected abort state (`true` once the run is aborted or dropped).
+    /// Post-task `spawn_blocking` closures hold this lock across the abort
+    /// check AND all shared cache/ABI writes so checking validity and mutating
+    /// shared cache state are mutually exclusive with cancellation.
+    abort_gate: Arc<std::sync::Mutex<bool>>,
     /// Blocking post-task persistence handles spawned during this run, drained
     /// before `run_tasks_two_phase` returns so no background cache write can
     /// outlive the run and race a subsequent retry.
@@ -554,7 +555,7 @@ impl Default for BuildSummary {
             allowed_concurrency: 1,
             peak_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             current_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            aborted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            abort_gate: Arc::new(std::sync::Mutex::new(false)),
             blocking_jobs: Vec::new(),
         }
     }
@@ -761,20 +762,20 @@ pub fn effective_concurrency(max_concurrency: Option<usize>) -> usize {
     })
 }
 
-/// Run-scoped drop guard that sets `aborted` to `true` whenever
+/// Run-scoped drop guard that locks `abort_gate` and sets it to `true` whenever
 /// `run_tasks_two_phase` exits (including when the outer future is dropped or
-/// cancelled by a caller such as the daemon reconciler), ensuring any in-flight
-/// `spawn_blocking` post-task closure sees `aborted == true` before mutating
-/// shared cache or ABI state.
+/// cancelled by a caller such as the daemon reconciler), serializing with any
+/// in-flight `spawn_blocking` post-task commit so checking validity and
+/// mutating shared cache/ABI state are atomic.
 struct RunAbortGuard {
-    aborted: Arc<std::sync::atomic::AtomicBool>,
+    abort_gate: Arc<std::sync::Mutex<bool>>,
     disarmed: bool,
 }
 
 impl RunAbortGuard {
-    fn new(aborted: Arc<std::sync::atomic::AtomicBool>) -> Self {
+    fn new(abort_gate: Arc<std::sync::Mutex<bool>>) -> Self {
         Self {
-            aborted,
+            abort_gate,
             disarmed: false,
         }
     }
@@ -787,8 +788,9 @@ impl RunAbortGuard {
 impl Drop for RunAbortGuard {
     fn drop(&mut self) {
         if !self.disarmed {
-            self.aborted
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Ok(mut aborted) = self.abort_gate.lock() {
+                *aborted = true;
+            }
         }
     }
 }
@@ -814,7 +816,7 @@ pub async fn run_tasks_two_phase(
         let mut s = summary.lock().unwrap();
         s.start();
         s.allowed_concurrency = concurrency;
-        RunAbortGuard::new(Arc::clone(&s.aborted))
+        RunAbortGuard::new(Arc::clone(&s.abort_gate))
     };
 
     // Layer 2 — memory budget (RAM guard).
@@ -900,11 +902,10 @@ pub async fn run_tasks_two_phase(
                         errors.push(e.to_string());
                     }
                     did_abort = true;
-                    summary
-                        .lock()
-                        .unwrap()
-                        .aborted
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    let gate = Arc::clone(&summary.lock().unwrap().abort_gate);
+                    if let Ok(mut aborted) = gate.lock() {
+                        *aborted = true;
+                    };
                     set.abort_all();
                 }
                 Err(_) => {
@@ -918,11 +919,10 @@ pub async fn run_tasks_two_phase(
                         );
                     }
                     did_abort = true;
-                    summary
-                        .lock()
-                        .unwrap()
-                        .aborted
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    let gate = Arc::clone(&summary.lock().unwrap().abort_gate);
+                    if let Ok(mut aborted) = gate.lock() {
+                        *aborted = true;
+                    };
                     set.abort_all();
                 }
             }
@@ -1015,11 +1015,10 @@ pub async fn run_tasks_two_phase(
                     errors.push(e.to_string());
                 }
                 did_abort = true;
-                summary
-                    .lock()
-                    .unwrap()
-                    .aborted
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let gate = Arc::clone(&summary.lock().unwrap().abort_gate);
+                if let Ok(mut aborted) = gate.lock() {
+                    *aborted = true;
+                };
                 set.abort_all();
             }
             Err(_) => {
@@ -1033,11 +1032,10 @@ pub async fn run_tasks_two_phase(
                     );
                 }
                 did_abort = true;
-                summary
-                    .lock()
-                    .unwrap()
-                    .aborted
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let gate = Arc::clone(&summary.lock().unwrap().abort_gate);
+                if let Ok(mut aborted) = gate.lock() {
+                    *aborted = true;
+                };
                 set.abort_all();
             }
         }
@@ -1352,10 +1350,9 @@ async fn run_single_task_two_phase(
         // ABI fingerprinting, pkg-abi persistence, post-run WF verification +
         // pathset/entry recording, output_store write, and CAS capture scheduling)
         // inside spawn_blocking so Tokio worker threads never block on disk I/O (#7).
-        // The JoinHandle is tracked in `summary.blocking_jobs` and gated by
-        // `summary.aborted` so an aborted run neither leaves detached cache
-        // writers running past `run_tasks_two_phase` return nor overwrites
-        // shared ABI/cache state after a sibling task fails.
+        // The commit phase acquires `summary.abort_gate` for the entire duration
+        // of the ABI/cache writes so checking validity and mutating shared cache
+        // state are mutually exclusive with run cancellation or abort.
         let cache_post = Arc::clone(&cache);
         let store_post = Arc::clone(&artifact_store);
         let cwd_post = task.cwd.clone();
@@ -1367,15 +1364,14 @@ async fn run_single_task_two_phase(
         let ws_post = task.workspace_root.clone();
         let tp_post = tool_path;
         let pre_wf = task_wf;
-        let aborted_flag = {
+        let abort_gate = {
             let s = summary.lock().unwrap();
-            Arc::clone(&s.aborted)
+            Arc::clone(&s.abort_gate)
         };
-        let (done_post_tx, done_post_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_post_tx, done_post_rx) = tokio::sync::oneshot::channel::<bool>();
         let post_jh = tokio::task::spawn_blocking(move || {
-            use std::sync::atomic::Ordering;
-            if aborted_flag.load(Ordering::SeqCst) {
-                let _ = done_post_tx.send(());
+            if abort_gate.lock().map(|g| *g).unwrap_or(true) {
+                let _ = done_post_tx.send(false);
                 return;
             }
             let output_files = resolve_output_globs(&cwd_post, &out_globs_post);
@@ -1398,59 +1394,69 @@ async fn run_single_task_two_phase(
                 dep_abi_fingerprints: &dep_abi_fps,
             };
             let post_wf = cache::weak_fp::compute_weak_fingerprint(&post_wf_inputs);
-
-            if aborted_flag.load(Ordering::SeqCst) {
-                let _ = done_post_tx.send(());
-                return;
-            }
-
             let pathset_reads_for_capture = pathset.reads.clone();
-            if !aborted_flag.load(Ordering::SeqCst) {
+
+            // Hold `abort_gate` across the abort check AND all shared cache/ABI
+            // mutations so cancellation cannot interleave between checking and writing.
+            let mut abi_clear_ok = true;
+            let should_schedule_capture = {
+                let Ok(aborted) = abort_gate.lock() else {
+                    let _ = done_post_tx.send(false);
+                    return;
+                };
+                if *aborted {
+                    let _ = done_post_tx.send(false);
+                    return;
+                }
+
                 if let Some(fp) = &abi_fp {
                     cache_post.set_pkg_abi_fp(&pkg_post, fp);
                 } else if !out_globs_post.is_empty() {
                     // Only clear a previously stored ABI when this task is
                     // configured as an output/ABI producer (`!out_globs_post.is_empty()`,
                     // e.g. `build`) and its authoritative output scan found no
-                    // `.d.ts` files. Non-producing tasks with empty `output_globs`
-                    // (e.g. `typecheck` or `lint`) must leave the package's
-                    // stored ABI untouched.
-                    cache_post.clear_pkg_abi_fp(&pkg_post);
+                    // `.d.ts` files. If clearing the stale ABI fails (for example,
+                    // on a read-only cache directory), fail closed so downstream
+                    // dependents cannot consume the obsolete ABI.
+                    if cache_post.clear_pkg_abi_fp(&pkg_post).is_err() {
+                        abi_clear_ok = false;
+                    }
                 }
-            }
-            // Only record into the two-phase cache when the run has not aborted
-            // and the post-run WF still matches the pre-run WF.
-            if !pre_wf.is_empty() && post_wf == pre_wf && !aborted_flag.load(Ordering::SeqCst) {
-                let entry = CacheEntry {
-                    fingerprint: String::new(),
-                    command: cmd_post,
-                    exit_code: 0,
-                    elapsed_ms,
-                    cached_at: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    pathset_reads: vec![],
-                    abi_fingerprint: abi_fp,
-                };
-                let sf = cache_post
-                    .record_with_wf(&post_wf, pathset, entry)
-                    .unwrap_or_default();
 
-                if !sf.is_empty() && !aborted_flag.load(Ordering::SeqCst) {
-                    cache::output_store::write_output(
-                        cache_post.dir(),
-                        &sf,
-                        &cache::output_store::TaskOutput {
-                            stdout: captured_stdout,
-                            stderr: captured_stderr,
-                            exit_code: 0,
-                        },
-                    );
+                if abi_clear_ok && !pre_wf.is_empty() && post_wf == pre_wf {
+                    let entry = CacheEntry {
+                        fingerprint: String::new(),
+                        command: cmd_post,
+                        exit_code: 0,
+                        elapsed_ms,
+                        cached_at: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        pathset_reads: vec![],
+                        abi_fingerprint: abi_fp,
+                    };
+                    let sf = cache_post
+                        .record_with_wf(&post_wf, pathset, entry)
+                        .unwrap_or_default();
+
+                    if !sf.is_empty() {
+                        cache::output_store::write_output(
+                            cache_post.dir(),
+                            &sf,
+                            &cache::output_store::TaskOutput {
+                                stdout: captured_stdout,
+                                stderr: captured_stderr,
+                                exit_code: 0,
+                            },
+                        );
+                    }
                 }
-            }
 
-            if !pathset_reads_for_capture.is_empty() && !aborted_flag.load(Ordering::SeqCst) {
+                abi_clear_ok && !pathset_reads_for_capture.is_empty()
+            };
+
+            if should_schedule_capture {
                 if let Some(fp) = find_latest_install_fingerprint(cache_post.dir()) {
                     let artifact_dir = cache_post.dir().join("artifact-packages").join(&fp);
                     crate::artifact_capture::schedule_capture(
@@ -1462,10 +1468,25 @@ async fn run_single_task_two_phase(
                     );
                 }
             }
-            let _ = done_post_tx.send(());
+            let _ = done_post_tx.send(abi_clear_ok);
         });
         summary.lock().unwrap().blocking_jobs.push(post_jh);
-        let _ = done_post_rx.await;
+        let abi_clear_ok = done_post_rx.await.unwrap_or(false);
+        if !abi_clear_ok {
+            summary.lock().unwrap().record(TaskRecord {
+                package: pkg_name,
+                script: script_name,
+                started_at_ms,
+                elapsed_ms,
+                outcome: TaskOutcome::Failed,
+                dep_packages: task_dep_packages,
+            });
+            return Err(RunError::TaskFailed {
+                package: task.package_name,
+                script: task.script_name,
+                code: 1,
+            });
+        }
 
         eprintln!(
             "[rage] {}#{} \u{2713} {:.2}s",

@@ -164,12 +164,21 @@ impl TwoPhaseCache {
 
     /// Remove any stored ABI fingerprint for `pkg_name` so downstream tasks do
     /// not read a stale ABI when a package stops emitting `.d.ts` files.
-    pub fn clear_pkg_abi_fp(&self, pkg_name: &str) {
+    ///
+    /// Returns `Ok(())` when the file was removed or did not exist
+    /// (`ErrorKind::NotFound`), or an `Err` if deletion failed (for example,
+    /// on a read-only cache directory) so callers can fail closed rather than
+    /// allowing downstream tasks to consume a stale ABI.
+    pub fn clear_pkg_abi_fp(&self, pkg_name: &str) -> std::io::Result<()> {
         let path = self
             .dir
             .join("pkg-abi")
             .join(Self::pkg_name_to_filename(pkg_name));
-        let _ = std::fs::remove_file(path);
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
