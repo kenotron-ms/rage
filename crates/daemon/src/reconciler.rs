@@ -2,19 +2,79 @@ use crate::state::{
     BuildState, BuildStateContainer, DaemonState, DesiredState, TaskRecord, TaskStatus,
 };
 use anyhow::Result;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, watch, Mutex};
+
+/// Cooperative cancellation token attached to each reconciliation revision.
+///
+/// When a newer `SetDesiredState` or relevant `OnFilesChanged` arrives, the
+/// active token is cancelled (`cancel()`) so the superseded build can abort
+/// early and never overwrite [`DaemonState`].
+#[derive(Clone, Debug)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+    tx: Arc<watch::Sender<bool>>,
+    rx: watch::Receiver<bool>,
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CancellationToken {
+    /// Create a fresh, uncancelled token.
+    pub fn new() -> Self {
+        let (tx, rx) = watch::channel(false);
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            tx: Arc::new(tx),
+            rx,
+        }
+    }
+
+    /// Signal cancellation to all clones of this token.
+    pub fn cancel(&self) {
+        if !self.cancelled.swap(true, Ordering::SeqCst) {
+            let _ = self.tx.send(true);
+        }
+    }
+
+    /// Returns `true` if cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Wait until cancellation is requested.
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let mut rx = self.rx.clone();
+        while !*rx.borrow_and_update() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ReconcilerHandle {
     pub state: Arc<Mutex<DaemonState>>,
     tx: tokio::sync::mpsc::UnboundedSender<ReconcilerCmd>,
     state_changes: broadcast::Sender<()>,
+    observed_paths: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 pub enum ReconcilerCmd {
     SetDesiredState(DesiredState),
     OnFilesChanged,
+    OnFilesChangedPaths(Vec<PathBuf>),
     RetryTask { package: String, script: String },
 }
 
@@ -31,6 +91,21 @@ impl ReconcilerHandle {
     pub fn on_files_changed(&self) {
         let _ = self.tx.send(ReconcilerCmd::OnFilesChanged);
     }
+    /// Notify the reconciler that specific `paths` changed on disk.
+    ///
+    /// If an observed pathset filter has been registered via
+    /// [`ReconcilerHandle::set_observed_paths`] (non-empty), changes that do
+    /// not intersect the observed pathset are ignored without cancelling or
+    /// re-running the current revision.
+    pub fn on_files_changed_paths(&self, paths: Vec<PathBuf>) {
+        let _ = self.tx.send(ReconcilerCmd::OnFilesChangedPaths(paths));
+    }
+    /// Register the set of watched input paths for pathset-filtered file change
+    /// notifications. An empty set disables filtering (all changes trigger).
+    pub async fn set_observed_paths(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let mut guard = self.observed_paths.lock().await;
+        *guard = paths.into_iter().collect();
+    }
     pub fn retry_task(&self, pkg: String, script: String) {
         let _ = self.tx.send(ReconcilerCmd::RetryTask {
             package: pkg,
@@ -41,95 +116,47 @@ impl ReconcilerHandle {
 
 pub fn spawn() -> ReconcilerHandle {
     let state = Arc::new(Mutex::new(DaemonState::default()));
+    let observed_paths: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ReconcilerCmd>();
     let (state_tx, _) = broadcast::channel::<()>(64);
     let st_clone = state.clone();
+    let obs_clone = observed_paths.clone();
     let bcast = state_tx.clone();
     tokio::spawn(async move {
+        let mut active_token: Option<CancellationToken> = None;
+
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 ReconcilerCmd::SetDesiredState(d) => {
-                    {
+                    if let Some(prev) = active_token.take() {
+                        prev.cancel();
+                    }
+                    let token = CancellationToken::new();
+                    active_token = Some(token.clone());
+
+                    let rev = {
                         let mut s = st_clone.lock().await;
+                        s.revision = s.revision.saturating_add(1);
                         s.desired = Some(d.clone());
                         s.state = BuildStateContainer {
                             kind: BuildState::Converging,
                         };
                         s.tasks = vec![];
-                    }
+                        s.revision
+                    };
                     let _ = bcast.send(());
-                    let st = st_clone.clone();
-                    let b2 = bcast.clone();
-                    tokio::spawn(async move {
-                        match run_build(&d).await {
-                            Ok(records) => {
-                                let mut s = st.lock().await;
-                                s.tasks = records;
-                                let blocked = s
-                                    .tasks
-                                    .iter()
-                                    .any(|t| matches!(t.status, TaskStatus::Failed { .. }));
-                                s.state = BuildStateContainer {
-                                    kind: if blocked {
-                                        BuildState::Blocked
-                                    } else {
-                                        BuildState::Ready
-                                    },
-                                };
-                                let _ = b2.send(());
-                            }
-                            Err(_) => {
-                                let mut s = st.lock().await;
-                                s.state = BuildStateContainer {
-                                    kind: BuildState::Blocked,
-                                };
-                                let _ = b2.send(());
-                            }
-                        }
-                    });
+                    spawn_revision_run(st_clone.clone(), bcast.clone(), d, rev, token);
                 }
                 ReconcilerCmd::OnFilesChanged => {
-                    let desired = {
-                        let mut s = st_clone.lock().await;
-                        if s.desired.is_some() {
-                            s.state = BuildStateContainer {
-                                kind: BuildState::Converging,
-                            };
-                            s.tasks = vec![];
-                        }
-                        s.desired.clone()
+                    dispatch_files_changed(&st_clone, &bcast, &mut active_token).await;
+                }
+                ReconcilerCmd::OnFilesChangedPaths(paths) => {
+                    let relevant = {
+                        let obs = obs_clone.lock().await;
+                        obs.is_empty() || paths.iter().any(|p| obs.contains(p))
                     };
-                    if let Some(d) = desired {
-                        let _ = bcast.send(());
-                        let st = st_clone.clone();
-                        let b2 = bcast.clone();
-                        tokio::spawn(async move {
-                            match run_build(&d).await {
-                                Ok(records) => {
-                                    let mut s = st.lock().await;
-                                    s.tasks = records;
-                                    let blocked = s
-                                        .tasks
-                                        .iter()
-                                        .any(|t| matches!(t.status, TaskStatus::Failed { .. }));
-                                    s.state = BuildStateContainer {
-                                        kind: if blocked {
-                                            BuildState::Blocked
-                                        } else {
-                                            BuildState::Ready
-                                        },
-                                    };
-                                    let _ = b2.send(());
-                                }
-                                Err(_) => {
-                                    let mut s = st.lock().await;
-                                    s.state = BuildStateContainer {
-                                        kind: BuildState::Blocked,
-                                    };
-                                    let _ = b2.send(());
-                                }
-                            }
-                        });
+                    if relevant {
+                        dispatch_files_changed(&st_clone, &bcast, &mut active_token).await;
                     }
                 }
                 ReconcilerCmd::RetryTask { package, script } => {
@@ -149,7 +176,87 @@ pub fn spawn() -> ReconcilerHandle {
         state,
         tx,
         state_changes: state_tx,
+        observed_paths,
     }
+}
+
+async fn dispatch_files_changed(
+    st_clone: &Arc<Mutex<DaemonState>>,
+    bcast: &broadcast::Sender<()>,
+    active_token: &mut Option<CancellationToken>,
+) {
+    let desired_and_rev = {
+        let mut s = st_clone.lock().await;
+        if let Some(d) = s.desired.clone() {
+            s.revision = s.revision.saturating_add(1);
+            s.state = BuildStateContainer {
+                kind: BuildState::Converging,
+            };
+            s.tasks = vec![];
+            Some((d, s.revision))
+        } else {
+            None
+        }
+    };
+    if let Some((d, rev)) = desired_and_rev {
+        if let Some(prev) = active_token.take() {
+            prev.cancel();
+        }
+        let token = CancellationToken::new();
+        *active_token = Some(token.clone());
+
+        let _ = bcast.send(());
+        spawn_revision_run(st_clone.clone(), bcast.clone(), d, rev, token);
+    }
+}
+
+fn spawn_revision_run(
+    st: Arc<Mutex<DaemonState>>,
+    b2: broadcast::Sender<()>,
+    d: DesiredState,
+    rev: u64,
+    token: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let build_res = tokio::select! {
+            _ = token.cancelled() => return,
+            res = run_build(&d) => res,
+        };
+        if token.is_cancelled() {
+            return;
+        }
+        match build_res {
+            Ok(records) => {
+                let mut s = st.lock().await;
+                if s.revision != rev || token.is_cancelled() {
+                    return;
+                }
+                s.tasks = records;
+                let blocked = s
+                    .tasks
+                    .iter()
+                    .any(|t| matches!(t.status, TaskStatus::Failed { .. }));
+                s.state = BuildStateContainer {
+                    kind: if blocked {
+                        BuildState::Blocked
+                    } else {
+                        BuildState::Ready
+                    },
+                };
+                let _ = b2.send(());
+            }
+            Err(_) => {
+                let mut s = st.lock().await;
+                if s.revision != rev || token.is_cancelled() {
+                    return;
+                }
+                s.state = BuildStateContainer {
+                    kind: BuildState::Blocked,
+                };
+                let _ = b2.send(());
+            }
+        }
+    });
 }
 
 async fn run_build(d: &DesiredState) -> Result<Vec<TaskRecord>> {
@@ -336,5 +443,143 @@ mod tests {
             reached_ready,
             "State never reached BuildState::Ready or Blocked"
         );
+    }
+
+    #[tokio::test]
+    async fn newer_desired_state_supersedes_slow_in_flight_revision() {
+        // Workspace 1 has a slow build (`sleep 1`) that attempts to write a
+        // sentinel file after sleeping and then fails (`exit 1`).
+        let slow_ws = tempfile::tempdir().unwrap();
+        let sentinel = slow_ws.path().join("stale_revision_ran.txt");
+        std::fs::write(
+            slow_ws.path().join("pnpm-workspace.yaml"),
+            b"packages:\n  - 'p'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            slow_ws.path().join("package.json"),
+            br#"{"name":"slow","private":true}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(slow_ws.path().join("p")).unwrap();
+        #[cfg(not(windows))]
+        let slow_cmd = format!(
+            "sleep 0.6 && echo stale > '{}' && exit 1",
+            sentinel.display()
+        );
+        #[cfg(windows)]
+        let slow_cmd = format!(
+            "powershell -NoProfile -Command \"Start-Sleep -Milliseconds 600\" && echo stale > \"{}\" && exit /b 1",
+            sentinel.display()
+        );
+        let slow_pkg_json = format!(
+            r#"{{"name":"@slow/p","version":"1.0.0","scripts":{{"build":{}}}}}"#,
+            serde_json::to_string(&slow_cmd).unwrap()
+        );
+        std::fs::write(slow_ws.path().join("p/package.json"), slow_pkg_json).unwrap();
+
+        // Workspace 2 has a fast build (`echo ok`) that succeeds.
+        let fast_ws = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fast_ws.path().join("pnpm-workspace.yaml"),
+            b"packages:\n  - 'p'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fast_ws.path().join("package.json"),
+            br#"{"name":"fast","private":true}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(fast_ws.path().join("p")).unwrap();
+        std::fs::write(
+            fast_ws.path().join("p/package.json"),
+            br#"{"name":"@fast/p","version":"1.0.0","scripts":{"build":"echo fast"}}"#,
+        )
+        .unwrap();
+
+        let h = spawn();
+        // Start revision 1 (slow failing build)
+        h.set_desired(DesiredState {
+            workspace: slow_ws.path().to_path_buf(),
+            script: "build".into(),
+            targets: None,
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // Immediately supersede with revision 2 (fast succeeding build)
+        h.set_desired(DesiredState {
+            workspace: fast_ws.path().to_path_buf(),
+            script: "build".into(),
+            targets: None,
+        });
+
+        // Wait for revision 2 to reach Ready
+        for _ in 0..100 {
+            let s = h.state.lock().await;
+            if s.revision == 2 && s.state.kind == BuildState::Ready {
+                break;
+            }
+            drop(s);
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+
+        // Wait past slow_ws's 0.6s sleep to verify revision 1's process group
+        // was killed on cancellation and neither created the delayed sentinel
+        // nor overwrote revision 2 state.
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        assert!(
+            !sentinel.exists(),
+            "cancelled revision 1 subprocess tree must be killed before writing delayed sentinel"
+        );
+        let final_state = h.state.lock().await;
+        assert_eq!(final_state.revision, 2);
+        assert_eq!(
+            final_state.state.kind,
+            BuildState::Ready,
+            "superseded revision 1 must not overwrite revision 2 state"
+        );
+        assert_eq!(final_state.tasks.len(), 1);
+        assert_eq!(final_state.tasks[0].package, "@fast/p");
+    }
+
+    #[tokio::test]
+    async fn pathset_filtered_on_files_changed_ignores_unrelated_paths() {
+        let h = spawn();
+        let watched = PathBuf::from("/tmp/ws/packages/a/src/index.ts");
+        let unrelated = PathBuf::from("/tmp/ws/README.md");
+        h.set_observed_paths([watched.clone()]).await;
+
+        h.set_desired(DesiredState {
+            workspace: PathBuf::from("/tmp/nonexistent-ws-for-filter-test"),
+            script: "build".into(),
+            targets: None,
+        });
+
+        for _ in 0..50 {
+            if h.state.lock().await.state.kind == BuildState::Blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(h.state.lock().await.revision, 1);
+
+        // Unrelated file change must NOT bump revision.
+        h.on_files_changed_paths(vec![unrelated]);
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(
+            h.state.lock().await.revision,
+            1,
+            "unrelated path must not trigger a new reconciliation revision"
+        );
+
+        // Observed file change MUST bump revision to 2.
+        h.on_files_changed_paths(vec![watched]);
+        for _ in 0..50 {
+            if h.state.lock().await.revision == 2 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("observed path change did not increment revision to 2");
     }
 }

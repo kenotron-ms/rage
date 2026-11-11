@@ -4,6 +4,7 @@
 //!   * `LocalCache` — single-phase blake3, kept for tests / fallback.
 //!   * `TwoPhaseCache` — production: WF → pathset → SF (per design doc §5).
 
+pub mod digest_cache;
 pub mod entry;
 pub mod fingerprint; // legacy single-phase, kept for back-compat
 pub mod local;
@@ -17,11 +18,14 @@ pub mod two_phase;
 pub mod weak_fp;
 pub mod why_miss;
 
+pub use digest_cache::{global_digest_cache, DigestCache, FileStamp};
 pub use entry::CacheEntry;
 pub use fingerprint::fingerprint_task;
 pub use local::LocalCache;
 pub use pathset_store::PathsetStore;
 pub use provider::CacheProvider;
-pub use strong_fp::compute_strong_fingerprint;
+pub use strong_fp::{compute_strong_fingerprint, compute_strong_fingerprint_with_cache};
 pub use two_phase::TwoPhaseCache;
-pub use weak_fp::{compute_weak_fingerprint, WeakFpInputs};
+pub use weak_fp::{
+    compute_weak_fingerprint, compute_weak_fingerprint_with_details, WeakFpDetails, WeakFpInputs,
+};

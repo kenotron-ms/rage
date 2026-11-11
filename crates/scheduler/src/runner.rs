@@ -365,10 +365,9 @@ async fn run_single_task(
 
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = crate::shell::command(&task.command)
-        .current_dir(&task.cwd)
-        .env("PATH", &new_path)
-        .status()
+    let mut cmd = crate::shell::command(&task.command);
+    cmd.current_dir(&task.cwd).env("PATH", &new_path);
+    let status = crate::shell::spawn_and_wait_status(cmd)
         .await
         .map_err(|e| RunError::Spawn {
             package: task.package_name.clone(),
@@ -441,10 +440,9 @@ async fn run_root_task_legacy(
     let start = Instant::now();
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = crate::shell::command(&task.command)
-        .current_dir(&task.cwd)
-        .env("PATH", &new_path)
-        .status()
+    let mut cmd = crate::shell::command(&task.command);
+    cmd.current_dir(&task.cwd).env("PATH", &new_path);
+    let status = crate::shell::spawn_and_wait_status(cmd)
         .await
         .map_err(|e| RunError::Spawn {
             package: task.package_name.clone(),
@@ -538,6 +536,15 @@ struct BuildSummary {
     peak_active: Arc<std::sync::atomic::AtomicUsize>,
     /// Currently-active subprocess count (decremented on task exit).
     current_active: Arc<std::sync::atomic::AtomicUsize>,
+    /// Mutex-protected abort state (`true` once the run is aborted or dropped).
+    /// Post-task `spawn_blocking` closures hold this lock across the abort
+    /// check AND all shared cache/ABI writes so checking validity and mutating
+    /// shared cache state are mutually exclusive with cancellation.
+    abort_gate: Arc<std::sync::Mutex<bool>>,
+    /// Blocking post-task persistence handles spawned during this run, drained
+    /// before `run_tasks_two_phase` returns so no background cache write can
+    /// outlive the run and race a subsequent retry.
+    blocking_jobs: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Default for BuildSummary {
@@ -548,6 +555,8 @@ impl Default for BuildSummary {
             allowed_concurrency: 1,
             peak_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             current_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_gate: Arc::new(std::sync::Mutex::new(false)),
+            blocking_jobs: Vec::new(),
         }
     }
 }
@@ -753,6 +762,39 @@ pub fn effective_concurrency(max_concurrency: Option<usize>) -> usize {
     })
 }
 
+/// Run-scoped drop guard that locks `abort_gate` and sets it to `true` whenever
+/// `run_tasks_two_phase` exits (including when the outer future is dropped or
+/// cancelled by a caller such as the daemon reconciler), serializing with any
+/// in-flight `spawn_blocking` post-task commit so checking validity and
+/// mutating shared cache/ABI state are atomic.
+struct RunAbortGuard {
+    abort_gate: Arc<std::sync::Mutex<bool>>,
+    disarmed: bool,
+}
+
+impl RunAbortGuard {
+    fn new(abort_gate: Arc<std::sync::Mutex<bool>>) -> Self {
+        Self {
+            abort_gate,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for RunAbortGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            if let Ok(mut aborted) = self.abort_gate.lock() {
+                *aborted = true;
+            }
+        }
+    }
+}
+
 pub async fn run_tasks_two_phase(
     dag: &WorkspaceDag,
     tasks: Vec<Task>,
@@ -770,11 +812,12 @@ pub async fn run_tasks_two_phase(
 
     // Build-run summary — collects per-task timings and prints a table at the end.
     let summary = Arc::new(std::sync::Mutex::new(BuildSummary::default()));
-    {
+    let mut run_abort_guard = {
         let mut s = summary.lock().unwrap();
         s.start();
         s.allowed_concurrency = concurrency;
-    }
+        RunAbortGuard::new(Arc::clone(&s.abort_gate))
+    };
 
     // Layer 2 — memory budget (RAM guard).
     // Reads available system memory at startup; uses historical p75 peak-RSS
@@ -859,6 +902,10 @@ pub async fn run_tasks_two_phase(
                         errors.push(e.to_string());
                     }
                     did_abort = true;
+                    let gate = Arc::clone(&summary.lock().unwrap().abort_gate);
+                    if let Ok(mut aborted) = gate.lock() {
+                        *aborted = true;
+                    };
                     set.abort_all();
                 }
                 Err(_) => {
@@ -872,15 +919,27 @@ pub async fn run_tasks_two_phase(
                         );
                     }
                     did_abort = true;
+                    let gate = Arc::clone(&summary.lock().unwrap().abort_gate);
+                    if let Ok(mut aborted) = gate.lock() {
+                        *aborted = true;
+                    };
                     set.abort_all();
                 }
             }
+        }
+        let jobs = {
+            let mut s = summary.lock().unwrap();
+            std::mem::take(&mut s.blocking_jobs)
+        };
+        for jh in jobs {
+            let _ = jh.await;
         }
         collect_errors(errors)?;
     }
 
     // ── Phase 2: package tasks, continuous topological ──────────────────────
     if package_tasks.is_empty() {
+        run_abort_guard.disarm();
         summary.lock().unwrap().print();
         return Ok(());
     }
@@ -956,6 +1015,10 @@ pub async fn run_tasks_two_phase(
                     errors.push(e.to_string());
                 }
                 did_abort = true;
+                let gate = Arc::clone(&summary.lock().unwrap().abort_gate);
+                if let Ok(mut aborted) = gate.lock() {
+                    *aborted = true;
+                };
                 set.abort_all();
             }
             Err(_) => {
@@ -969,11 +1032,25 @@ pub async fn run_tasks_two_phase(
                     );
                 }
                 did_abort = true;
+                let gate = Arc::clone(&summary.lock().unwrap().abort_gate);
+                if let Ok(mut aborted) = gate.lock() {
+                    *aborted = true;
+                };
                 set.abort_all();
             }
         }
     }
+    let jobs = {
+        let mut s = summary.lock().unwrap();
+        std::mem::take(&mut s.blocking_jobs)
+    };
+    for jh in jobs {
+        let _ = jh.await;
+    }
     let result = collect_errors(errors);
+    if result.is_ok() {
+        run_abort_guard.disarm();
+    }
     summary.lock().unwrap().print();
     result?;
     Ok(())
@@ -1005,7 +1082,7 @@ async fn run_single_task_two_phase(
     }
 
     use cache::pathset_store::StoredPathset;
-    use cache::{CacheEntry, WeakFpInputs};
+    use cache::CacheEntry;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // Timer starts here — covers both cache-hit replay and actual builds.
@@ -1027,115 +1104,98 @@ async fn run_single_task_two_phase(
     let tool_path = crate::node_path::which_first(&task.command, &task.cwd, &task.workspace_root)
         .unwrap_or_else(|| PathBuf::from("sh"));
 
-    // Gather dep ABI fingerprints for early-cutoff WF computation
-    let dep_abi_fps: Vec<(String, String)> = task
-        .dep_package_names
-        .iter()
-        .filter_map(|dep| cache.get_pkg_abi_fp(dep).map(|fp| (dep.clone(), fp)))
-        .collect();
-
-    let inputs = WeakFpInputs {
-        command: &task.command,
-        tool_path: &tool_path,
-        package_path: &task.cwd,
-        declared_input_globs: &task.declared_input_globs,
-        tracked_env: &[],
-        dep_abi_fingerprints: &dep_abi_fps,
-    };
-
-    // ── Record why-miss snapshot (fire-and-forget in background) ────────
-    // All file I/O is moved to spawn_blocking so we never block the tokio
-    // worker thread on disk reads.  The snapshot is best-effort; failures
-    // are silently ignored.
-    {
-        let cache_dir = cache.dir().to_path_buf();
-        let cwd_snap = task.cwd.clone();
-        let globs_snap = task.declared_input_globs.clone();
-        let pkg_snap = task.package_name.clone();
-        let script_snap = task.script_name.clone();
-        let cmd_snap = task.command.clone();
-        let tp_snap = tool_path.clone();
-        let dep_fps_snap = dep_abi_fps.clone();
-        // Fire-and-forget: don't await.
-        tokio::task::spawn_blocking(move || {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let resolved = cache::weak_fp::resolve_globs_for_snapshot(&cwd_snap, &globs_snap);
-            let tool_hash_str = cache::tool_hash::hash_tool_binary(&tp_snap)
-                .unwrap_or_else(|| "<missing>".to_string());
-            let snap = cache::why_miss::WhyMissSnapshot {
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                pkg: pkg_snap,
-                script: script_snap,
-                command: cmd_snap,
-                tool_path: tp_snap.to_string_lossy().into_owned(),
-                tool_hash: tool_hash_str,
-                inputs: resolved
-                    .into_iter()
-                    .map(|(p, h)| cache::why_miss::InputEntry { path: p, hash: h })
-                    .collect(),
-                env: vec![],
-                dep_abi_fps: dep_fps_snap,
-            };
-            cache::why_miss::record_snapshot(&cache_dir, snap);
-        });
-    }
-
-    // Phase 1: cache lookup
-    // Run in spawn_blocking: compute_weak_fingerprint does synchronous
-    // file I/O (tool-binary hash + glob walk). Keeping it off the tokio
-    // worker-thread pool prevents all worker threads from blocking in
-    // parallel when a full wave of package tasks starts at once.
-    let (cache_lookup_result, stored_pathset_reads, task_wf) = {
+    // Phase 1: gather dep ABI fingerprints, compute WF (with resolved inputs +
+    // tool hash), lazily record the why-miss snapshot without a second WalkDir
+    // or tool binary read (#4), check the two-phase cache, and pre-load
+    // historical memory stats on a miss (#7) — all inside a single
+    // spawn_blocking pass so Tokio worker threads never block on disk I/O.
+    let (cache_lookup_result, stored_pathset_reads, task_wf, miss_stats) = {
         let c2 = Arc::clone(&cache);
         let cmd2 = task.command.clone();
         let tp2 = tool_path.clone();
         let pp2 = task.cwd.clone();
         let gl2 = task.declared_input_globs.clone();
-        let df2 = dep_abi_fps.clone();
+        let dep_names = task.dep_package_names.clone();
+        let pkg_snap = task.package_name.clone();
+        let script_snap = task.script_name.clone();
         tokio::task::spawn_blocking(move || {
+            let dep_abi_fps: Vec<(String, String)> = dep_names
+                .iter()
+                .filter_map(|dep| c2.get_pkg_abi_fp(dep).map(|fp| (dep.clone(), fp)))
+                .collect();
             let wf_inputs = cache::WeakFpInputs {
                 command: &cmd2,
                 tool_path: &tp2,
                 package_path: &pp2,
                 declared_input_globs: &gl2,
                 tracked_env: &[],
-                dep_abi_fingerprints: &df2,
+                dep_abi_fingerprints: &dep_abi_fps,
             };
-            // Also surface the WF string so the cache-miss path can
-            // load/save historical memory stats keyed by the same hash.
-            let wf = cache::weak_fp::compute_weak_fingerprint(&wf_inputs);
-            let (hit, reads) = match c2.lookup_with_pathset_reads(&wf_inputs) {
-                Some((sf, entry, reads)) => (Some((sf, entry)), reads),
-                None => (None, vec![]),
-            };
-            (hit, reads, wf)
+            let details = cache::weak_fp::compute_weak_fingerprint_with_details(&wf_inputs);
+            let wf = details.wf.clone();
+
+            // Persist why-miss snapshot reusing the already-computed WF details (#4).
+            let snap = cache::why_miss::WhyMissSnapshot::from_weak_fp_details(
+                cache::why_miss::WhyMissContext {
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    pkg: pkg_snap,
+                    script: script_snap,
+                    command: cmd2,
+                    tool_path: tp2.to_string_lossy().into_owned(),
+                    env: vec![],
+                    dep_abi_fps,
+                },
+                &details,
+            );
+            cache::why_miss::record_snapshot_lazy(c2.dir(), snap);
+
+            match c2.lookup_with_wf(&wf) {
+                Some((sf, entry, reads)) => (Some((sf, entry)), reads, wf, None),
+                None => {
+                    let stats = cache::task_stats::load(c2.dir(), &wf);
+                    (None, vec![], wf, Some(stats))
+                }
+            }
         })
         .await
-        .unwrap_or((None, vec![], String::new()))
+        .unwrap_or((None, vec![], String::new(), None))
     };
     if let Some((sf, _entry)) = cache_lookup_result {
         // Populate CAS from the stored pathset on cache hit (fire-and-forget).
         // This ensures the artifact store is primed even when all builds are warm,
         // so that deleting node_modules can be restored without re-running install.
         if !stored_pathset_reads.is_empty() {
-            let install_fp = find_latest_install_fingerprint(cache.dir());
-            if let Some(fp) = install_fp {
-                let artifact_dir = cache.dir().join("artifact-packages").join(&fp); // directory, not file
-                crate::artifact_capture::schedule_capture(
-                    stored_pathset_reads,
-                    task.workspace_root.clone(),
-                    artifact_dir,
-                    fp,
-                    Arc::clone(&artifact_store),
-                );
-            }
+            let cache_dir_for_fp = cache.dir().to_path_buf();
+            let ws_for_capture = task.workspace_root.clone();
+            let store_for_capture = Arc::clone(&artifact_store);
+            tokio::task::spawn_blocking(move || {
+                if let Some(fp) = find_latest_install_fingerprint(&cache_dir_for_fp) {
+                    let artifact_dir = cache_dir_for_fp.join("artifact-packages").join(&fp);
+                    crate::artifact_capture::schedule_capture(
+                        stored_pathset_reads,
+                        ws_for_capture,
+                        artifact_dir,
+                        fp,
+                        store_for_capture,
+                    );
+                }
+            });
         }
 
-        // Replay captured output from the original run.
-        if let Some(out) = cache::output_store::read_output(cache.dir(), &sf) {
+        // Replay captured output from the original run off the async worker thread (#7).
+        let cached_out = {
+            let cache_dir = cache.dir().to_path_buf();
+            let sf_clone = sf.clone();
+            tokio::task::spawn_blocking(move || {
+                cache::output_store::read_output(&cache_dir, &sf_clone)
+            })
+            .await
+            .unwrap_or(None)
+        };
+        if let Some(out) = cached_out {
             print!("{}", out.stdout);
             eprint!("{}", out.stderr);
         }
@@ -1180,8 +1240,8 @@ async fn run_single_task_two_phase(
         peak_active.fetch_max(cur, Ordering::Relaxed);
     }
 
-    // Look up historical memory stats for this task.
-    let stats = cache::task_stats::load(cache.dir(), &task_wf);
+    // Historical memory stats were pre-loaded during the Phase 1 spawn_blocking pass (#7).
+    let stats = miss_stats.unwrap_or_default();
     // Tasks with no history get a cold-start slot (max(1, cpu/2) permits);
     // tasks with history reserve against the RSS budget.  Both paths return
     // a MemoryGuard that is released when the subprocess exits.
@@ -1225,11 +1285,17 @@ async fn run_single_task_two_phase(
                     })?;
             captured_stdout = out;
             captured_stderr = err;
-            // Update historical RSS stats for future scheduling decisions.
+            // Update historical RSS stats off the async worker thread (#7),
+            // registering the handle so `run_tasks_two_phase` drains it before returning.
             if !task_wf.is_empty() {
-                let mut stats = cache::task_stats::load(cache.dir(), &task_wf);
-                stats.record(peak_rss);
-                let _ = cache::task_stats::save(cache.dir(), &task_wf, &stats);
+                let cache_dir_stats = cache.dir().to_path_buf();
+                let wf_stats = task_wf.clone();
+                let mut updated_stats = stats;
+                updated_stats.record(peak_rss);
+                let stats_jh = tokio::task::spawn_blocking(move || {
+                    let _ = cache::task_stats::save(&cache_dir_stats, &wf_stats, &updated_stats);
+                });
+                summary.lock().unwrap().blocking_jobs.push(stats_jh);
             }
             current_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             memory_guard.release_with_actual(peak_rss);
@@ -1280,61 +1346,146 @@ async fn run_single_task_two_phase(
     let elapsed_ms = elapsed.as_millis() as u64;
 
     if exit_code == 0 {
-        // Compute ABI fingerprint BEFORE creating the CacheEntry so it can be
-        // stored in entry.abi_fingerprint for downstream inspection.
-        // Uses a plugin-agnostic .d.ts hasher (equivalent to TypeScriptPlugin::abi_fingerprint).
-        let output_files = resolve_output_globs(&task.cwd, &task.output_globs);
-        let abi_fp: Option<String> = if !output_files.is_empty() {
-            compute_abi_fingerprint_from_outputs(&output_files)
-        } else {
-            None
+        // Perform all post-task synchronous disk operations (output glob resolution,
+        // ABI fingerprinting, pkg-abi persistence, post-run WF verification +
+        // pathset/entry recording, output_store write, and CAS capture scheduling)
+        // inside spawn_blocking so Tokio worker threads never block on disk I/O (#7).
+        // The commit phase acquires `summary.abort_gate` for the entire duration
+        // of the ABI/cache writes so checking validity and mutating shared cache
+        // state are mutually exclusive with run cancellation or abort.
+        let cache_post = Arc::clone(&cache);
+        let store_post = Arc::clone(&artifact_store);
+        let cwd_post = task.cwd.clone();
+        let out_globs_post = task.output_globs.clone();
+        let in_globs_post = task.declared_input_globs.clone();
+        let dep_names_post = task.dep_package_names.clone();
+        let pkg_post = task.package_name.clone();
+        let cmd_post = task.command.clone();
+        let ws_post = task.workspace_root.clone();
+        let tp_post = tool_path;
+        let pre_wf = task_wf;
+        let abort_gate = {
+            let s = summary.lock().unwrap();
+            Arc::clone(&s.abort_gate)
         };
-        // Persist to the pkg-abi store so downstream tasks can read it during WF computation.
-        if let Some(fp) = &abi_fp {
-            cache.set_pkg_abi_fp(&task.package_name, fp);
-        }
-
-        let entry = CacheEntry {
-            fingerprint: String::new(),
-            command: task.command.clone(),
-            exit_code: 0,
-            elapsed_ms,
-            cached_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            pathset_reads: vec![],
-            abi_fingerprint: abi_fp,
-        };
-        let pathset_reads_for_capture = pathset.reads.clone();
-        let sf = cache.record(&inputs, pathset, entry).unwrap_or_default();
-
-        // Store captured output for later replay on cache hit.
-        if !sf.is_empty() {
-            cache::output_store::write_output(
-                cache.dir(),
-                &sf,
-                &cache::output_store::TaskOutput {
-                    stdout: captured_stdout.clone(),
-                    stderr: captured_stderr.clone(),
-                    exit_code: 0,
-                },
-            );
-        }
-
-        // ── Observation-driven CAS capture (fire-and-forget) ─────────────
-        if !pathset_reads_for_capture.is_empty() {
-            let install_fp = find_latest_install_fingerprint(cache.dir());
-            if let Some(fp) = install_fp {
-                let artifact_dir = cache.dir().join("artifact-packages").join(&fp); // directory, not file
-                crate::artifact_capture::schedule_capture(
-                    pathset_reads_for_capture,
-                    task.workspace_root.clone(),
-                    artifact_dir,
-                    fp,
-                    Arc::clone(&artifact_store),
-                );
+        let (done_post_tx, done_post_rx) = tokio::sync::oneshot::channel::<bool>();
+        let post_jh = tokio::task::spawn_blocking(move || {
+            if abort_gate.lock().map(|g| *g).unwrap_or(true) {
+                let _ = done_post_tx.send(false);
+                return;
             }
+            let output_files = resolve_output_globs(&cwd_post, &out_globs_post);
+            let abi_fp: Option<String> = if !output_files.is_empty() {
+                compute_abi_fingerprint_from_outputs(&output_files)
+            } else {
+                None
+            };
+
+            let dep_abi_fps: Vec<(String, String)> = dep_names_post
+                .iter()
+                .filter_map(|dep| cache_post.get_pkg_abi_fp(dep).map(|fp| (dep.clone(), fp)))
+                .collect();
+            let post_wf_inputs = cache::WeakFpInputs {
+                command: &cmd_post,
+                tool_path: &tp_post,
+                package_path: &cwd_post,
+                declared_input_globs: &in_globs_post,
+                tracked_env: &[],
+                dep_abi_fingerprints: &dep_abi_fps,
+            };
+            let post_wf = cache::weak_fp::compute_weak_fingerprint(&post_wf_inputs);
+            let pathset_reads_for_capture = pathset.reads.clone();
+
+            // Hold `abort_gate` across the abort check AND all shared cache/ABI
+            // mutations so cancellation cannot interleave between checking and writing.
+            let mut abi_clear_ok = true;
+            let should_schedule_capture = {
+                let Ok(aborted) = abort_gate.lock() else {
+                    let _ = done_post_tx.send(false);
+                    return;
+                };
+                if *aborted {
+                    let _ = done_post_tx.send(false);
+                    return;
+                }
+
+                if let Some(fp) = &abi_fp {
+                    cache_post.set_pkg_abi_fp(&pkg_post, fp);
+                } else if !out_globs_post.is_empty() {
+                    // Only clear a previously stored ABI when this task is
+                    // configured as an output/ABI producer (`!out_globs_post.is_empty()`,
+                    // e.g. `build`) and its authoritative output scan found no
+                    // `.d.ts` files. If clearing the stale ABI fails (for example,
+                    // on a read-only cache directory), fail closed so downstream
+                    // dependents cannot consume the obsolete ABI.
+                    if cache_post.clear_pkg_abi_fp(&pkg_post).is_err() {
+                        abi_clear_ok = false;
+                    }
+                }
+
+                if abi_clear_ok && !pre_wf.is_empty() && post_wf == pre_wf {
+                    let entry = CacheEntry {
+                        fingerprint: String::new(),
+                        command: cmd_post,
+                        exit_code: 0,
+                        elapsed_ms,
+                        cached_at: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        pathset_reads: vec![],
+                        abi_fingerprint: abi_fp,
+                    };
+                    let sf = cache_post
+                        .record_with_wf(&post_wf, pathset, entry)
+                        .unwrap_or_default();
+
+                    if !sf.is_empty() {
+                        cache::output_store::write_output(
+                            cache_post.dir(),
+                            &sf,
+                            &cache::output_store::TaskOutput {
+                                stdout: captured_stdout,
+                                stderr: captured_stderr,
+                                exit_code: 0,
+                            },
+                        );
+                    }
+                }
+
+                abi_clear_ok && !pathset_reads_for_capture.is_empty()
+            };
+
+            if should_schedule_capture {
+                if let Some(fp) = find_latest_install_fingerprint(cache_post.dir()) {
+                    let artifact_dir = cache_post.dir().join("artifact-packages").join(&fp);
+                    crate::artifact_capture::schedule_capture(
+                        pathset_reads_for_capture,
+                        ws_post,
+                        artifact_dir,
+                        fp,
+                        store_post,
+                    );
+                }
+            }
+            let _ = done_post_tx.send(abi_clear_ok);
+        });
+        summary.lock().unwrap().blocking_jobs.push(post_jh);
+        let abi_clear_ok = done_post_rx.await.unwrap_or(false);
+        if !abi_clear_ok {
+            summary.lock().unwrap().record(TaskRecord {
+                package: pkg_name,
+                script: script_name,
+                started_at_ms,
+                elapsed_ms,
+                outcome: TaskOutcome::Failed,
+                dep_packages: task_dep_packages,
+            });
+            return Err(RunError::TaskFailed {
+                package: task.package_name,
+                script: task.script_name,
+                code: 1,
+            });
         }
 
         eprintln!(
@@ -1490,10 +1641,9 @@ async fn run_root_task_two_phase(
     let start = Instant::now();
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = crate::shell::command(&task.command)
-        .current_dir(&task.cwd)
-        .env("PATH", &new_path)
-        .status()
+    let mut cmd = crate::shell::command(&task.command);
+    cmd.current_dir(&task.cwd).env("PATH", &new_path);
+    let status = crate::shell::spawn_and_wait_status(cmd)
         .await
         .map_err(|e| RunError::Spawn {
             package: task.package_name.clone(),
@@ -1697,6 +1847,7 @@ async fn spawn_capture_tee_tracked(
     builder.stderr(std::process::Stdio::piped());
 
     let mut child: Child = builder.spawn()?;
+    let mut pg_guard = crate::shell::ProcessGroupGuard::new(&child);
     let child_pid = child.id().unwrap_or(0);
 
     // Start RSS monitor *before* awaiting the child so it can observe the
@@ -1748,6 +1899,7 @@ async fn spawn_capture_tee_tracked(
     r2?;
 
     let status = child.wait().await?;
+    pg_guard.disarm();
     let code = status.code().unwrap_or(-1);
 
     // Signal the RSS monitor that the process has exited, then collect peak.
@@ -1770,6 +1922,7 @@ async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String
     builder.stderr(std::process::Stdio::piped());
 
     let mut child: Child = builder.spawn()?;
+    let mut pg_guard = crate::shell::ProcessGroupGuard::new(&child);
     let child_pid = child.id().unwrap_or(0);
     let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
     let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
@@ -1816,6 +1969,7 @@ async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String
     r2?;
 
     let status = child.wait().await?;
+    pg_guard.disarm();
     let code = status.code().unwrap_or(-1);
 
     Ok((
@@ -2658,6 +2812,166 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_phase_cache_skips_recording_when_wf_input_mutates_during_run() {
+        use cache::TwoPhaseCache;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let cache_dir = tempdir().unwrap();
+        let pkg_dir = tempdir().unwrap();
+        std::fs::create_dir_all(pkg_dir.path().join("src")).unwrap();
+        let src_file = pkg_dir.path().join("src/index.ts");
+        std::fs::write(&src_file, b"export const x = 1;\n").unwrap();
+
+        let two_phase = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
+
+        #[cfg(not(windows))]
+        let mutate_cmd = format!("echo 'export const x = 2;' > '{}'", src_file.display());
+        #[cfg(windows)]
+        let mutate_cmd = format!("echo export const x = 2; > \"{}\"", src_file.display());
+
+        let task = Task {
+            package_name: "pkg".to_string(),
+            script_name: "build".to_string(),
+            command: mutate_cmd,
+            cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: vec!["src/**/*.ts".to_string()],
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+        let pkg = mk_pkg("pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        run_tasks_two_phase(
+            &dag,
+            vec![task],
+            two_phase,
+            test_plugin(),
+            test_store(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(cache_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.file_name().to_string_lossy().starts_with("sf-")),
+            "must not record an sf-*.entry when a declared WF input mutated mid-run"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_cache_updates_pkg_abi_even_when_wf_mutates_during_run() {
+        use cache::TwoPhaseCache;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let cache_dir = tempdir().unwrap();
+        let pkg_dir = tempdir().unwrap();
+        std::fs::create_dir_all(pkg_dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(pkg_dir.path().join("dist")).unwrap();
+        let src_file = pkg_dir.path().join("src/index.ts");
+        let dts_file = pkg_dir.path().join("dist/index.d.ts");
+        std::fs::write(&src_file, b"export const x = 1;\n").unwrap();
+
+        let two_phase = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
+        two_phase.set_pkg_abi_fp("pkg", "stale-abi-v0");
+
+        #[cfg(not(windows))]
+        let mutate_and_emit_cmd = format!(
+            "echo 'export const x = 2;' > '{}' && echo 'export declare const x: number;' > '{}'",
+            src_file.display(),
+            dts_file.display()
+        );
+        #[cfg(windows)]
+        let mutate_and_emit_cmd = format!(
+            "echo export const x = 2; > \"{}\" && echo export declare const x: number; > \"{}\"",
+            src_file.display(),
+            dts_file.display()
+        );
+
+        let task = Task {
+            package_name: "pkg".to_string(),
+            script_name: "build".to_string(),
+            command: mutate_and_emit_cmd,
+            cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: vec!["src/**/*.ts".to_string()],
+            dep_package_names: Vec::new(),
+            output_globs: vec!["dist/**/*.d.ts".to_string()],
+            env_hash_inputs: Vec::new(),
+        };
+        let pkg = mk_pkg("pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        run_tasks_two_phase(
+            &dag,
+            vec![task],
+            two_phase.clone(),
+            test_plugin(),
+            test_store(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let updated_abi = two_phase.get_pkg_abi_fp("pkg").expect("ABI persisted");
+        assert_ne!(
+            updated_abi, "stale-abi-v0",
+            "downstream dependents must see the newly emitted ABI rather than a stale prior ABI"
+        );
+
+        // Running a non-ABI task (empty `output_globs`, e.g. `typecheck`) on
+        // the same package must preserve the stored ABI rather than clearing it.
+        let typecheck_task = Task {
+            package_name: "pkg".to_string(),
+            script_name: "typecheck".to_string(),
+            command: "echo typecheck-ok".to_string(),
+            cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: vec!["src/**/*.ts".to_string()],
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+        run_tasks_two_phase(
+            &dag,
+            vec![typecheck_task],
+            two_phase.clone(),
+            test_plugin(),
+            test_store(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            two_phase.get_pkg_abi_fp("pkg").as_deref(),
+            Some(updated_abi.as_str()),
+            "task with empty output_globs must not clear package ABI"
+        );
     }
 
     // ── root task fingerprint tests ───────────────────────────────────────────

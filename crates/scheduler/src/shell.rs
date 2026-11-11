@@ -6,11 +6,14 @@
 //! target platform.
 
 /// Build a `tokio::process::Command` that runs `cmd` through the platform shell.
-/// On Unix this is `sh -c <cmd>`. On Windows this is `cmd /c <cmd>`.
+/// On Unix this is `sh -c <cmd>` placed in its own process group (`process_group(0)`)
+/// with `kill_on_drop(true)`. On Windows this is `cmd /c <cmd>` with `kill_on_drop(true)`.
 #[cfg(unix)]
 pub fn command(cmd: &str) -> tokio::process::Command {
     let mut c = tokio::process::Command::new("sh");
     c.arg("-c").arg(cmd);
+    c.process_group(0);
+    c.kill_on_drop(true);
     c
 }
 
@@ -28,7 +31,141 @@ pub fn command(cmd: &str) -> tokio::process::Command {
     let mut c = tokio::process::Command::new("cmd");
     c.arg("/c");
     c.as_std_mut().raw_arg(cmd);
+    c.kill_on_drop(true);
     c
+}
+
+/// Drop guard that ensures a spawned [`tokio::process::Child`] and its entire
+/// process group (on Unix) or process tree (on Windows) are terminated if the
+/// owning future is dropped/cancelled before [`ProcessGroupGuard::wait`] completes.
+pub struct ProcessGroupGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessGroupGuard {
+    /// Create a guard for a newly spawned `child`.
+    pub fn new(child: &tokio::process::Child) -> Self {
+        Self { pid: child.id() }
+    }
+
+    /// Disarm the guard after the child has exited normally.
+    pub fn disarm(&mut self) {
+        self.pid = None;
+    }
+
+    /// Explicitly terminate the process group / tree right now.
+    pub fn kill_tree_sync(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            kill_pid_tree_sync(pid);
+        }
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        self.kill_tree_sync();
+    }
+}
+
+fn kill_pid_tree_sync(pid: u32) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
+
+    // On Unix, first signal the entire process group (`-pid`) via `/bin/kill`
+    // so every process in the group receives SIGKILL atomically.
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    // On Windows, invoke `SystemRoot\System32\taskkill.exe /F /T /PID` FIRST
+    // while `pid` is still alive so the OS kernel's process-tree terminator
+    // can traverse `pid` and all of its descendants before `pid` exits.
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let taskkill = std::path::PathBuf::from(system_root)
+            .join("System32")
+            .join("taskkill.exe");
+        let _ = std::process::Command::new(taskkill)
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    let root = Pid::from_u32(pid);
+    let mut sys = System::new();
+
+    // Retain all discovered ancestor PIDs in deterministic parent-before-child
+    // (topological BFS) order across passes (`ordered_ancestors` is append-only
+    // so parents always precede their children). If an intermediate parent
+    // exits after spawning a child, its PID remains in `ordered_ancestors` so
+    // subsequent passes still discover and terminate that child in parent-first
+    // order.
+    let mut ordered_ancestors: Vec<Pid> = vec![root];
+
+    for _pass in 0..4 {
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            false,
+            ProcessRefreshKind::nothing(),
+        );
+
+        // Expand `ordered_ancestors` in BFS parent-before-child order over the
+        // current process table.
+        let mut idx = 0;
+        while idx < ordered_ancestors.len() {
+            let parent_pid = ordered_ancestors[idx];
+            idx += 1;
+            for (&proc_pid, proc_info) in sys.processes() {
+                if proc_info.parent() == Some(parent_pid) && !ordered_ancestors.contains(&proc_pid)
+                {
+                    ordered_ancestors.push(proc_pid);
+                }
+            }
+        }
+
+        let mut killed_any = false;
+        // Iterate in deterministic parent-before-child order so a parent is
+        // always terminated before its children, preventing it from spawning
+        // any new child after its children are killed.
+        for &target_pid in &ordered_ancestors {
+            if let Some(proc_info) = sys.process(target_pid) {
+                let _ = proc_info
+                    .kill_with(Signal::Kill)
+                    .unwrap_or_else(|| proc_info.kill());
+                killed_any = true;
+            }
+        }
+
+        if !killed_any {
+            break;
+        }
+    }
+}
+
+/// Spawn `cmd`, wait for it to finish, and ensure the entire process group /
+/// tree is terminated if the awaiting future is cancelled or dropped.
+pub async fn spawn_and_wait_status(
+    mut cmd: tokio::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = cmd.spawn()?;
+    let mut guard = ProcessGroupGuard::new(&child);
+    let res = child.wait().await;
+    guard.disarm();
+    res
+}
+
+/// Terminate the process group (on Unix) and reap `child`.
+pub async fn kill_process_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        kill_pid_tree_sync(pid);
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 /// Build a `std::process::Command` that runs `cmd` through the platform shell.
