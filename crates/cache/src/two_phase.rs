@@ -56,7 +56,7 @@ impl TwoPhaseCache {
     /// Look up a hit using a pre-computed weak fingerprint `wf`.
     pub fn lookup_with_wf(&self, wf: &str) -> Option<(String, CacheEntry, Vec<PathBuf>)> {
         for ps in self.pathsets.list(wf) {
-            let sf = compute_strong_fingerprint(wf, &ps.reads);
+            let sf = compute_strong_fingerprint(wf, ps.reads_for_sf());
             if let Some(entry) = self.read_entry(&sf) {
                 return Some((sf, entry, ps.reads));
             }
@@ -85,8 +85,8 @@ impl TwoPhaseCache {
         entry_template: CacheEntry,
     ) -> Result<String> {
         let normalized = pathset.normalized(&[]);
+        let sf = compute_strong_fingerprint(wf, normalized.reads_for_sf());
         self.pathsets.append(wf, normalized.clone())?;
-        let sf = compute_strong_fingerprint(wf, &normalized.reads);
         let mut entry = entry_template;
         entry.fingerprint = sf.clone();
         entry.pathset_reads = normalized.reads;

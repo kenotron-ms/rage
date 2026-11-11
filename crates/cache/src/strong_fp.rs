@@ -32,11 +32,17 @@ pub fn compute_strong_fingerprint(weak_fp: &str, pathset_reads: &[PathBuf]) -> S
     compute_strong_fingerprint_with_cache(weak_fp, pathset_reads, global_digest_cache())
 }
 
+/// Return `true` when `pathset_reads` is strictly sorted (which implies no
+/// duplicates).
+fn is_strictly_sorted(pathset_reads: &[PathBuf]) -> bool {
+    pathset_reads.windows(2).all(|w| w[0] < w[1])
+}
+
 /// Compute the strong fingerprint using an explicit [`DigestCache`].
 ///
-/// When `pathset_reads` is already sorted, deduplicated, and filtered of
-/// `node_modules` (as stored by [`crate::pathset_store::PathsetStore`]), this
-/// avoids allocating and sorting on the lookup fast path.
+/// When `pathset_reads` is already sorted and deduplicated (as stored by
+/// [`crate::pathset_store::PathsetStore`]), this avoids allocating and sorting
+/// on the lookup fast path, while skipping `node_modules` entries inline.
 pub fn compute_strong_fingerprint_with_cache(
     weak_fp: &str,
     pathset_reads: &[PathBuf],
@@ -47,17 +53,11 @@ pub fn compute_strong_fingerprint_with_cache(
     hasher.update(weak_fp.as_bytes());
     hasher.update(b"\n");
 
-    let already_normalized = pathset_reads
-        .windows(2)
-        .all(|w| w[0] < w[1] && !is_node_modules_path(&w[0]) && !is_node_modules_path(&w[1]))
-        && pathset_reads
-            .first()
-            .map(|p| !is_node_modules_path(p))
-            .unwrap_or(true);
-
-    if already_normalized {
+    if is_strictly_sorted(pathset_reads) {
         for p in pathset_reads {
-            hash_single_path(&mut hasher, p.as_path(), digest_cache);
+            if !is_node_modules_path(p) {
+                hash_single_path(&mut hasher, p.as_path(), digest_cache);
+            }
         }
     } else {
         let mut sorted: Vec<&Path> = pathset_reads

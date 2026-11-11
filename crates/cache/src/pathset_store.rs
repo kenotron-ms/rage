@@ -3,7 +3,6 @@
 //! On disk: `{cache_dir}/wf-{WF}.pathsets` is a JSON array of pathsets, where
 //! each pathset is `{ "reads": [...], "writes": [...] }`.
 
-use crate::strong_fp::is_node_modules_path;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use plugin::AllowlistEntry;
@@ -17,29 +16,29 @@ pub struct StoredPathset {
 }
 
 impl StoredPathset {
-    /// Pre-filter (`node_modules` and optional toolchain allowlist) and
+    /// Pre-filter (`allowlist` removed, while preserving `node_modules` paths
+    /// in `reads` so warm-hit artifact CAS capture can discover packages) and
     /// lexicographically sort + deduplicate `reads` and `writes` before
     /// persisting to `pathset_store` so candidate lookups do not repeat
-    /// filtering/sorting on every check.
+    /// sorting/deduplication on every check.
     pub fn normalized(mut self, allowlist: &[AllowlistEntry]) -> Self {
         let allow_set = build_allowlist_globset(allowlist);
-        self.reads.retain(|p| {
-            if is_node_modules_path(p) {
-                return false;
-            }
-            if let Some(set) = &allow_set {
-                if set.is_match(p) {
-                    return false;
-                }
-            }
-            true
-        });
+        if let Some(set) = &allow_set {
+            self.reads.retain(|p| !set.is_match(p));
+        }
         self.reads.sort();
         self.reads.dedup();
 
         self.writes.sort();
         self.writes.dedup();
         self
+    }
+
+    /// Return the read slice for strong-fingerprint evaluation (`compute_strong_fingerprint`
+    /// skips `node_modules` inline in a single linear pass when `self.reads` is
+    /// already sorted).
+    pub fn reads_for_sf(&self) -> &[PathBuf] {
+        &self.reads
     }
 }
 
@@ -197,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn append_pre_filters_node_modules_allowlist_and_sorts() {
+    fn append_pre_filters_allowlist_preserves_node_modules_and_sorts() {
         let (_tmp, store) = make_store();
         let raw = StoredPathset {
             reads: vec![
@@ -221,7 +220,11 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(
             stored[0].reads,
-            vec![PathBuf::from("src/a.ts"), PathBuf::from("src/z.ts")]
+            vec![
+                PathBuf::from("node_modules/typescript/lib/typescript.js"),
+                PathBuf::from("src/a.ts"),
+                PathBuf::from("src/z.ts"),
+            ]
         );
         assert_eq!(
             stored[0].writes,

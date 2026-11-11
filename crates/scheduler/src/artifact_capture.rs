@@ -540,4 +540,75 @@ mod tests {
         let count2 = capture_all_node_modules(ws, &artifact_dir, &store).unwrap();
         assert_eq!(count2, 1);
     }
+
+    #[test]
+    fn record_then_lookup_preserves_pnpm_reads_for_warm_hit_cas_capture() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let store = LocalArtifactStore::new(store_dir.path());
+
+        let tool = ws.path().join("tsc");
+        std::fs::write(&tool, b"tsc-bin").unwrap();
+
+        let src_dir = ws.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src_file = src_dir.join("index.ts");
+        std::fs::write(&src_file, b"import ms from 'ms';\n").unwrap();
+
+        let pnpm_dir = ws
+            .path()
+            .join("node_modules/.pnpm/ms@2.1.3/node_modules/ms");
+        std::fs::create_dir_all(&pnpm_dir).unwrap();
+        std::fs::write(pnpm_dir.join("index.js"), b"// ms").unwrap();
+        std::fs::write(
+            pnpm_dir.join("package.json"),
+            br#"{"name":"ms","version":"2.1.3"}"#,
+        )
+        .unwrap();
+
+        let cache = cache::TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap();
+        let inputs = cache::WeakFpInputs {
+            command: "tsc",
+            tool_path: &tool,
+            package_path: ws.path(),
+            declared_input_globs: &[],
+            tracked_env: &[],
+            dep_abi_fingerprints: &[],
+        };
+        let ps = cache::pathset_store::StoredPathset {
+            reads: vec![
+                src_file.clone(),
+                pnpm_dir.join("index.js"),
+                pnpm_dir.join("package.json"),
+            ],
+            writes: vec![],
+        };
+        let entry = cache::CacheEntry {
+            fingerprint: String::new(),
+            command: "tsc".to_string(),
+            exit_code: 0,
+            elapsed_ms: 1,
+            cached_at: 0,
+            pathset_reads: vec![],
+            abi_fingerprint: None,
+        };
+        cache.record(&inputs, ps, entry).unwrap();
+
+        // Warm hit: lookup_with_pathset_reads returns the stored reads, which
+        // must still include the pnpm node_modules paths so capture_now can
+        // populate the CAS on a warm cache hit.
+        let (_sf, _entry, stored_reads) = cache
+            .lookup_with_pathset_reads(&inputs)
+            .expect("expected warm cache hit");
+
+        let artifact_dir = ws.path().join("artifact-packages/fp-warm");
+        capture_now(&stored_reads, ws.path(), &artifact_dir, "fp-warm", &store).unwrap();
+
+        let pkg_file = artifact_dir.join("ms@2.1.3.json");
+        assert!(
+            pkg_file.exists(),
+            "warm-hit lookup reads must preserve pnpm node_modules paths so CAS capture writes {pkg_file:?}"
+        );
+    }
 }
