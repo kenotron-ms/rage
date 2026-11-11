@@ -1268,17 +1268,20 @@ async fn run_single_task_two_phase(
 
     if exit_code == 0 {
         // Perform all post-task synchronous disk operations (output glob resolution,
-        // ABI fingerprinting, pkg-abi persistence, pathset/entry recording, output_store
-        // write, and CAS capture scheduling) inside spawn_blocking so Tokio worker
-        // threads never block on disk I/O (#7).
+        // ABI fingerprinting, pkg-abi persistence, post-run WF verification +
+        // pathset/entry recording, output_store write, and CAS capture scheduling)
+        // inside spawn_blocking so Tokio worker threads never block on disk I/O (#7).
         let cache_post = Arc::clone(&cache);
         let store_post = Arc::clone(&artifact_store);
         let cwd_post = task.cwd.clone();
         let out_globs_post = task.output_globs.clone();
+        let in_globs_post = task.declared_input_globs.clone();
+        let dep_names_post = task.dep_package_names.clone();
         let pkg_post = task.package_name.clone();
         let cmd_post = task.command.clone();
         let ws_post = task.workspace_root.clone();
-        let wf_post = task_wf;
+        let tp_post = tool_path;
+        let pre_wf = task_wf;
         let _ = tokio::task::spawn_blocking(move || {
             let output_files = resolve_output_globs(&cwd_post, &out_globs_post);
             let abi_fp: Option<String> = if !output_files.is_empty() {
@@ -1290,33 +1293,53 @@ async fn run_single_task_two_phase(
                 cache_post.set_pkg_abi_fp(&pkg_post, fp);
             }
 
-            let entry = CacheEntry {
-                fingerprint: String::new(),
-                command: cmd_post,
-                exit_code: 0,
-                elapsed_ms,
-                cached_at: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                pathset_reads: vec![],
-                abi_fingerprint: abi_fp,
+            let dep_abi_fps: Vec<(String, String)> = dep_names_post
+                .iter()
+                .filter_map(|dep| cache_post.get_pkg_abi_fp(dep).map(|fp| (dep.clone(), fp)))
+                .collect();
+            let post_wf_inputs = cache::WeakFpInputs {
+                command: &cmd_post,
+                tool_path: &tp_post,
+                package_path: &cwd_post,
+                declared_input_globs: &in_globs_post,
+                tracked_env: &[],
+                dep_abi_fingerprints: &dep_abi_fps,
             };
-            let pathset_reads_for_capture = pathset.reads.clone();
-            let sf = cache_post
-                .record_with_wf(&wf_post, pathset, entry)
-                .unwrap_or_default();
+            let post_wf = cache::weak_fp::compute_weak_fingerprint(&post_wf_inputs);
 
-            if !sf.is_empty() {
-                cache::output_store::write_output(
-                    cache_post.dir(),
-                    &sf,
-                    &cache::output_store::TaskOutput {
-                        stdout: captured_stdout,
-                        stderr: captured_stderr,
-                        exit_code: 0,
-                    },
-                );
+            let pathset_reads_for_capture = pathset.reads.clone();
+            // Only record into the two-phase cache when the post-run WF still
+            // matches the pre-run WF; if a WF input (such as the tool binary or
+            // declared source inputs) mutated mid-flight, skip cache recording to
+            // prevent poisoning either WF with a mixed-state artifact.
+            if !pre_wf.is_empty() && post_wf == pre_wf {
+                let entry = CacheEntry {
+                    fingerprint: String::new(),
+                    command: cmd_post,
+                    exit_code: 0,
+                    elapsed_ms,
+                    cached_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    pathset_reads: vec![],
+                    abi_fingerprint: abi_fp,
+                };
+                let sf = cache_post
+                    .record_with_wf(&post_wf, pathset, entry)
+                    .unwrap_or_default();
+
+                if !sf.is_empty() {
+                    cache::output_store::write_output(
+                        cache_post.dir(),
+                        &sf,
+                        &cache::output_store::TaskOutput {
+                            stdout: captured_stdout,
+                            stderr: captured_stderr,
+                            exit_code: 0,
+                        },
+                    );
+                }
             }
 
             if !pathset_reads_for_capture.is_empty() {
@@ -2655,6 +2678,66 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_phase_cache_skips_recording_when_wf_input_mutates_during_run() {
+        use cache::TwoPhaseCache;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let cache_dir = tempdir().unwrap();
+        let pkg_dir = tempdir().unwrap();
+        std::fs::create_dir_all(pkg_dir.path().join("src")).unwrap();
+        let src_file = pkg_dir.path().join("src/index.ts");
+        std::fs::write(&src_file, b"export const x = 1;\n").unwrap();
+
+        let two_phase = Arc::new(TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap());
+
+        #[cfg(not(windows))]
+        let mutate_cmd = format!("echo 'export const x = 2;' > '{}'", src_file.display());
+        #[cfg(windows)]
+        let mutate_cmd = format!("echo export const x = 2; > \"{}\"", src_file.display());
+
+        let task = Task {
+            package_name: "pkg".to_string(),
+            script_name: "build".to_string(),
+            command: mutate_cmd,
+            cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: vec!["src/**/*.ts".to_string()],
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+        let pkg = mk_pkg("pkg", &[]);
+        let dag = build_dag(vec![pkg]).unwrap();
+
+        run_tasks_two_phase(
+            &dag,
+            vec![task],
+            two_phase,
+            test_plugin(),
+            test_store(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(cache_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.file_name().to_string_lossy().starts_with("sf-")),
+            "must not record an sf-*.entry when a declared WF input mutated mid-run"
+        );
     }
 
     // ── root task fingerprint tests ───────────────────────────────────────────
