@@ -761,6 +761,38 @@ pub fn effective_concurrency(max_concurrency: Option<usize>) -> usize {
     })
 }
 
+/// Run-scoped drop guard that sets `aborted` to `true` whenever
+/// `run_tasks_two_phase` exits (including when the outer future is dropped or
+/// cancelled by a caller such as the daemon reconciler), ensuring any in-flight
+/// `spawn_blocking` post-task closure sees `aborted == true` before mutating
+/// shared cache or ABI state.
+struct RunAbortGuard {
+    aborted: Arc<std::sync::atomic::AtomicBool>,
+    disarmed: bool,
+}
+
+impl RunAbortGuard {
+    fn new(aborted: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            aborted,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for RunAbortGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            self.aborted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 pub async fn run_tasks_two_phase(
     dag: &WorkspaceDag,
     tasks: Vec<Task>,
@@ -778,11 +810,12 @@ pub async fn run_tasks_two_phase(
 
     // Build-run summary — collects per-task timings and prints a table at the end.
     let summary = Arc::new(std::sync::Mutex::new(BuildSummary::default()));
-    {
+    let mut run_abort_guard = {
         let mut s = summary.lock().unwrap();
         s.start();
         s.allowed_concurrency = concurrency;
-    }
+        RunAbortGuard::new(Arc::clone(&s.aborted))
+    };
 
     // Layer 2 — memory budget (RAM guard).
     // Reads available system memory at startup; uses historical p75 peak-RSS
@@ -906,6 +939,7 @@ pub async fn run_tasks_two_phase(
 
     // ── Phase 2: package tasks, continuous topological ──────────────────────
     if package_tasks.is_empty() {
+        run_abort_guard.disarm();
         summary.lock().unwrap().print();
         return Ok(());
     }
@@ -1016,6 +1050,9 @@ pub async fn run_tasks_two_phase(
         let _ = jh.await;
     }
     let result = collect_errors(errors);
+    if result.is_ok() {
+        run_abort_guard.disarm();
+    }
     summary.lock().unwrap().print();
     result?;
     Ok(())
@@ -1371,11 +1408,13 @@ async fn run_single_task_two_phase(
             if !aborted_flag.load(Ordering::SeqCst) {
                 if let Some(fp) = &abi_fp {
                     cache_post.set_pkg_abi_fp(&pkg_post, fp);
-                } else {
-                    // If the task no longer produces an ABI (or its inputs
-                    // changed so no ABI outputs matched), clear any stale
-                    // stored ABI so downstream tasks cannot reuse an outdated
-                    // ABI fingerprint.
+                } else if !out_globs_post.is_empty() {
+                    // Only clear a previously stored ABI when this task is
+                    // configured as an output/ABI producer (`!out_globs_post.is_empty()`,
+                    // e.g. `build`) and its authoritative output scan found no
+                    // `.d.ts` files. Non-producing tasks with empty `output_globs`
+                    // (e.g. `typecheck` or `lint`) must leave the package's
+                    // stored ABI untouched.
                     cache_post.clear_pkg_abi_fp(&pkg_post);
                 }
             }
@@ -2877,6 +2916,40 @@ mod tests {
         assert_ne!(
             updated_abi, "stale-abi-v0",
             "downstream dependents must see the newly emitted ABI rather than a stale prior ABI"
+        );
+
+        // Running a non-ABI task (empty `output_globs`, e.g. `typecheck`) on
+        // the same package must preserve the stored ABI rather than clearing it.
+        let typecheck_task = Task {
+            package_name: "pkg".to_string(),
+            script_name: "typecheck".to_string(),
+            command: "echo typecheck-ok".to_string(),
+            cwd: pkg_dir.path().to_path_buf(),
+            sandbox_mode: pipeline_config::SandboxMode::Loose,
+            is_root: false,
+            input_paths: Vec::new(),
+            workspace_root: pkg_dir.path().to_path_buf(),
+            declared_input_globs: vec!["src/**/*.ts".to_string()],
+            dep_package_names: Vec::new(),
+            output_globs: Vec::new(),
+            env_hash_inputs: Vec::new(),
+        };
+        run_tasks_two_phase(
+            &dag,
+            vec![typecheck_task],
+            two_phase.clone(),
+            test_plugin(),
+            test_store(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            two_phase.get_pkg_abi_fp("pkg").as_deref(),
+            Some(updated_abi.as_str()),
+            "task with empty output_globs must not clear package ABI"
         );
     }
 
