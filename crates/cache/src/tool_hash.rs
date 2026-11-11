@@ -5,7 +5,7 @@
 //! BLAKE3 hex digest in-process keyed by `(canonical_path, FileStamp)` so
 //! repeated lookups across hundreds of packages do not re-read `node` / `tsc`.
 
-use crate::digest_cache::FileStamp;
+use crate::digest_cache::{read_and_hash_verified, FileStamp};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
@@ -44,10 +44,10 @@ pub fn hash_tool_binary(path: &Path) -> Option<String> {
         }
     }
 
-    let bytes = std::fs::read(&canonical).ok()?;
-    let hex = blake3::hash(&bytes).to_hex().to_string();
+    let (digest, verified_stamp) = read_and_hash_verified(&canonical, maybe_stamp)?;
+    let hex = digest.to_hex().to_string();
 
-    if let Some(stamp) = maybe_stamp {
+    if let Some(stamp) = verified_stamp {
         if let Ok(mut guard) = tool_hash_cache().write() {
             guard.insert(canonical, (stamp, hex.clone()));
         }

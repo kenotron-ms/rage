@@ -447,8 +447,10 @@ mod tests {
 
     #[tokio::test]
     async fn newer_desired_state_supersedes_slow_in_flight_revision() {
-        // Workspace 1 has a slow build (`sleep 2`) that fails (`exit 1`).
+        // Workspace 1 has a slow build (`sleep 1`) that attempts to write a
+        // sentinel file after sleeping and then fails (`exit 1`).
         let slow_ws = tempfile::tempdir().unwrap();
+        let sentinel = slow_ws.path().join("stale_revision_ran.txt");
         std::fs::write(
             slow_ws.path().join("pnpm-workspace.yaml"),
             b"packages:\n  - 'p'\n",
@@ -460,11 +462,11 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(slow_ws.path().join("p")).unwrap();
-        std::fs::write(
-            slow_ws.path().join("p/package.json"),
-            br#"{"name":"@slow/p","version":"1.0.0","scripts":{"build":"sleep 1 && exit 1"}}"#,
-        )
-        .unwrap();
+        let slow_pkg_json = format!(
+            r#"{{"name":"@slow/p","version":"1.0.0","scripts":{{"build":"sleep 0.6 && echo stale > '{}' && exit 1"}}}}"#,
+            sentinel.display()
+        );
+        std::fs::write(slow_ws.path().join("p/package.json"), slow_pkg_json).unwrap();
 
         // Workspace 2 has a fast build (`echo ok`) that succeeds.
         let fast_ws = tempfile::tempdir().unwrap();
@@ -492,7 +494,7 @@ mod tests {
             script: "build".into(),
             targets: None,
         });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         // Immediately supersede with revision 2 (fast succeeding build)
         h.set_desired(DesiredState {
@@ -511,8 +513,14 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
 
-        // Wait past slow_ws's 1s sleep to verify revision 1 cannot overwrite revision 2
-        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        // Wait past slow_ws's 0.6s sleep to verify revision 1's process group
+        // was killed on cancellation and neither created the delayed sentinel
+        // nor overwrote revision 2 state.
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        assert!(
+            !sentinel.exists(),
+            "cancelled revision 1 subprocess tree must be killed before writing delayed sentinel"
+        );
         let final_state = h.state.lock().await;
         assert_eq!(final_state.revision, 2);
         assert_eq!(

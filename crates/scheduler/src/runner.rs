@@ -365,10 +365,9 @@ async fn run_single_task(
 
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = crate::shell::command(&task.command)
-        .current_dir(&task.cwd)
-        .env("PATH", &new_path)
-        .status()
+    let mut cmd = crate::shell::command(&task.command);
+    cmd.current_dir(&task.cwd).env("PATH", &new_path);
+    let status = crate::shell::spawn_and_wait_status(cmd)
         .await
         .map_err(|e| RunError::Spawn {
             package: task.package_name.clone(),
@@ -441,10 +440,9 @@ async fn run_root_task_legacy(
     let start = Instant::now();
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = crate::shell::command(&task.command)
-        .current_dir(&task.cwd)
-        .env("PATH", &new_path)
-        .status()
+    let mut cmd = crate::shell::command(&task.command);
+    cmd.current_dir(&task.cwd).env("PATH", &new_path);
+    let status = crate::shell::spawn_and_wait_status(cmd)
         .await
         .map_err(|e| RunError::Spawn {
             package: task.package_name.clone(),
@@ -1510,10 +1508,9 @@ async fn run_root_task_two_phase(
     let start = Instant::now();
     let system_path = std::env::var("PATH").unwrap_or_default();
     let new_path = crate::node_path::build_node_path(&task.cwd, &task.workspace_root, &system_path);
-    let status = crate::shell::command(&task.command)
-        .current_dir(&task.cwd)
-        .env("PATH", &new_path)
-        .status()
+    let mut cmd = crate::shell::command(&task.command);
+    cmd.current_dir(&task.cwd).env("PATH", &new_path);
+    let status = crate::shell::spawn_and_wait_status(cmd)
         .await
         .map_err(|e| RunError::Spawn {
             package: task.package_name.clone(),
@@ -1717,6 +1714,7 @@ async fn spawn_capture_tee_tracked(
     builder.stderr(std::process::Stdio::piped());
 
     let mut child: Child = builder.spawn()?;
+    let mut pg_guard = crate::shell::ProcessGroupGuard::new(&child);
     let child_pid = child.id().unwrap_or(0);
 
     // Start RSS monitor *before* awaiting the child so it can observe the
@@ -1768,6 +1766,7 @@ async fn spawn_capture_tee_tracked(
     r2?;
 
     let status = child.wait().await?;
+    pg_guard.disarm();
     let code = status.code().unwrap_or(-1);
 
     // Signal the RSS monitor that the process has exited, then collect peak.
@@ -1790,6 +1789,7 @@ async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String
     builder.stderr(std::process::Stdio::piped());
 
     let mut child: Child = builder.spawn()?;
+    let mut pg_guard = crate::shell::ProcessGroupGuard::new(&child);
     let child_pid = child.id().unwrap_or(0);
     let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
     let mut stderr_pipe = child.stderr.take().expect("stderr pipe");
@@ -1836,6 +1836,7 @@ async fn spawn_capture_tee(mut builder: Command) -> std::io::Result<(i32, String
     r2?;
 
     let status = child.wait().await?;
+    pg_guard.disarm();
     let code = status.code().unwrap_or(-1);
 
     Ok((

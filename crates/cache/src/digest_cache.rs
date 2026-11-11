@@ -3,11 +3,14 @@
 //! Avoids re-reading full file contents on every candidate pathset lookup or
 //! weak-fingerprint glob evaluation by caching `(FileStamp, blake3::Hash)` in
 //! a 64-shard, 128-byte-aligned in-memory table. Unchanged files are validated
-//! via a single metadata stat call instead of reading and hashing their bytes.
+//! via a metadata stat call instead of reading and hashing their bytes, while
+//! race-free open-handle `fstat` verification ensures concurrent modifications
+//! or symlink retargetings never associate a digest with the wrong stamp.
 
 use std::collections::HashMap;
 use std::fs::{self, Metadata};
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 #[cfg(unix)]
@@ -143,6 +146,11 @@ impl DigestCache {
     /// its current [`FileStamp`] via `symlink_metadata` (or target metadata if
     /// `path` is a symlink to a regular file).
     ///
+    /// On a cache miss, opens `path` once, reads its contents from that open
+    /// file handle, and verifies via `file.metadata()` (`fstat`) before and
+    /// after reading — plus a post-read `fs::metadata(path)` check — that the
+    /// file identity and timestamps did not change or retarget during the read.
+    ///
     /// Returns `None` if `path` does not exist or is not a regular file.
     pub fn get_or_hash(&self, path: &Path) -> Option<blake3::Hash> {
         let sym_meta = fs::symlink_metadata(path).ok()?;
@@ -173,10 +181,9 @@ impl DigestCache {
             }
         }
 
-        let bytes = fs::read(path).ok()?;
-        let digest = blake3::hash(&bytes);
+        let (digest, verified_stamp) = read_and_hash_verified(path, maybe_stamp)?;
 
-        if let Some(stamp) = maybe_stamp {
+        if let Some(stamp) = verified_stamp {
             if let Ok(mut guard) = shard.map.write() {
                 guard.insert(path.to_path_buf(), (stamp, digest));
             }
@@ -200,6 +207,49 @@ impl DigestCache {
             }
         }
     }
+}
+
+/// Open `path` once, read and hash its bytes from the open handle, and return
+/// `(digest, verified_stamp)`. `verified_stamp` is `Some(stamp)` only when:
+/// 1. `pre_open_stamp` (if present) equals the open handle's pre-read `fstat` stamp,
+/// 2. the open handle's post-read `fstat` stamp equals its pre-read `fstat` stamp, and
+/// 3. a post-read `fs::metadata(path)` stamp also matches (preventing symlink
+///    retargeting between metadata lookup and open from poisoning the cache).
+pub(crate) fn read_and_hash_verified(
+    path: &Path,
+    pre_open_stamp: Option<FileStamp>,
+) -> Option<(blake3::Hash, Option<FileStamp>)> {
+    let mut file = fs::File::open(path).ok()?;
+    let meta_before = file.metadata().ok()?;
+    if !meta_before.is_file() {
+        return None;
+    }
+    let stamp_before = FileStamp::from_metadata(&meta_before);
+    let mut bytes = Vec::with_capacity(meta_before.len() as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    let digest = blake3::hash(&bytes);
+
+    let verified_stamp = stamp_before.and_then(|sb| {
+        if let Some(pre) = pre_open_stamp {
+            if pre != sb {
+                return None;
+            }
+        }
+        let meta_after = file.metadata().ok()?;
+        let sa = FileStamp::from_metadata(&meta_after)?;
+        if sb != sa {
+            return None;
+        }
+        let path_after = fs::metadata(path).ok()?;
+        let sp = FileStamp::from_metadata(&path_after)?;
+        if sb == sp {
+            Some(sb)
+        } else {
+            None
+        }
+    });
+
+    Some((digest, verified_stamp))
 }
 
 /// Process-wide [`DigestCache`] shared across fingerprint calculations.
@@ -255,6 +305,23 @@ mod tests {
         let cache = DigestCache::new();
         assert!(cache.get_or_hash(dir.path()).is_none());
         assert!(cache.get_or_hash(&dir.path().join("missing.ts")).is_none());
+    }
+
+    #[test]
+    fn read_and_hash_verified_rejects_mismatched_pre_open_stamp() {
+        let dir = TempDir::new().unwrap();
+        let file_a = dir.path().join("target_a.ts");
+        let file_b = dir.path().join("target_b.ts");
+        fs::write(&file_a, b"content-a").unwrap();
+        fs::write(&file_b, b"content-b-different").unwrap();
+
+        let stamp_a = FileStamp::from_target_metadata(&file_a).unwrap();
+        let (digest_b, verified) = read_and_hash_verified(&file_b, stamp_a).unwrap();
+        assert_eq!(digest_b, blake3::hash(b"content-b-different"));
+        assert!(
+            verified.is_none(),
+            "mismatched pre-open stamp (e.g. symlink retargeted from A to B) must not produce a cacheable stamp"
+        );
     }
 
     #[test]

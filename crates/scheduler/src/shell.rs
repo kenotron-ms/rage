@@ -6,11 +6,14 @@
 //! target platform.
 
 /// Build a `tokio::process::Command` that runs `cmd` through the platform shell.
-/// On Unix this is `sh -c <cmd>`. On Windows this is `cmd /c <cmd>`.
+/// On Unix this is `sh -c <cmd>` placed in its own process group (`process_group(0)`)
+/// with `kill_on_drop(true)`. On Windows this is `cmd /c <cmd>` with `kill_on_drop(true)`.
 #[cfg(unix)]
 pub fn command(cmd: &str) -> tokio::process::Command {
     let mut c = tokio::process::Command::new("sh");
     c.arg("-c").arg(cmd);
+    c.process_group(0);
+    c.kill_on_drop(true);
     c
 }
 
@@ -28,7 +31,76 @@ pub fn command(cmd: &str) -> tokio::process::Command {
     let mut c = tokio::process::Command::new("cmd");
     c.arg("/c");
     c.as_std_mut().raw_arg(cmd);
+    c.kill_on_drop(true);
     c
+}
+
+/// Drop guard that ensures a spawned [`tokio::process::Child`] and its entire
+/// process group (on Unix) or process tree (on Windows) are terminated if the
+/// owning future is dropped/cancelled before [`ProcessGroupGuard::wait`] completes.
+pub struct ProcessGroupGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessGroupGuard {
+    /// Create a guard for a newly spawned `child`.
+    pub fn new(child: &tokio::process::Child) -> Self {
+        Self { pid: child.id() }
+    }
+
+    /// Disarm the guard after the child has exited normally.
+    pub fn disarm(&mut self) {
+        self.pid = None;
+    }
+
+    /// Explicitly terminate the process group / tree right now.
+    pub fn kill_tree_sync(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            kill_pid_tree_sync(pid);
+        }
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        self.kill_tree_sync();
+    }
+}
+
+fn kill_pid_tree_sync(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .status();
+    }
+}
+
+/// Spawn `cmd`, wait for it to finish, and ensure the entire process group /
+/// tree is terminated if the awaiting future is cancelled or dropped.
+pub async fn spawn_and_wait_status(
+    mut cmd: tokio::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = cmd.spawn()?;
+    let mut guard = ProcessGroupGuard::new(&child);
+    let res = child.wait().await;
+    guard.disarm();
+    res
+}
+
+/// Terminate the process group (on Unix) and reap `child`.
+pub async fn kill_process_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        kill_pid_tree_sync(pid);
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 /// Build a `std::process::Command` that runs `cmd` through the platform shell.
