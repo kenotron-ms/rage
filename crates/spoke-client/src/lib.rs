@@ -142,11 +142,9 @@ impl SpokeClient {
         let system_path = std::env::var("PATH").unwrap_or_default();
         let node_path =
             scheduler::node_path::build_node_path(&pkg_dir, &self.workspace_root, &system_path);
-        let status = scheduler::shell::command(&item.command)
-            .current_dir(&pkg_dir)
-            .env("PATH", node_path)
-            .status()
-            .await?;
+        let mut cmd = scheduler::shell::command(&item.command);
+        cmd.current_dir(&pkg_dir).env("PATH", node_path);
+        let status = scheduler::shell::spawn_and_wait_status(cmd).await?;
 
         if status.success() {
             Ok(())

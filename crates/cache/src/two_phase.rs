@@ -129,11 +129,23 @@ impl TwoPhaseCache {
 
     // ── ABI fingerprint persistence ──────────────────────────────────────────
 
-    /// Convert a package name to a safe filename component.
+    /// Convert a package name to a separator-free, traversal-safe filename
+    /// inside `{cache_dir}/pkg-abi/`.
     ///
-    /// Replaces `/` and `@` with safe chars: `@lage-run/core` → `_at_lage-run__core`.
+    /// Uses a `pkg_` prefix plus the 64-character BLAKE3 hex digest of `name`
+    /// so arbitrary package strings (including `/`, `\`, `..`, drive prefixes,
+    /// or Windows reserved device names) always map to a single normal file
+    /// component beneath `pkg-abi/`.
     fn pkg_name_to_filename(name: &str) -> String {
-        name.replace('@', "_at_").replace('/', "__")
+        format!("pkg_{}", blake3::hash(name.as_bytes()).to_hex())
+    }
+
+    fn pkg_abi_path(&self, pkg_name: &str) -> PathBuf {
+        let abi_dir = self.dir.join("pkg-abi");
+        let file_name = Self::pkg_name_to_filename(pkg_name);
+        let path = abi_dir.join(&file_name);
+        debug_assert_eq!(path.parent(), Some(abi_dir.as_path()));
+        path
     }
 
     /// Read the stored ABI fingerprint for `pkg_name`.
@@ -141,10 +153,7 @@ impl TwoPhaseCache {
     /// Returns `None` if no fingerprint has been stored yet (e.g. first run or
     /// the package's plugin doesn't support ABI fingerprinting).
     pub fn get_pkg_abi_fp(&self, pkg_name: &str) -> Option<String> {
-        let path = self
-            .dir
-            .join("pkg-abi")
-            .join(Self::pkg_name_to_filename(pkg_name));
+        let path = self.pkg_abi_path(pkg_name);
         std::fs::read_to_string(&path)
             .ok()
             .map(|s| s.trim().to_string())
@@ -156,9 +165,10 @@ impl TwoPhaseCache {
     /// Errors are silently ignored — ABI fingerprint storage is best-effort;
     /// a write failure must never break a build.
     pub fn set_pkg_abi_fp(&self, pkg_name: &str, abi_fp: &str) {
-        let dir = self.dir.join("pkg-abi");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(Self::pkg_name_to_filename(pkg_name));
+        let path = self.pkg_abi_path(pkg_name);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let _ = std::fs::write(&path, abi_fp);
     }
 
@@ -170,10 +180,14 @@ impl TwoPhaseCache {
     /// on a read-only cache directory) so callers can fail closed rather than
     /// allowing downstream tasks to consume a stale ABI.
     pub fn clear_pkg_abi_fp(&self, pkg_name: &str) -> std::io::Result<()> {
-        let path = self
-            .dir
-            .join("pkg-abi")
-            .join(Self::pkg_name_to_filename(pkg_name));
+        let abi_dir = self.dir.join("pkg-abi");
+        let path = self.pkg_abi_path(pkg_name);
+        if path.parent() != Some(abi_dir.as_path()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid package ABI path",
+            ));
+        }
         match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -392,5 +406,30 @@ mod tests {
             .unwrap();
         assert!(cache.lookup(&inputs_a).is_some());
         assert!(cache.lookup(&inputs_b).is_none());
+    }
+
+    #[test]
+    fn clear_pkg_abi_fp_cannot_traverse_outside_pkg_abi_dir() {
+        let cache_dir = tempdir().unwrap();
+        let sentinel = cache_dir.path().join("outside.txt");
+        std::fs::write(&sentinel, b"keep-me").unwrap();
+
+        let cache = TwoPhaseCache::with_dir(cache_dir.path().to_path_buf()).unwrap();
+        for name in [
+            "../outside.txt",
+            r"..\outside.txt",
+            r"..\..\outside.txt",
+            r"C:\outside.txt",
+        ] {
+            cache.set_pkg_abi_fp(name, "abi-123");
+            assert_eq!(cache.get_pkg_abi_fp(name).as_deref(), Some("abi-123"));
+            cache.clear_pkg_abi_fp(name).unwrap();
+            assert!(cache.get_pkg_abi_fp(name).is_none());
+        }
+
+        assert!(
+            sentinel.exists(),
+            "clear_pkg_abi_fp must never delete files outside pkg-abi/"
+        );
     }
 }
